@@ -754,6 +754,7 @@ mod tests {
                 token_usage: Some(TokenUsage {
                     input_tokens: 10,
                     cached_input_tokens: 2,
+                    cache_creation_input_tokens: 0,
                     cache_write_input_tokens: 0,
                     output_tokens: 3,
                     reasoning_output_tokens: 1,
@@ -766,6 +767,7 @@ mod tests {
                 token_usage: Some(TokenUsage {
                     input_tokens: 7,
                     cached_input_tokens: 1,
+                    cache_creation_input_tokens: 0,
                     cache_write_input_tokens: 0,
                     output_tokens: 2,
                     reasoning_output_tokens: 0,
@@ -788,6 +790,7 @@ mod tests {
             Some(TokenUsage {
                 input_tokens: 17,
                 cached_input_tokens: 3,
+                cache_creation_input_tokens: 0,
                 cache_write_input_tokens: 0,
                 output_tokens: 5,
                 reasoning_output_tokens: 1,
