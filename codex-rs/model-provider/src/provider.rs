@@ -752,6 +752,13 @@ mod tests {
                 provider_for("https://example.test/v1".to_string()),
                 RemoteCompactionSupport::Unsupported,
             ),
+            (
+                ModelProviderInfo {
+                    wire_api: WireApi::Chat,
+                    ..ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+                },
+                RemoteCompactionSupport::Unsupported,
+            ),
         ];
 
         for (provider_info, expected) in cases {
