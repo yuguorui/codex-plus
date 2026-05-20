@@ -99,6 +99,7 @@ use codex_mcp::McpRuntime;
 use codex_mcp::McpRuntimeContext;
 use codex_mcp::McpRuntimeInput;
 use codex_mcp::McpToolStartup;
+use codex_model_provider_info::WireApi;
 use codex_models_manager::manager::ModelsManager;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_models_manager::manager::SharedModelsManager;
@@ -181,6 +182,7 @@ use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputArgs;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_rmcp_client::ElicitationResponse;
+use codex_rollout::should_persist_response_item;
 use codex_rollout::state_db;
 use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::ThreadStartedTraceMetadata;
@@ -216,6 +218,7 @@ use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::task_tracker::TaskTrackerToken;
 use toml::Value as TomlValue;
 use tracing::Instrument;
 use tracing::debug;
@@ -624,6 +627,21 @@ pub(crate) fn assign_missing_item_id(
         && let Some(prefix) = item.id_prefix()
     {
         item.set_id(Some(context_ids.next_item(prefix)));
+    }
+}
+
+/// Selects the tool-pair barrier contract for the turn's wire API.
+///
+/// Responses accepts context items between a call and its output, so it keeps the original
+/// context-only barrier. Chat and Anthropic require adjacent results, so they defer every item
+/// that would split the assistant tool-call message from its outputs.
+pub(crate) fn tool_pair_barrier_policy(
+    turn_context: &TurnContext,
+) -> crate::context_manager::ToolPairBarrierPolicy {
+    use crate::context_manager::ToolPairBarrierPolicy;
+    match turn_context.provider.info().wire_api {
+        WireApi::Responses => ToolPairBarrierPolicy::ContextOnly,
+        WireApi::Chat | WireApi::Anthropic => ToolPairBarrierPolicy::AdjacentResults,
     }
 }
 
@@ -2045,6 +2063,7 @@ impl Session {
             reference_context_item,
             turn_attribution,
             world_state_baseline,
+            tool_pair_repair_report,
             window_number,
             first_window_id,
             previous_window_id,
@@ -2135,6 +2154,15 @@ impl Session {
                 },
             );
             state.set_previous_turn_settings(previous_turn_settings.clone());
+        }
+        if !tool_pair_repair_report.is_empty() {
+            self.send_event(
+                turn_context,
+                EventMsg::Warning(WarningEvent {
+                    message: tool_pair_repair_report.warning_message(),
+                }),
+            )
+            .await;
         }
         let prefix_tokens = if matches!(
             turn_context.config.model_auto_compact_token_limit_scope,
@@ -4278,7 +4306,7 @@ impl Session {
         model_info: &ModelInfo,
         items: Vec<ResponseItemEnvelope>,
         image_preparations: Vec<ImagePreparationMetadata>,
-    ) -> u64 {
+    ) -> crate::context_manager::BarrierAwareRecordOutcome {
         // Ordinary history persistence retains its existing best-effort behavior.
         self.record_prepared_items(
             turn_context,
@@ -4302,7 +4330,7 @@ impl Session {
         mut items: Vec<ResponseItemEnvelope>,
         image_preparations: Vec<ImagePreparationMetadata>,
         realtime: Option<RealtimeRecord<'_>>,
-    ) -> std::io::Result<u64> {
+    ) -> std::io::Result<crate::context_manager::BarrierAwareRecordOutcome> {
         // Save the originating history budget for replay.
         // Preserve any existing tool-specific override.
         let policy: codex_utils_output_truncation::TruncationPolicy =
@@ -4341,105 +4369,126 @@ impl Session {
         } else {
             None
         };
-        let mut response_items = items
-            .iter()
-            .map(|envelope| envelope.item.clone())
-            .collect::<Vec<_>>();
-        let mut review_write = None;
-        {
-            let mut state = self.state.lock().await;
-            let pending_orders = turn_context
-                .extension_data
-                .get::<retained_context::PendingAssistantMessageOrders>();
-            for envelope in &mut items {
-                if envelope
-                    .metadata
-                    .as_ref()
-                    .is_some_and(|metadata| metadata.compaction_output)
-                {
-                    continue;
-                }
-                if matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "assistant")
-                    || matches!(&envelope.item, ResponseItem::FunctionCall { .. })
-                    || crate::context::is_user_authorization_message(&envelope.item)
-                {
-                    let message_order = pending_orders.as_ref().and_then(|orders| {
-                        orders
-                            .0
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .remove(envelope.item.id()?.as_str())
-                    });
-                    // Preserve input acceptance and source-message start order.
-                    // Synthetic messages still receive their order here.
-                    envelope
+        let (outcome, review_write) = if realtime.is_some() {
+            let mut response_items = items
+                .iter()
+                .map(|envelope| envelope.item.clone())
+                .collect::<Vec<_>>();
+            {
+                let mut state = self.state.lock().await;
+                let pending_orders = turn_context
+                    .extension_data
+                    .get::<retained_context::PendingAssistantMessageOrders>();
+                for envelope in &mut items {
+                    if envelope
                         .metadata
-                        .get_or_insert_default()
-                        .user_input_order
-                        .get_or_insert_with(|| {
-                            message_order.unwrap_or_else(|| state.history.reserve_input_order())
+                        .as_ref()
+                        .is_some_and(|metadata| metadata.compaction_output)
+                    {
+                        continue;
+                    }
+                    if matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "assistant")
+                        || matches!(&envelope.item, ResponseItem::FunctionCall { .. })
+                        || crate::context::is_user_authorization_message(&envelope.item)
+                    {
+                        let message_order = pending_orders.as_ref().and_then(|orders| {
+                            orders
+                                .0
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .remove(envelope.item.id()?.as_str())
                         });
+                        // Preserve input acceptance and source-message start order.
+                        // Synthetic messages still receive their order here.
+                        envelope
+                            .metadata
+                            .get_or_insert_default()
+                            .user_input_order
+                            .get_or_insert_with(|| {
+                                message_order.unwrap_or_else(|| state.history.reserve_input_order())
+                            });
+                    }
                 }
-            }
-            if let Some(RealtimeRecord::Handoff(prepared)) = &realtime {
-                let envelope = if let Some(cached) = &prepared.cached_envelope {
-                    cached.clone()
-                } else {
+                if let Some(RealtimeRecord::Handoff(prepared)) = &realtime {
+                    let envelope = if let Some(cached) = &prepared.cached_envelope {
+                        cached.clone()
+                    } else {
+                        let [envelope] = items.as_slice() else {
+                            return Err(std::io::Error::other(
+                                "realtime admission must contain one input",
+                            ));
+                        };
+                        envelope.clone()
+                    };
+                    let envelope = self
+                        .record_realtime_handoff_input(
+                            &mut state,
+                            &turn_context.sub_id,
+                            envelope,
+                            prepared,
+                            early_settings.take(),
+                            policy,
+                        )
+                        .await?;
+                    if initial_settings_pending {
+                        state.take_initial_settings_pending();
+                    }
+                    response_items = vec![envelope.item.clone()];
+                    items = vec![envelope];
+                } else if matches!(&realtime, Some(RealtimeRecord::Chunk)) {
                     let [envelope] = items.as_slice() else {
                         return Err(std::io::Error::other(
-                            "realtime admission must contain one input",
+                            "realtime chunk must contain one input",
                         ));
                     };
-                    envelope.clone()
-                };
-                let envelope = self
-                    .record_realtime_handoff_input(
-                        &mut state,
-                        &turn_context.sub_id,
-                        envelope,
-                        prepared,
-                        early_settings.take(),
-                        policy,
-                    )
-                    .await?;
-                response_items = vec![envelope.item.clone()];
-                items = vec![envelope];
-            } else if matches!(&realtime, Some(RealtimeRecord::Chunk)) {
-                let [envelope] = items.as_slice() else {
-                    return Err(std::io::Error::other(
-                        "realtime chunk must contain one input",
-                    ));
-                };
-                let envelope = self
-                    .record_realtime_chunk_input(
-                        &mut state,
-                        envelope.clone(),
-                        early_settings.take(),
-                        policy,
-                    )
-                    .await?;
-                response_items = vec![envelope.item];
-            } else {
+                    let envelope = self
+                        .record_realtime_chunk_input(
+                            &mut state,
+                            envelope.clone(),
+                            early_settings.take(),
+                            policy,
+                        )
+                        .await?;
+                    if initial_settings_pending {
+                        state.take_initial_settings_pending();
+                    }
+                    response_items = vec![envelope.item];
+                } else {
+                    state
+                        .pending_audio_duration_ids
+                        .extend(file_audio::file_ids(&items).cloned());
+                    state.history.record_annotated_items(&mut items, policy);
+                }
+                state
+                    .current_time_reminder
+                    .note_recorded_items(&response_items);
+            }
+            (
+                crate::context_manager::BarrierAwareRecordOutcome {
+                    sealed: items.clone(),
+                    flushed: Vec::new(),
+                },
+                None,
+            )
+        } else {
+            let (outcome, write) = self
+                .record_prepared_items_through_barrier(
+                    turn_context,
+                    &items,
+                    policy,
+                    /*track_review_write*/ true,
+                )
+                .await;
+            {
+                let mut state = self.state.lock().await;
                 state
                     .pending_audio_duration_ids
                     .extend(file_audio::file_ids(&items).cloned());
-                let ((), token) = self.record_review_evidence(&mut state.history, |history| {
-                    history.record_annotated_items(&mut items, policy);
-                });
-                review_write = token;
             }
-            if initial_settings_pending {
-                state.take_initial_settings_pending();
-            }
-            state
-                .current_time_reminder
-                .note_recorded_items(&response_items);
-        }
-        let recorded_through = items
-            .iter()
-            .filter_map(|item| item.metadata.as_ref()?.history_sequence)
-            .max()
-            .unwrap_or_default();
+            (outcome, write)
+        };
+        let sealed_items = &outcome.sealed;
+
         for image in image_preparations {
             self.services
                 .analytics_events_client
@@ -4467,10 +4516,12 @@ impl Session {
             } else {
                 early_settings
             };
+            // Only recorded items reach the rollout; items the barrier queued persist when a later
+            // call closes the barrier and flushes them.
             let rollout_items = initial_settings
                 .into_iter()
                 .map(RolloutItem::EventMsg)
-                .chain(items.into_iter().map(RolloutItem::ResponseItem))
+                .chain(sealed_items.iter().cloned().map(RolloutItem::ResponseItem))
                 .collect::<Vec<_>>();
             if let Some(write) = review_write {
                 if let Some(recording) =
@@ -4484,16 +4535,234 @@ impl Session {
             drop(settings_guard);
         }
         drop(early_guard);
+        let recorded_response_items = sealed_items
+            .iter()
+            .filter(|envelope| should_persist_response_item(&envelope.item))
+            .map(|envelope| envelope.item.clone())
+            .collect::<Vec<_>>();
         if turn_context.config.memories.disable_on_external_context
-            && let Some(item) = response_items
+            && let Some(item) = recorded_response_items
                 .iter()
                 .find(|item| matches!(item, ResponseItem::FunctionCallOutput { call_id: None, .. }))
         {
             mark_thread_memory_mode_polluted_if_external_context(self, turn_context, item).await;
         }
+        self.send_raw_response_items(&turn_context.sub_id, &recorded_response_items)
+            .await;
+        Ok(outcome)
+    }
+
+    /// Records prepared items through the tool-pair write barrier and returns what was recorded.
+    ///
+    /// Returns `(everything recorded, including already-deferred items that this batch
+    /// flushed)`. Callers persist the first list and surface the second to observers.
+    async fn record_prepared_items_through_barrier(
+        &self,
+        turn_context: &TurnContext,
+        items: &[ResponseItemEnvelope],
+        policy: codex_utils_output_truncation::TruncationPolicy,
+        track_review_write: bool,
+    ) -> (
+        crate::context_manager::BarrierAwareRecordOutcome,
+        Option<TaskTrackerToken>,
+    ) {
+        let mut slots: Vec<Option<ResponseItemEnvelope>> =
+            items.iter().cloned().map(Some).collect();
+        let turn_active = self.turn_active.load(std::sync::atomic::Ordering::Acquire);
+        let barrier_policy = tool_pair_barrier_policy(turn_context);
+        let mut state = self.state.lock().await;
+        // Responses accepts context between a call and its output. Keep the historical
+        // out-of-turn behavior for it: writes made while no turn is running retain their
+        // natural order instead of waiting behind calls that no turn will settle.
+        if !turn_active
+            && barrier_policy == crate::context_manager::ToolPairBarrierPolicy::ContextOnly
+        {
+            for slot in slots.iter_mut().flatten() {
+                self.assign_user_input_order_locked(turn_context, &mut state, slot);
+            }
+            let (recorded, write) = if track_review_write {
+                self.record_review_evidence(&mut state.history, |history| {
+                    let mut recorded = Vec::new();
+                    for slot in slots.iter_mut().flatten() {
+                        history.record_annotated_items(std::slice::from_mut(slot), policy);
+                        recorded.push(slot.clone());
+                    }
+                    recorded
+                })
+            } else {
+                let mut recorded = Vec::new();
+                for slot in slots.iter_mut().flatten() {
+                    state
+                        .history
+                        .record_annotated_items(std::slice::from_mut(slot), policy);
+                    recorded.push(slot.clone());
+                }
+                (recorded, None)
+            };
+            let recorded_items = recorded
+                .iter()
+                .map(|envelope| envelope.item.clone())
+                .collect::<Vec<_>>();
+            state
+                .current_time_reminder
+                .note_recorded_items(&recorded_items);
+            return (
+                crate::context_manager::BarrierAwareRecordOutcome {
+                    sealed: recorded,
+                    flushed: Vec::new(),
+                },
+                write,
+            );
+        }
+        for envelope in slots.iter_mut().flatten() {
+            self.assign_user_input_order_locked(turn_context, &mut state, envelope);
+        }
+        let (mut outcome, write) = if track_review_write {
+            self.record_review_evidence(&mut state.history, |history| {
+                history.record_annotated_items_with_barrier_policy(
+                    &mut slots,
+                    policy,
+                    barrier_policy,
+                )
+            })
+        } else {
+            (
+                state.history.record_annotated_items_with_barrier_policy(
+                    &mut slots,
+                    policy,
+                    barrier_policy,
+                ),
+                None,
+            )
+        };
+        // No running turn can deliver the missing results for calls that are still open. If
+        // this out-of-turn batch queued context behind those calls, close them (real outputs in
+        // the batch win because they were recorded first) and release the context instead of
+        // leaving an out-of-turn writer stranded behind a barrier that will never advance. A
+        // batch that only records a call keeps the barrier open for its later output.
+        let deferred_by_this_batch = slots.iter().any(Option::is_none);
+        if !turn_active && deferred_by_this_batch {
+            let flushed = state.history.flush_tool_pair_barrier(policy);
+            outcome.sealed.extend(flushed.recorded);
+        }
+        // Only items that reached the model window count as recorded for reminder dedup;
+        // deferred items are noted when their flush records them.
+        let recorded_response_items: Vec<ResponseItem> = outcome
+            .sealed
+            .iter()
+            .map(|envelope| envelope.item.clone())
+            .collect();
+        state
+            .current_time_reminder
+            .note_recorded_items(&recorded_response_items);
+        (outcome, write)
+    }
+
+    /// Stamps `user_input_order` on assistant messages, tool calls and user authorization
+    /// messages so resume keeps acceptance order. Shared by the barrier and passthrough paths.
+    fn assign_user_input_order_locked(
+        &self,
+        turn_context: &TurnContext,
+        state: &mut crate::state::SessionState,
+        envelope: &mut ResponseItemEnvelope,
+    ) {
+        if envelope
+            .metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.compaction_output)
+        {
+            return;
+        }
+        if !(matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "assistant")
+            || matches!(&envelope.item, ResponseItem::FunctionCall { .. })
+            || crate::context::is_user_authorization_message(&envelope.item))
+        {
+            return;
+        }
+        let pending_orders = turn_context
+            .extension_data
+            .get::<retained_context::PendingAssistantMessageOrders>();
+        let message_order = pending_orders.as_ref().and_then(|orders| {
+            orders
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(envelope.item.id()?.as_str())
+        });
+        // Preserve input acceptance and source-message start order.
+        // Synthetic messages still receive their order here.
+        envelope
+            .metadata
+            .get_or_insert_default()
+            .user_input_order
+            .get_or_insert_with(|| {
+                message_order.unwrap_or_else(|| state.history.reserve_input_order())
+            });
+    }
+
+    /// Closes abandoned tool pairs before a hard context boundary is recorded.
+    ///
+    /// Only Chat and Anthropic require adjacent results. A prompt or inter-agent message is
+    /// admitted at a point where no live tool can deliver a result. If a call is nevertheless
+    /// open for those wires, its future is gone: append the canonical abort result first so the
+    /// boundary never splits a call from its output. Responses accepts context between a call and
+    /// its output, so it keeps the original ordering.
+    async fn close_abandoned_tool_pairs(&self, turn_context: &TurnContext, boundary: &str) {
+        if tool_pair_barrier_policy(turn_context)
+            == crate::context_manager::ToolPairBarrierPolicy::ContextOnly
+        {
+            return;
+        }
+        let has_open_tool_calls = {
+            let state = self.state.lock().await;
+            state.history.has_open_tool_calls()
+        };
+        if has_open_tool_calls {
+            tracing::warn!(
+                turn_id = %turn_context.sub_id,
+                boundary,
+                "context arrived with open tool calls; closing them first"
+            );
+            self.flush_tool_pair_barrier(turn_context).await;
+        }
+    }
+
+    /// Closes abandoned tool calls and flushes deferred context, persisting the result.
+    ///
+    /// Called at boundaries that tool outputs cannot cross (start of a turn, interrupt
+    /// handling) so user context admitted during a stuck or aborted tool call is never lost.
+    /// Returns the number of recorded items, or zero when nothing was pending.
+    pub(super) async fn flush_tool_pair_barrier(&self, turn_context: &TurnContext) -> u64 {
+        let policy: codex_utils_output_truncation::TruncationPolicy =
+            turn_context.model_info().truncation_policy.into();
+        let flushed = {
+            let mut state = self.state.lock().await;
+            if !state.history.has_open_tool_calls() && !state.history.has_deferred_user_context() {
+                return 0;
+            }
+            let flushed = state.history.flush_tool_pair_barrier(policy).recorded;
+            let items: Vec<ResponseItem> = flushed
+                .iter()
+                .map(|envelope| envelope.item.clone())
+                .collect();
+            state.current_time_reminder.note_recorded_items(&items);
+            flushed
+        };
+        let rollout_items: Vec<RolloutItem> = flushed
+            .iter()
+            .filter(|envelope| should_persist_response_item(&envelope.item))
+            .cloned()
+            .map(RolloutItem::ResponseItem)
+            .collect();
+        self.persist_rollout_items(&rollout_items).await;
+        let response_items: Vec<ResponseItem> = flushed
+            .iter()
+            .filter(|envelope| should_persist_response_item(&envelope.item))
+            .map(|envelope| envelope.item.clone())
+            .collect();
         self.send_raw_response_items(&turn_context.sub_id, &response_items)
             .await;
-        Ok(recorded_through)
+        response_items.len() as u64
     }
 
     pub(crate) async fn record_step_world_state_if_changed(
@@ -4999,7 +5268,6 @@ impl Session {
             )
             .await;
         let mut response_item = prepared.remove(0);
-        let items = [response_item.item.clone()];
         // A send confirmed after the pending snapshot must not reach the rollout
         // before this boundary; older readers assign deliveries by physical order.
         let boundary = self
@@ -5008,6 +5276,12 @@ impl Session {
             .acquire()
             .await
             .unwrap_or_else(|_| unreachable!("communication boundary remains open"));
+        // The message also must not split an open call from its output. It is normally
+        // admitted at a safe pending-input drain point; if a call is still open here, its
+        // output can no longer arrive before this boundary, so close the pair first instead
+        // of deferring the message behind the communication metadata.
+        self.close_abandoned_tool_pairs(turn_context, "inter_agent_message")
+            .await;
         // Older readers assign delivered assistant messages to the next physical
         // communication boundary, so persist earlier confirmed sends first.
         let (order, pending) = {
@@ -5026,24 +5300,37 @@ impl Session {
         }
         let mut delivery = communication.delivery.as_ref();
         let mut result_write = None;
-        {
-            let mut state = self.state.lock().await;
-            state.current_time_reminder.note_recorded_items(&items);
-            state.history.record_annotated_items(
-                std::slice::from_mut(&mut response_item),
+        let (outcome, _) = self
+            .record_prepared_items_through_barrier(
+                turn_context,
+                std::slice::from_ref(&response_item),
                 model_info.truncation_policy.into(),
+                /*track_review_write*/ false,
+            )
+            .await;
+        // Record the item and its sender at the history write, before shutdown can cancel persistence.
+        self.services
+            .rollout_thread_trace
+            .record_history_item_accepted(
+                &turn_context.sub_id,
+                &response_item.item,
+                communication
+                    .delivery
+                    .as_ref()
+                    .and_then(|d| d.source_tool_call_id.as_ref()),
             );
-            // Record the item and its sender at the history write, before shutdown can cancel persistence.
-            self.services
-                .rollout_thread_trace
-                .record_history_item_accepted(
-                    &turn_context.sub_id,
-                    &response_item.item,
-                    communication
-                        .delivery
-                        .as_ref()
-                        .and_then(|d| d.source_tool_call_id.as_ref()),
-                );
+        // Items the barrier released were admitted before this message, so they must stay
+        // physically earlier in the rollout than the communication boundary they precede.
+        // A single-message batch can only flush from its prefix, never from the middle.
+        let (flushed_items, sealed_items) = outcome.sealed.split_at(outcome.flushed.len());
+        if !flushed_items.is_empty() {
+            let flushed_rollout: Vec<RolloutItem> = flushed_items
+                .iter()
+                .filter(|envelope| should_persist_response_item(&envelope.item))
+                .cloned()
+                .map(RolloutItem::ResponseItem)
+                .collect();
+            self.persist_rollout_items(&flushed_rollout).await;
         }
         if let Some(delivery) = delivery.take() {
             result_write = delivery.consumed(self.thread_id);
@@ -5063,12 +5350,21 @@ impl Session {
             write.confirm();
         }
         drop(boundary);
-        let [item] = items;
-        self.send_event(
-            turn_context,
-            EventMsg::RawResponseItem(RawResponseItemEvent { item }),
-        )
-        .await;
+        let flushed_response_items: Vec<ResponseItem> = flushed_items
+            .iter()
+            .map(|envelope| envelope.item.clone())
+            .collect();
+        self.send_raw_response_items(&turn_context.sub_id, &flushed_response_items)
+            .await;
+        for envelope in sealed_items {
+            self.send_event(
+                turn_context,
+                EventMsg::RawResponseItem(RawResponseItemEvent {
+                    item: envelope.item.clone(),
+                }),
+            )
+            .await;
+        }
     }
 
     async fn maybe_warn_on_server_model_mismatch(
@@ -6310,6 +6606,17 @@ impl Session {
         let mut user_message_item = UserMessageItem::new(&display_input);
         // Emit full prompt telemetry only for inputs selected for recording.
         turn_context.session_telemetry.user_prompt(&display_input);
+        // Persist the user message to history, but emit the turn item from `UserInput` so
+        // UI-only `text_elements` are preserved. `ResponseItem::Message` does not carry
+        // those spans, and `record_response_item_and_emit_turn_item` would drop them.
+        //
+        // A prompt is admitted at a turn boundary, so no live tool call may still be waiting
+        // for its result. If one is, its future is already gone: close it with the canonical
+        // abort result before appending the prompt, otherwise the prompt would either split
+        // the pair (invalid Chat history) or be deferred while the UI already reports it as
+        // committed.
+        self.close_abandoned_tool_pairs(turn_context, "user_prompt")
+            .await;
         let (mut response_item, user_image_content_indices) =
             Self::response_item_from_user_input_with_image_positions(input);
         if let Some(uuid) = metadata.response_item_uuid {
@@ -6340,12 +6647,15 @@ impl Session {
                 }],
             )
             .await;
+        let prompt_item_id = prepared_items
+            .first()
+            .and_then(|envelope| envelope.item.id().cloned());
         apply_prepared_image_file_ids(
             &mut user_message_item,
             &prepared_items,
             &user_image_content_indices,
         );
-        if let Err(error) = self
+        let outcome = match self
             .record_prepared_items(
                 turn_context,
                 model_info,
@@ -6355,11 +6665,14 @@ impl Session {
             )
             .await
         {
-            if let Some(prepared) = realtime {
-                self.reject_realtime_handoff(prepared.id).await;
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if let Some(prepared) = realtime {
+                    self.reject_realtime_handoff(prepared.id).await;
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
+        };
         if metadata.origin.is_user() {
             self.services
                 .analytics_events_client
@@ -6367,6 +6680,32 @@ impl Session {
         }
         // Existing clients use this accepted input item to identify delegated turns.
         // The realtime receipt adds provenance without changing that live contract.
+        // The prompt must be in the model window before the UI is told it was committed. If a
+        // late writer queued it behind the barrier, release it now so the transcript order and
+        // the model history agree. Responses accepts the prompt between a call and its output,
+        // so it keeps the historical deferred behavior instead of synthesizing an abort.
+        let prompt_was_recorded = prompt_item_id.is_none_or(|prompt_id| {
+            outcome
+                .sealed
+                .iter()
+                .any(|envelope| envelope.item.id() == Some(&prompt_id))
+        });
+        if !prompt_was_recorded {
+            if tool_pair_barrier_policy(turn_context)
+                == crate::context_manager::ToolPairBarrierPolicy::AdjacentResults
+            {
+                tracing::warn!(
+                    turn_id = %turn_context.sub_id,
+                    "user prompt was deferred by the tool-pair barrier; flushing before emitting it"
+                );
+                self.flush_tool_pair_barrier(turn_context).await;
+            } else {
+                tracing::debug!(
+                    turn_id = %turn_context.sub_id,
+                    "user prompt deferred until the open tool call records its output"
+                );
+            }
+        }
         user_message_item.client_id = client_id;
         let turn_item = TurnItem::UserMessage(user_message_item);
         self.emit_turn_item_started(turn_context, &turn_item).await;

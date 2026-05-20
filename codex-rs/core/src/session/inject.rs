@@ -257,13 +257,20 @@ impl Session {
         let (annotated_items, image_preparations) = self
             .prepare_conversation_items_for_history(turn_context, model_info, items)
             .await;
-        self.record_prepared_conversation_items(
-            turn_context,
-            model_info,
-            annotated_items,
-            image_preparations,
-        )
-        .await
+        let outcome = self
+            .record_prepared_conversation_items(
+                turn_context,
+                model_info,
+                annotated_items,
+                image_preparations,
+            )
+            .await;
+        outcome
+            .sealed
+            .iter()
+            .filter_map(|item| item.metadata.as_ref()?.history_sequence)
+            .max()
+            .unwrap_or_default()
     }
 
     pub(crate) async fn record_realtime_session_chunk(
@@ -283,8 +290,8 @@ impl Session {
             images,
             Some(RealtimeRecord::Chunk),
         )
-        .await
-        .map(|_| ())
+        .await?;
+        Ok(())
     }
 
     /// Injects items into active work, or records them without starting a turn.
