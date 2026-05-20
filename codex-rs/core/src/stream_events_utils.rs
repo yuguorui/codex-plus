@@ -155,6 +155,22 @@ pub(crate) async fn record_completed_response_item_with_finalized_facts(
     }
 }
 
+fn response_item_call_id(item: &ResponseItem) -> Option<&str> {
+    match item {
+        ResponseItem::FunctionCall { call_id, .. }
+        | ResponseItem::CustomToolCall { call_id, .. } => Some(call_id),
+        ResponseItem::ToolSearchCall {
+            call_id: Some(call_id),
+            ..
+        }
+        | ResponseItem::LocalShellCall {
+            call_id: Some(call_id),
+            ..
+        } => Some(call_id),
+        _ => None,
+    }
+}
+
 fn response_item_may_include_external_context(item: &ResponseItem) -> bool {
     matches!(
         item,
@@ -414,8 +430,10 @@ pub(crate) async fn handle_output_item_done(
                 .services
                 .executed_tool_calls
                 .observe_non_dispatched_call(&item);
+            // Keep the original call id so the Chat/Anthropic tool-pair validators can match
+            // this non-dispatched response to the call that produced it.
             let response = ResponseInputItem::FunctionCallOutput {
-                call_id: String::new(),
+                call_id: response_item_call_id(&item).unwrap_or_default().to_string(),
                 output: FunctionCallOutputPayload {
                     body: FunctionCallOutputBody::Text(message),
                     ..Default::default()
