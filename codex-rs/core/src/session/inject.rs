@@ -213,7 +213,8 @@ impl Session {
             images,
             Some(RealtimeRecord::Chunk),
         )
-        .await
+        .await?;
+        Ok(())
     }
 
     /// Injects items into active work, or records them without starting a turn.
