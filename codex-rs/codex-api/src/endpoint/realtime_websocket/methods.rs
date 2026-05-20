@@ -2696,6 +2696,7 @@ mod tests {
             base_url: format!("http://{addr}"),
             query_params: Some(HashMap::new()),
             headers: HeaderMap::new(),
+            extra_body: HashMap::new(),
             retry: crate::provider::RetryConfig {
                 max_attempts: 1,
                 base_delay: Duration::from_millis(1),
@@ -3022,6 +3023,7 @@ mod tests {
             base_url: format!("http://{addr}"),
             query_params: Some(HashMap::new()),
             headers: HeaderMap::new(),
+            extra_body: HashMap::new(),
             retry: crate::provider::RetryConfig {
                 max_attempts: 1,
                 base_delay: Duration::from_millis(1),
@@ -3149,6 +3151,7 @@ mod tests {
             base_url: format!("http://{addr}"),
             query_params: Some(HashMap::new()),
             headers: HeaderMap::new(),
+            extra_body: HashMap::new(),
             retry: crate::provider::RetryConfig {
                 max_attempts: 1,
                 base_delay: Duration::from_millis(1),
@@ -3255,6 +3258,7 @@ mod tests {
             base_url: format!("http://{addr}"),
             query_params: Some(HashMap::new()),
             headers: HeaderMap::new(),
+            extra_body: HashMap::new(),
             retry: crate::provider::RetryConfig {
                 max_attempts: 1,
                 base_delay: Duration::from_millis(1),
@@ -3347,6 +3351,7 @@ mod tests {
             base_url: format!("http://{addr}"),
             query_params: Some(HashMap::new()),
             headers: HeaderMap::new(),
+            extra_body: HashMap::new(),
             retry: crate::provider::RetryConfig {
                 max_attempts: 1,
                 base_delay: Duration::from_millis(1),
