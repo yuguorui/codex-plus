@@ -195,6 +195,9 @@ async fn run_compact_task_inner(
         phase,
     )
     .await;
+    // A compaction checkpoint cannot be inserted between an open tool call and its output.
+    // Close abandoned calls with synthetic results before snapshotting history.
+    let _ = sess.flush_tool_pair_barrier(&turn_context).await;
     let pre_compact_outcome = run_pre_compact_hooks(&sess, &turn_context, trigger).await;
     match pre_compact_outcome {
         PreCompactHookOutcome::Continue => {}

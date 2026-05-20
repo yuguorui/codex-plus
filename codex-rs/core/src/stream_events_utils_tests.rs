@@ -5,6 +5,7 @@ use super::finalize_non_tool_response_item;
 use super::handle_non_tool_response_item;
 use super::handle_output_item_done;
 use super::last_assistant_message_from_item;
+use super::response_item_call_id;
 use super::response_item_may_include_external_context;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
@@ -53,6 +54,23 @@ fn assistant_output_text_with_phase(text: &str, phase: Option<MessagePhase>) -> 
         phase,
         internal_chat_message_metadata_passthrough: None,
     }
+}
+
+#[test]
+fn respond_to_model_uses_the_originating_call_id() {
+    let item = ResponseItem::FunctionCall {
+        status: None,
+        encrypted_content: None,
+        id: None,
+        name: "exec_command".to_string(),
+        namespace: None,
+        arguments: "{}".to_string(),
+        call_id: "call-1".to_string(),
+        encrypted_function_args: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+
+    assert_eq!(response_item_call_id(&item), Some("call-1"));
 }
 
 #[test]
