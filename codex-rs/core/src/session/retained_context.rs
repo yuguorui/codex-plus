@@ -23,6 +23,7 @@ use codex_history::VerifiedQuestionAnswer;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::request_user_input::RequestUserInputEvent;
 use codex_protocol::request_user_input::RequestUserInputResponse;
+use codex_rollout::should_persist_response_item;
 use codex_thread_store::PersistContext;
 use codex_utils_output_truncation::TruncationPolicy;
 use futures::FutureExt;
@@ -154,40 +155,67 @@ impl Session {
         update: UserGoalUpdate,
     ) -> std::io::Result<()> {
         let sub_id = self.next_internal_sub_id();
+        let barrier_context = self
+            .active_turn_context_and_strict_auto_review()
+            .await
+            .map(|(context, _, _, _)| context);
         // Earlier Code Mode messages may need the persistence lock before this can return.
         let user_input_order = self.reserve_user_input_order().await;
         let _guard = thread_settings::acquire_persistence_lock(self).await;
         let mut item = ContextualUserFragment::into(update);
         Self::stamp_response_item_for_history(&mut item, &sub_id);
         self.assign_missing_response_item_id(&mut item);
-        let mut item = ResponseItemEnvelope {
+        let item = ResponseItemEnvelope {
             item,
             metadata: Some(CodexHarnessMetadata {
                 user_input_order: Some(user_input_order),
                 ..Default::default()
             }),
         };
+        // A live tool call can still be in flight; the tool-pair write barrier queues model-
+        // visible goal context until its output lands so the protocol pairing stays valid.
+        let recorded = if let Some(context) = barrier_context {
+            let (outcome, _) = self
+                .record_prepared_items_through_barrier(
+                    &context,
+                    std::slice::from_ref(&item),
+                    TruncationPolicy::Bytes(0),
+                    /*track_review_write*/ false,
+                )
+                .await;
+            outcome.sealed
+        } else {
+            let mut item = item;
+            self.state.lock().await.history.record_annotated_items(
+                std::slice::from_mut(&mut item),
+                TruncationPolicy::Bytes(0),
+            );
+            vec![item]
+        };
         if let Some(live_thread) = self.live_thread() {
             // Capture settings under the same permit as the instruction, including when a
             // goal creates the rollout. No fallible settings catch-up runs after publication.
+            let mut items = vec![RolloutItem::EventMsg(
+                thread_settings::applied_event(self).await,
+            )];
+            items.extend(
+                recorded
+                    .iter()
+                    .filter(|envelope| should_persist_response_item(&envelope.item))
+                    .cloned()
+                    .map(RolloutItem::ResponseItem),
+            );
             live_thread
-                .append_items(&[
-                    RolloutItem::EventMsg(thread_settings::applied_event(self).await),
-                    RolloutItem::ResponseItem(item.clone()),
-                ])
+                .append_items(&items)
                 .await
                 .map_err(std::io::Error::other)?;
         }
         // A failed append or checkpoint must not change live authorization or its revision.
         self.try_ensure_rollout_materialized(PersistContext::ThreadPreparation)
             .await?;
-        self.state.lock().await.history.record_annotated_items(
-            std::slice::from_mut(&mut item),
-            // This is a user message. Only tool outputs use the truncation policy.
-            TruncationPolicy::Bytes(0),
-        );
-        self.send_raw_response_items(&sub_id, std::slice::from_ref(&item.item))
-            .await;
+        let observed: Vec<ResponseItem> =
+            recorded.into_iter().map(|envelope| envelope.item).collect();
+        self.send_raw_response_items(&sub_id, &observed).await;
         Ok(())
     }
 

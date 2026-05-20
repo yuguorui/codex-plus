@@ -2,6 +2,7 @@
 
 #![allow(clippy::expect_used)]
 
+use std::collections::HashMap;
 use std::net::TcpListener;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -107,6 +108,7 @@ async fn connector_results_reach_websocket_without_payload_logs() -> Result<()> 
                 retry_transport: false,
             },
             stream_idle_timeout: TIMEOUT,
+            extra_body: HashMap::new(),
         },
         Arc::new(NoAuth),
     );
@@ -154,6 +156,7 @@ async fn connector_results_reach_websocket_without_payload_logs() -> Result<()> 
         client_metadata: None,
         access_programs: None,
         request_country: &Default::default(),
+        extra_body: HashMap::new(),
     });
     let canonical = serde_json::to_value(&request)?;
     let mut expected = canonical.clone();
