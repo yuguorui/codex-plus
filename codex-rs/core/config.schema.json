@@ -3056,6 +3056,13 @@
           "description": "Absolute path to a Google ADC credential file. For GCP, overrides GOOGLE_APPLICATION_CREDENTIALS in the auth command's environment only.",
           "type": "string"
         },
+        "env_extra_headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Alias for `env_http_headers`, retained for OpenAI-compatible provider docs.",
+          "type": "object"
+        },
         "env_http_headers": {
           "additionalProperties": {
             "type": "string"
@@ -3074,6 +3081,18 @@
         "experimental_bearer_token": {
           "description": "Value to use with `Authorization: Bearer <token>` header. Use of this config is discouraged in favor of `env_key` for security reasons, but this may be necessary when using this programmatically.",
           "type": "string"
+        },
+        "extra_body": {
+          "additionalProperties": true,
+          "description": "Extra JSON object fields to merge into the provider request body.",
+          "type": "object"
+        },
+        "extra_headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Alias for `http_headers`, retained for OpenAI-compatible provider docs.",
+          "type": "object"
         },
         "gateway_oauth": {
           "allOf": [
@@ -7277,6 +7296,13 @@
           "description": "The Responses API exposed by OpenAI at `/v1/responses`.",
           "enum": [
             "responses"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The OpenAI Chat Completions API exposed at `/v1/chat/completions`.",
+          "enum": [
+            "chat"
           ],
           "type": "string"
         }
