@@ -2120,7 +2120,7 @@ fn record_items_omits_audio_that_exceeds_the_output_budget() {
     history.record_items([&item], TruncationPolicy::Tokens(50));
 
     assert_eq!(
-        history.items,
+        *history.items,
         vec![ResponseItem::FunctionCallOutput {
             id: None,
             call_id: "call-audio".to_string(),
