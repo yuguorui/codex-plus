@@ -44,6 +44,14 @@ impl CodeModeExecuteHandler {
         code: String,
         telemetry: &mut CodeModeToolCallGuard,
     ) -> Result<CodeModeToolOutput, FunctionCallError> {
+        // Some Chat models confuse the freeform `exec` tool with a shell function and send
+        // `{"cmd": ...}`. Reject that shape explicitly instead of feeding it to the JS parser.
+        if is_command_shaped_exec_input(&code) {
+            return Err(FunctionCallError::RespondToModel(
+                "exec expects raw JavaScript source text in the `input` field, not a `{\"cmd\": ...}` object."
+                    .to_string(),
+            ));
+        }
         let args =
             codex_code_mode::parse_exec_source(&code).map_err(FunctionCallError::RespondToModel)?;
         let exec = ExecContext {
@@ -255,5 +263,54 @@ impl CodeModeExecuteHandler {
 impl CoreToolRuntime for CodeModeExecuteHandler {
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Custom { .. })
+    }
+}
+
+fn is_command_shaped_exec_input(code: &str) -> bool {
+    // Chat models sometimes emit a JSON command object instead of freeform JS. Parse the
+    // document instead of matching a prefix so whitespace and `"command"` aliases are covered.
+    let trimmed = code.trim_start_matches('\u{feff}').trim_start();
+    let Ok(serde_json::Value::Object(object)) = serde_json::from_str(trimmed) else {
+        return false;
+    };
+    !object.contains_key("input") && (object.contains_key("cmd") || object.contains_key("command"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CodeModeExecuteHandler;
+    use super::is_command_shaped_exec_input;
+    use crate::tools::context::ToolPayload;
+    use crate::tools::registry::CoreToolRuntime;
+
+    #[test]
+    fn rejects_command_object_shaped_exec_input() {
+        assert!(is_command_shaped_exec_input("{\"cmd\":\"ls\"}"));
+        assert!(is_command_shaped_exec_input("  \n { \"cmd\" : \"ls\" }"));
+        assert!(is_command_shaped_exec_input("{\"command\":\"ls\"}"));
+        assert!(is_command_shaped_exec_input("\u{feff}{\"cmd\":\"ls\"}"));
+        assert!(!is_command_shaped_exec_input(
+            "await tools.exec_command({ cmd: \"ls\" })"
+        ));
+        assert!(!is_command_shaped_exec_input("({ \"cmd\": \"ls\" })"));
+        assert!(!is_command_shaped_exec_input("return 1"));
+        assert!(!is_command_shaped_exec_input(
+            "{\"input\":\"return 1\",\"cmd\":\"ls\"}"
+        ));
+    }
+
+    #[test]
+    fn code_mode_handler_accepts_only_custom_payloads() {
+        let handler = CodeModeExecuteHandler::new(
+            super::super::execute_spec::create_code_mode_tool("test".to_string()),
+            Vec::new(),
+        );
+
+        assert!(handler.matches_kind(&ToolPayload::Custom {
+            input: "return 1".to_string(),
+        }));
+        assert!(!handler.matches_kind(&ToolPayload::Function {
+            arguments: "{}".to_string(),
+        }));
     }
 }

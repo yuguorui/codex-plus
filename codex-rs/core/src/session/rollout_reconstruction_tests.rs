@@ -9,6 +9,8 @@ use codex_history::CompactedItem;
 use codex_history::InitialHistory;
 use codex_history::ResponseItemEnvelope;
 use codex_history::ResumedHistory;
+use codex_login::CodexAuth;
+use codex_model_provider_info::WireApi;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
@@ -33,7 +35,15 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn recorded_questions_share_queued_input_order_across_resume() {
-    let (session, turn) = make_session_and_context().await;
+    // This scenario intentionally records the reply between a call and its delayed output,
+    // which is only a valid adjacent-result history on the Chat/Anthropic barrier contract.
+    let (session, turn, _rx_event) =
+        super::tests::make_session_and_context_with_auth_and_config_and_rx(
+            CodexAuth::from_api_key("Test API Key"),
+            Vec::new(),
+            |config| config.model_provider.wire_api = WireApi::Chat,
+        )
+        .await;
     let question = |call_id: &str| {
         serde_json::from_value::<ResponseItem>(json!({
             "type": "function_call", "call_id": call_id,
@@ -50,7 +60,9 @@ async fn recorded_questions_share_queued_input_order_across_resume() {
         .record_conversation_items(&turn, turn.model_info(), &[question("second")])
         .await;
     // The accepted reply is recorded after a newer question, and the first send's
-    // result arrives last. Neither delay should move the first question's position.
+    // result arrives last. Neither delay should move the first question's position, and the
+    // reply must still land after the complete call/output block because no turn is running
+    // to deliver the second question's real output.
     session
         .record_annotated_conversation_items(
             &turn,
@@ -116,7 +128,8 @@ async fn recorded_questions_share_queued_input_order_across_resume() {
                     .and_then(|metadata| metadata.user_input_order)
             })
             .collect::<Vec<_>>(),
-        vec![Some(0), Some(2), Some(1), None]
+        // question(first), question(second), output(first), synthetic output(second), reply
+        vec![Some(0), Some(2), None, None, Some(1)]
     );
     assert_eq!(session.reserve_user_input_order().await, 3);
 }
