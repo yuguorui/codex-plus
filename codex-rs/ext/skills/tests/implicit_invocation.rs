@@ -184,6 +184,7 @@ async fn implicit_core_and_native_read_invocations_share_turn_local_recording() 
                 conversation_history: ConversationHistory::default(),
                 turn_item_emitter: Arc::new(NoopTurnItemEmitter),
                 environments: Vec::new(),
+                codex_turn_metadata: None,
                 payload: ToolPayload::Function {
                     arguments: serde_json::json!({
                         "authority": {"kind": "orchestrator"},

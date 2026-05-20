@@ -38,6 +38,7 @@ mod apply_patch_cli;
 #[cfg(not(target_os = "windows"))]
 mod approvals;
 mod auto_review;
+mod chat_completions;
 mod cli_stream;
 mod client;
 mod client_websockets;
