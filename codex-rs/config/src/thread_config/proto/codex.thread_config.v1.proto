@@ -52,6 +52,11 @@ message ModelProvider {
   optional string model_catalog_url = 19;
   optional string project_id = 20;
   optional string location = 21;
+  optional StringMap extra_headers = 22;
+  optional StringMap env_extra_headers = 23;
+  optional string extra_body_json = 24;
+  optional string env_key_auth = 25;
+  optional uint64 request_max_retry_delay_ms = 26;
 }
 
 message StringMap {
@@ -69,4 +74,6 @@ message ModelProviderAuthInfo {
 enum WireApi {
   WIRE_API_UNSPECIFIED = 0;
   WIRE_API_RESPONSES = 1;
+  WIRE_API_CHAT = 2;
+  WIRE_API_ANTHROPIC = 3;
 }
