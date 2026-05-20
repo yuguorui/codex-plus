@@ -1318,6 +1318,7 @@ fn token_usage_update_is_emitted_on_turn_completion() {
                         cached_input_tokens: 3,
                         cache_write_input_tokens: 4,
                         output_tokens: 29,
+                        cache_creation_input_tokens: 0,
                         reasoning_output_tokens: 7,
                     },
                     last: TokenUsageBreakdown {
@@ -1326,6 +1327,7 @@ fn token_usage_update_is_emitted_on_turn_completion() {
                         cached_input_tokens: 3,
                         cache_write_input_tokens: 4,
                         output_tokens: 29,
+                        cache_creation_input_tokens: 0,
                         reasoning_output_tokens: 7,
                     },
                     model_context_window: Some(128_000),
@@ -1365,6 +1367,7 @@ fn token_usage_update_is_emitted_on_turn_completion() {
                     cached_input_tokens: 3,
                     cache_write_input_tokens: 4,
                     output_tokens: 29,
+                    cache_creation_input_tokens: 0,
                     reasoning_output_tokens: 7,
                 },
             })],
