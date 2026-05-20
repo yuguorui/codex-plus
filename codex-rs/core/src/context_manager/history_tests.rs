@@ -3877,3 +3877,763 @@ fn text_only_items_count_decoded_content() {
 
     assert_eq!(estimated, "Hello, \"world\"!\nこんにちは".len() as i64);
 }
+
+fn raw_item_values(history: &ContextManager) -> Vec<ResponseItem> {
+    history.raw_items().cloned().collect()
+}
+
+/// Recording annotates content provenance on the item; these tests assert only item fields.
+fn without_item_metadata(mut items: Vec<ResponseItem>) -> Vec<ResponseItem> {
+    for item in &mut items {
+        let passthrough = match item {
+            ResponseItem::Message {
+                internal_chat_message_metadata_passthrough,
+                ..
+            }
+            | ResponseItem::FunctionCall {
+                internal_chat_message_metadata_passthrough,
+                ..
+            }
+            | ResponseItem::FunctionCallOutput {
+                internal_chat_message_metadata_passthrough,
+                ..
+            }
+            | ResponseItem::CustomToolCall {
+                internal_chat_message_metadata_passthrough,
+                ..
+            }
+            | ResponseItem::CustomToolCallOutput {
+                internal_chat_message_metadata_passthrough,
+                ..
+            } => internal_chat_message_metadata_passthrough,
+            _ => continue,
+        };
+        *passthrough = None;
+    }
+    items
+}
+
+fn function_call_item(call_id: &str, name: &str) -> ResponseItem {
+    ResponseItem::FunctionCall {
+        encrypted_content: None,
+        status: None,
+        id: Some(ResponseItemId::with_suffix("fc", call_id)),
+        name: name.to_string(),
+        namespace: None,
+        arguments: "{}".to_string(),
+        call_id: call_id.to_string(),
+        encrypted_function_args: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn function_call_output_item(call_id: &str) -> ResponseItem {
+    ResponseItem::FunctionCallOutput {
+        id: Some(ResponseItemId::with_suffix("fco", call_id)),
+        call_id: Some(call_id.to_string()),
+        name: None,
+        namespace: None,
+        output: FunctionCallOutputPayload::from_text(format!("result-{call_id}")),
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn assistant_message_item(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        encrypted_content: None,
+        status: None,
+        id: Some(ResponseItemId::with_suffix("msg", text)),
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            text: text.to_string(),
+            annotations: None,
+            logprobs: None,
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn plain_user_message_item(id: &str, text: &str) -> ResponseItem {
+    role_message_item(id, "user", text)
+}
+
+fn role_message_item(id: &str, role: &str, text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        encrypted_content: None,
+        status: None,
+        id: Some(ResponseItemId::with_suffix("msg", id)),
+        role: role.to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+#[test]
+fn prompt_repairs_call_message_output_interleaving_written_before_the_barrier() {
+    let mut h = create_history_with_items(vec![
+        function_call_item("call-1", "shell"),
+        plain_user_message_item("steer", "user steer"),
+        function_call_output_item("call-1"),
+    ]);
+
+    h.normalize_history(&default_input_modalities());
+
+    assert_eq!(
+        without_item_metadata(raw_item_values(&h)),
+        without_item_metadata(vec![
+            function_call_item("call-1", "shell"),
+            function_call_output_item("call-1"),
+            plain_user_message_item("steer", "user steer"),
+        ])
+    );
+}
+
+#[test]
+fn prompt_repairs_parallel_calls_and_flushes_message_after_all_outputs() {
+    let mut h = create_history_with_items(vec![
+        function_call_item("call-a", "shell"),
+        function_call_item("call-b", "shell"),
+        plain_user_message_item("steer", "user steer"),
+        function_call_output_item("call-a"),
+        function_call_output_item("call-b"),
+    ]);
+
+    h.normalize_history(&default_input_modalities());
+
+    assert_eq!(
+        without_item_metadata(raw_item_values(&h)),
+        without_item_metadata(vec![
+            function_call_item("call-a", "shell"),
+            function_call_item("call-b", "shell"),
+            function_call_output_item("call-a"),
+            function_call_output_item("call-b"),
+            plain_user_message_item("steer", "user steer"),
+        ])
+    );
+}
+
+#[test]
+fn prompt_moves_late_outputs_after_a_partial_parallel_batch() {
+    let mut h = create_history_with_items(vec![
+        function_call_item("call-a", "exec"),
+        function_call_item("call-b", "exec"),
+        function_call_item("call-c", "exec_command"),
+        function_call_output_item("call-c"),
+        reasoning_msg("still working"),
+        function_call_item("call-d", "exec_command"),
+        function_call_output_item("call-d"),
+        function_call_output_item("call-a"),
+        function_call_output_item("call-b"),
+    ]);
+
+    h.normalize_history(&default_input_modalities());
+
+    assert_eq!(
+        without_item_metadata(raw_item_values(&h)),
+        without_item_metadata(vec![
+            function_call_item("call-a", "exec"),
+            function_call_item("call-b", "exec"),
+            function_call_item("call-c", "exec_command"),
+            function_call_output_item("call-c"),
+            function_call_output_item("call-a"),
+            function_call_output_item("call-b"),
+            reasoning_msg("still working"),
+            function_call_item("call-d", "exec_command"),
+            function_call_output_item("call-d"),
+        ])
+    );
+}
+
+#[test]
+fn replay_repair_drops_unpaired_calls_and_outputs_and_reports_them() {
+    let mut h = create_history_with_items(vec![
+        function_call_item("call-a", "exec"),
+        function_call_item("call-b", "exec"),
+        function_call_item("call-c", "exec_command"),
+        function_call_output_item("call-c"),
+        reasoning_msg("still working"),
+        function_call_output_item("call-a"),
+        function_call_output_item("call-b"),
+    ]);
+
+    h.repair_replayed_tool_pairs();
+    let report = h.take_tool_pair_repair_report();
+
+    assert_eq!(report.dropped_calls, vec!["call-a", "call-b"]);
+    assert_eq!(report.dropped_outputs, vec!["call-a", "call-b"]);
+    assert_eq!(
+        without_item_metadata(raw_item_values(&h)),
+        without_item_metadata(vec![
+            function_call_item("call-c", "exec_command"),
+            function_call_output_item("call-c"),
+            reasoning_msg("still working"),
+        ])
+    );
+}
+
+#[test]
+fn replay_repair_tracks_reused_call_ids_by_position() {
+    let mut h = create_history_with_items(vec![
+        function_call_item("call-dup", "exec"),
+        function_call_output_item("call-dup"),
+        plain_user_message_item("steer", "next turn"),
+        function_call_item("call-dup", "exec"),
+    ]);
+
+    h.repair_replayed_tool_pairs();
+    let report = h.take_tool_pair_repair_report();
+
+    assert_eq!(report.dropped_calls, vec!["call-dup"]);
+    assert!(report.dropped_outputs.is_empty());
+    assert_eq!(
+        without_item_metadata(raw_item_values(&h)),
+        without_item_metadata(vec![
+            function_call_item("call-dup", "exec"),
+            function_call_output_item("call-dup"),
+            plain_user_message_item("steer", "next turn"),
+        ])
+    );
+}
+
+#[test]
+fn replay_repair_keeps_valid_parallel_pairs() {
+    let items = vec![
+        function_call_item("call-a", "exec"),
+        function_call_item("call-b", "exec"),
+        function_call_output_item("call-a"),
+        function_call_output_item("call-b"),
+    ];
+    let mut h = create_history_with_items(items.clone());
+
+    h.repair_replayed_tool_pairs();
+    let report = h.take_tool_pair_repair_report();
+
+    assert!(report.is_empty());
+    assert_eq!(
+        without_item_metadata(raw_item_values(&h)),
+        without_item_metadata(items)
+    );
+}
+
+#[test]
+fn replay_repair_drops_orphan_outputs_and_reports_them() {
+    let mut h = create_history_with_items(vec![function_call_output_item("call-orphan")]);
+
+    h.repair_replayed_tool_pairs();
+    let report = h.take_tool_pair_repair_report();
+
+    assert!(raw_item_values(&h).is_empty());
+    assert_eq!(report.dropped_calls, Vec::<String>::new());
+    assert_eq!(report.dropped_outputs, vec!["call-orphan"]);
+}
+
+#[test]
+fn prompt_leaves_adjacent_call_output_pair_and_later_message_untouched() {
+    let items = vec![
+        function_call_item("call-1", "shell"),
+        function_call_output_item("call-1"),
+        plain_user_message_item("steer", "user steer"),
+    ];
+    let mut h = create_history_with_items(items.clone());
+
+    h.normalize_history(&default_input_modalities());
+
+    assert_eq!(
+        without_item_metadata(raw_item_values(&h)),
+        without_item_metadata(items)
+    );
+}
+
+#[test]
+fn prompt_collapses_duplicate_delayed_outputs_to_one_result() {
+    let mut h = create_history_with_items(vec![
+        function_call_item("call-1", "shell"),
+        plain_user_message_item("steer", "user steer"),
+        function_call_output_item("call-1"),
+        ResponseItem::FunctionCallOutput {
+            id: Some(ResponseItemId::with_suffix("fco", "dup")),
+            call_id: Some("call-1".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("duplicate".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ]);
+
+    h.normalize_history(&default_input_modalities());
+
+    assert_eq!(
+        without_item_metadata(raw_item_values(&h)),
+        without_item_metadata(vec![
+            function_call_item("call-1", "shell"),
+            function_call_output_item("call-1"),
+            plain_user_message_item("steer", "user steer"),
+        ])
+    );
+}
+
+#[test]
+fn prompt_reorders_known_pairs_but_leaves_unknown_outputs_to_orphan_removal() {
+    // The output for "call-never-registered" has no recorded call: it must not be paired with
+    // another call's block, leaving it for `remove_orphan_outputs` (which removes it).
+    let mut h = create_history_with_items(vec![
+        function_call_item("call-x", "shell"),
+        plain_user_message_item("steer", "user steer"),
+        function_call_output_item("call-x"),
+        ResponseItem::FunctionCallOutput {
+            id: Some(ResponseItemId::with_suffix("fco", "stray")),
+            call_id: Some("call-never-registered".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("stray".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ]);
+
+    let items = {
+        let probe = create_history_with_items(vec![
+            function_call_item("call-x", "shell"),
+            plain_user_message_item("steer", "user steer"),
+            function_call_output_item("call-x"),
+            ResponseItem::FunctionCallOutput {
+                id: Some(ResponseItemId::with_suffix("fco", "stray")),
+                call_id: Some("call-never-registered".to_string()),
+                name: None,
+                namespace: None,
+                output: FunctionCallOutputPayload::from_text("stray".to_string()),
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ]);
+        use crate::context_manager::normalize;
+        let mut raw: Vec<ResponseItemEnvelope> = probe
+            .raw_items()
+            .cloned()
+            .map(ResponseItemEnvelope::new)
+            .collect();
+        normalize::reorder_delayed_tool_outputs_after_calls(&mut raw);
+        raw.into_iter()
+            .map(|envelope| envelope.item)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        items,
+        vec![
+            function_call_item("call-x", "shell"),
+            function_call_output_item("call-x"),
+            plain_user_message_item("steer", "user steer"),
+            ResponseItem::FunctionCallOutput {
+                id: Some(ResponseItemId::with_suffix("fco", "stray")),
+                call_id: Some("call-never-registered".to_string()),
+                name: None,
+                namespace: None,
+                output: FunctionCallOutputPayload::from_text("stray".to_string()),
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ],
+        "the unknown output keeps its late position; the known pair is repaired"
+    );
+    let _ = &mut h;
+}
+
+#[test]
+fn write_barrier_defers_user_context_until_the_call_output_lands() {
+    let mut h = ContextManager::new();
+    let mut call_batch = vec![Some(ResponseItemEnvelope::new(function_call_item(
+        "call-1", "shell",
+    )))];
+    let outcome =
+        h.record_annotated_items_with_barrier(&mut call_batch, TruncationPolicy::Tokens(10_000));
+    assert_eq!(outcome.sealed.len(), 1);
+    assert!(outcome.flushed.is_empty());
+    assert!(h.has_open_tool_calls());
+
+    let mut steer_batch = vec![Some(ResponseItemEnvelope::new(plain_user_message_item(
+        "steer",
+        "user steer",
+    )))];
+    let outcome =
+        h.record_annotated_items_with_barrier(&mut steer_batch, TruncationPolicy::Tokens(10_000));
+    assert!(
+        outcome.sealed.is_empty(),
+        "steer must wait behind the barrier"
+    );
+    assert!(
+        steer_batch[0].is_none(),
+        "the barrier takes the queued item"
+    );
+    assert!(outcome.flushed.is_empty());
+    assert!(h.has_open_tool_calls());
+
+    let mut output_batch = vec![Some(ResponseItemEnvelope::new(function_call_output_item(
+        "call-1",
+    )))];
+    let outcome =
+        h.record_annotated_items_with_barrier(&mut output_batch, TruncationPolicy::Tokens(10_000));
+    assert_eq!(
+        outcome
+            .flushed
+            .iter()
+            .map(|envelope| envelope.item.clone())
+            .collect::<Vec<_>>(),
+        vec![plain_user_message_item("steer", "user steer")]
+    );
+    assert!(!h.has_open_tool_calls());
+    assert_eq!(
+        without_item_metadata(raw_item_values(&h)),
+        without_item_metadata(vec![
+            function_call_item("call-1", "shell"),
+            function_call_output_item("call-1"),
+            plain_user_message_item("steer", "user steer"),
+        ])
+    );
+}
+
+#[test]
+fn write_barrier_force_flush_closes_abandoned_calls_and_flushes_context() {
+    let mut h = ContextManager::new();
+    let mut call_batch = vec![Some(ResponseItemEnvelope::new(function_call_item(
+        "call-1", "shell",
+    )))];
+    h.record_annotated_items_with_barrier(&mut call_batch, TruncationPolicy::Tokens(10_000));
+    // The aborted turn's marker is recorded while the call is still open.
+    let mut marker_batch = vec![Some(ResponseItemEnvelope::new(plain_user_message_item(
+        "abort",
+        "<turn_aborted/>",
+    )))];
+    let outcome =
+        h.record_annotated_items_with_barrier(&mut marker_batch, TruncationPolicy::Tokens(10_000));
+    assert!(outcome.sealed.is_empty());
+
+    let flushed = h.flush_tool_pair_barrier(TruncationPolicy::Tokens(10_000));
+    assert!(!h.has_open_tool_calls());
+    assert!(matches!(
+        flushed.recorded.first().map(|envelope| &envelope.item),
+        Some(ResponseItem::FunctionCallOutput { id: Some(id), .. }) if id.as_str().starts_with("fco_")
+    ));
+    // The recorded copy (what the model sees) must carry the abort text, not a truncation
+    // marker; a zero-token policy would rewrite it during recording.
+    assert!(matches!(
+        raw_items(&h).first(),
+        Some(ResponseItem::FunctionCall { .. })
+    ));
+    assert!(matches!(
+        raw_item_values(&h).get(1),
+        Some(ResponseItem::FunctionCallOutput { output, .. })
+            if output.body.to_text().as_deref() == Some("aborted")
+    ));
+    let mut flushed_items: Vec<ResponseItem> = flushed
+        .recorded
+        .into_iter()
+        .map(|envelope| envelope.item)
+        .collect();
+    // Normalize the UUID-derived synthetic id so the comparison asserts payloads, not names.
+    if let Some(ResponseItem::FunctionCallOutput { id, .. }) = flushed_items.first_mut() {
+        *id = None;
+    }
+    assert_eq!(
+        flushed_items,
+        vec![
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: Some("call-1".to_string()),
+                name: None,
+                namespace: None,
+                output: FunctionCallOutputPayload::from_text("aborted".to_string()),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            plain_user_message_item("abort", "<turn_aborted/>"),
+        ]
+    );
+    assert_eq!(
+        raw_items(&h).len(),
+        3,
+        "call, synthetic output and flushed marker are all recorded"
+    );
+}
+
+#[test]
+fn write_barrier_drops_late_output_after_force_flush() {
+    let mut h = ContextManager::new();
+    let mut call_batch = vec![Some(ResponseItemEnvelope::new(function_call_item(
+        "call-1", "shell",
+    )))];
+    h.record_annotated_items_with_barrier(&mut call_batch, TruncationPolicy::Tokens(10_000));
+    let flushed = h.flush_tool_pair_barrier(TruncationPolicy::Tokens(10_000));
+    assert_eq!(
+        flushed.recorded.len(),
+        1,
+        "the abandoned call is closed with one synthetic output"
+    );
+
+    // A late real output for the closed call must not add a second result.
+    let mut late_batch = vec![Some(ResponseItemEnvelope::new(function_call_output_item(
+        "call-1",
+    )))];
+    let outcome =
+        h.record_annotated_items_with_barrier(&mut late_batch, TruncationPolicy::Tokens(10_000));
+    assert!(outcome.sealed.is_empty());
+    assert!(late_batch[0].is_none());
+    assert_eq!(
+        raw_item_values(&h).len(),
+        2,
+        "call plus one synthetic output"
+    );
+}
+
+#[test]
+fn write_barrier_waits_for_every_parallel_output_before_flushing_context() {
+    let mut h = ContextManager::new();
+    for call_id in ["call-a", "call-b"] {
+        let mut batch = vec![Some(ResponseItemEnvelope::new(function_call_item(
+            call_id, "shell",
+        )))];
+        h.record_annotated_items_with_barrier(&mut batch, TruncationPolicy::Tokens(10_000));
+    }
+    let mut steer = vec![Some(ResponseItemEnvelope::new(plain_user_message_item(
+        "steer",
+        "user steer",
+    )))];
+    let outcome =
+        h.record_annotated_items_with_barrier(&mut steer, TruncationPolicy::Tokens(10_000));
+    assert!(
+        outcome.sealed.is_empty(),
+        "steer waits behind the open batch"
+    );
+
+    // The first output closes only one call; the steer must stay deferred.
+    let mut out_a = vec![Some(ResponseItemEnvelope::new(function_call_output_item(
+        "call-a",
+    )))];
+    let outcome =
+        h.record_annotated_items_with_barrier(&mut out_a, TruncationPolicy::Tokens(10_000));
+    assert!(outcome.flushed.is_empty());
+
+    let mut out_b = vec![Some(ResponseItemEnvelope::new(function_call_output_item(
+        "call-b",
+    )))];
+    let outcome =
+        h.record_annotated_items_with_barrier(&mut out_b, TruncationPolicy::Tokens(10_000));
+    assert_eq!(outcome.flushed.len(), 1);
+    assert!(!h.has_open_tool_calls());
+    assert_eq!(
+        without_item_metadata(raw_item_values(&h)),
+        without_item_metadata(vec![
+            function_call_item("call-a", "shell"),
+            function_call_item("call-b", "shell"),
+            function_call_output_item("call-a"),
+            function_call_output_item("call-b"),
+            plain_user_message_item("steer", "user steer"),
+        ])
+    );
+}
+
+#[test]
+fn write_barrier_defers_non_user_context_that_would_split_the_pair() {
+    let mut h = ContextManager::new();
+    let mut call = vec![Some(ResponseItemEnvelope::new(function_call_item(
+        "call-1", "shell",
+    )))];
+    h.record_annotated_items_with_barrier(&mut call, TruncationPolicy::Tokens(10_000));
+
+    // Developer/system messages, compaction records and server-side output all force the chat
+    // projector to flush the pending call, so they must wait just like a user message.
+    let mut context = vec![
+        Some(ResponseItemEnvelope::new(role_message_item(
+            "dev-1",
+            "developer",
+            "environment changed",
+        ))),
+        Some(ResponseItemEnvelope::new(role_message_item(
+            "dev-2",
+            "developer",
+            "client context",
+        ))),
+        Some(ResponseItemEnvelope::new(ResponseItem::Compaction {
+            id: Some(ResponseItemId::with_suffix("cmp", "1")),
+            encrypted_content: "summary".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        })),
+        Some(ResponseItemEnvelope::new(ResponseItem::WebSearchCall {
+            encrypted_content: None,
+            id: Some(ResponseItemId::with_suffix("ws", "1")),
+            status: Some("completed".to_string()),
+            action: None,
+            internal_chat_message_metadata_passthrough: None,
+        })),
+    ];
+    let outcome =
+        h.record_annotated_items_with_barrier(&mut context, TruncationPolicy::Tokens(10_000));
+    assert!(
+        outcome.sealed.is_empty(),
+        "all context waits behind the call"
+    );
+    assert!(context.iter().all(Option::is_none));
+
+    // A sibling call stays in the open-call window; the output for the first call alone does
+    // not release context while its sibling is still pending.
+    let mut sibling = vec![Some(ResponseItemEnvelope::new(function_call_item(
+        "call-2", "shell",
+    )))];
+    let outcome =
+        h.record_annotated_items_with_barrier(&mut sibling, TruncationPolicy::Tokens(10_000));
+    assert_eq!(outcome.sealed.len(), 1);
+
+    let mut out_1 = vec![Some(ResponseItemEnvelope::new(function_call_output_item(
+        "call-1",
+    )))];
+    let outcome =
+        h.record_annotated_items_with_barrier(&mut out_1, TruncationPolicy::Tokens(10_000));
+    assert!(outcome.flushed.is_empty());
+
+    let mut out_2 = vec![Some(ResponseItemEnvelope::new(function_call_output_item(
+        "call-2",
+    )))];
+    let outcome =
+        h.record_annotated_items_with_barrier(&mut out_2, TruncationPolicy::Tokens(10_000));
+    assert_eq!(outcome.flushed.len(), 4);
+    assert_eq!(
+        raw_items(&h).len(),
+        8,
+        "two calls, two outputs and four deferred context items are recorded"
+    );
+    let raw = raw_item_values(&h);
+    assert!(matches!(&raw[0], ResponseItem::FunctionCall { .. }));
+    assert!(matches!(&raw[1], ResponseItem::FunctionCall { .. }));
+    assert!(matches!(&raw[2], ResponseItem::FunctionCallOutput { .. }));
+    assert!(matches!(&raw[3], ResponseItem::FunctionCallOutput { .. }));
+    assert!(
+        matches!(&raw[4], ResponseItem::Message { role, .. } if role == "developer"),
+        "developer context flushes after the complete output block"
+    );
+    assert!(
+        matches!(&raw[5], ResponseItem::Message { role, .. } if role == "developer"),
+        "second developer context flushes after the complete output block"
+    );
+    assert!(matches!(&raw[6], ResponseItem::Compaction { .. }));
+    assert!(matches!(&raw[7], ResponseItem::WebSearchCall { .. }));
+}
+
+#[test]
+fn context_only_barrier_keeps_responses_context_in_place() {
+    let policy = TruncationPolicy::Tokens(10_000);
+    let mut h = ContextManager::new();
+    let mut call = vec![Some(ResponseItemEnvelope::new(function_call_item(
+        "call-1", "shell",
+    )))];
+    h.record_annotated_items_with_barrier_policy(
+        &mut call,
+        policy,
+        ToolPairBarrierPolicy::ContextOnly,
+    );
+
+    // Responses keeps its historical barrier: user turns wait, but developer context does not.
+    let mut user = vec![Some(ResponseItemEnvelope::new(plain_user_message_item(
+        "steer",
+        "user steer",
+    )))];
+    let outcome = h.record_annotated_items_with_barrier_policy(
+        &mut user,
+        policy,
+        ToolPairBarrierPolicy::ContextOnly,
+    );
+    assert!(outcome.sealed.is_empty());
+
+    let mut developer = vec![Some(ResponseItemEnvelope::new(role_message_item(
+        "dev-1",
+        "developer",
+        "environment changed",
+    )))];
+    let outcome = h.record_annotated_items_with_barrier_policy(
+        &mut developer,
+        policy,
+        ToolPairBarrierPolicy::ContextOnly,
+    );
+    assert_eq!(
+        outcome.sealed.len(),
+        1,
+        "developer context keeps its position"
+    );
+
+    let mut output = vec![Some(ResponseItemEnvelope::new(function_call_output_item(
+        "call-1",
+    )))];
+    let outcome = h.record_annotated_items_with_barrier_policy(
+        &mut output,
+        policy,
+        ToolPairBarrierPolicy::ContextOnly,
+    );
+    assert_eq!(outcome.flushed.len(), 1);
+
+    assert_eq!(
+        without_item_metadata(raw_item_values(&h)),
+        without_item_metadata(vec![
+            function_call_item("call-1", "shell"),
+            role_message_item("dev-1", "developer", "environment changed"),
+            function_call_output_item("call-1"),
+            plain_user_message_item("steer", "user steer"),
+        ])
+    );
+}
+
+#[test]
+fn write_barrier_keeps_assistant_output_in_the_open_call_window() {
+    let mut h = ContextManager::new();
+    let mut call = vec![Some(ResponseItemEnvelope::new(function_call_item(
+        "call-1", "shell",
+    )))];
+    h.record_annotated_items_with_barrier(&mut call, TruncationPolicy::Tokens(10_000));
+
+    let mut assistant = vec![Some(ResponseItemEnvelope::new(assistant_message_item(
+        "working",
+    )))];
+    let outcome =
+        h.record_annotated_items_with_barrier(&mut assistant, TruncationPolicy::Tokens(10_000));
+    assert_eq!(
+        outcome.sealed.len(),
+        1,
+        "assistant text coalesces on the wire"
+    );
+
+    let mut reasoning = vec![Some(ResponseItemEnvelope::new(ResponseItem::Reasoning {
+        id: Some(ResponseItemId::with_suffix("rs", "1")),
+        summary: Vec::new(),
+        content: None,
+        encrypted_content: None,
+        internal_chat_message_metadata_passthrough: None,
+    }))];
+    let outcome =
+        h.record_annotated_items_with_barrier(&mut reasoning, TruncationPolicy::Tokens(10_000));
+    assert_eq!(outcome.sealed.len(), 1, "reasoning coalesces on the wire");
+
+    let mut output = vec![Some(ResponseItemEnvelope::new(function_call_output_item(
+        "call-1",
+    )))];
+    let outcome =
+        h.record_annotated_items_with_barrier(&mut output, TruncationPolicy::Tokens(10_000));
+    assert!(outcome.flushed.is_empty());
+    assert_eq!(raw_items(&h).len(), 4);
+}
+
+#[test]
+fn prompt_keeps_assistant_text_between_call_and_output() {
+    // Assistant output is coalesced into the tool_use message by the wire converters, so it is
+    // not "leaked context" and the repair must leave this legal ordering alone.
+    let items = vec![
+        function_call_item("call-1", "shell"),
+        assistant_message_item("first answer"),
+        function_call_output_item("call-1"),
+    ];
+    let mut h = create_history_with_items(items.clone());
+
+    h.normalize_history(&default_input_modalities());
+
+    assert_eq!(
+        without_item_metadata(raw_item_values(&h)),
+        without_item_metadata(items)
+    );
+}
