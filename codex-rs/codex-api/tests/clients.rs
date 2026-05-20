@@ -26,6 +26,7 @@ use http::HeaderMap;
 use http::HeaderValue;
 use http::StatusCode;
 use pretty_assertions::assert_eq;
+use std::collections::HashMap;
 
 fn assert_path_ends_with(requests: &[Request], suffix: &str) {
     assert_eq!(requests.len(), 1);
@@ -134,6 +135,7 @@ fn provider(name: &str) -> Provider {
         base_url: "https://example.com/v1".to_string(),
         query_params: None,
         headers: HeaderMap::new(),
+        extra_body: HashMap::new(),
         retry: codex_api::RetryConfig {
             max_attempts: 1,
             base_delay: Duration::from_millis(1),
