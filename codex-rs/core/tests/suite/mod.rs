@@ -60,6 +60,7 @@ mod bedrock_multi_agent;
 #[path = "bedrock_service_tier_tests.rs"]
 mod bedrock_service_tier;
 mod catalog_permission_messages;
+mod chat_completions;
 mod cli_stream;
 mod client;
 mod client_websockets;
