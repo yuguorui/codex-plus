@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used)]
 //! Exercise realtime TLS selection without mutating the test process's trust environment.
 
+use std::collections::HashMap;
 use std::io;
 use std::net::TcpListener;
 use std::process::Command;
@@ -119,6 +120,7 @@ async fn check_connection(address: String) {
         base_url: format!("https://{address}"),
         query_params: None,
         headers: HeaderMap::new(),
+        extra_body: HashMap::new(),
         retry: RetryConfig {
             max_attempts: 1,
             base_delay: Duration::from_millis(/*millis*/ 1),
