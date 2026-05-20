@@ -20,6 +20,7 @@ pub(crate) struct RolloutReconstruction {
     pub(super) reference_context_item: Option<TurnContextItem>,
     pub(super) turn_attribution: Option<TurnAttribution>,
     pub(super) world_state_baseline: Option<WorldStateSnapshot>,
+    pub(super) tool_pair_repair_report: crate::context_manager::ToolPairRepairReport,
     pub(super) window_number: u64,
     pub(super) first_window_id: Option<Uuid>,
     pub(super) previous_window_id: Option<Uuid>,
@@ -611,6 +612,10 @@ impl ContextManager {
             previous_id: None,
             id: None,
         });
+        // Persisted history can contain malformed tool pairs from older builds or interrupted
+        // processes. Live turns reorder; replay drops the bad pairs and reports them to the UI.
+        history.repair_replayed_tool_pairs();
+        let tool_pair_repair_report = history.take_tool_pair_repair_report();
         RolloutReconstruction {
             retained_context: history.retained_context().clone(),
             guardian_history: history.guardian_history_checkpoint(),
@@ -620,6 +625,7 @@ impl ContextManager {
             reference_context_item,
             turn_attribution,
             world_state_baseline,
+            tool_pair_repair_report,
             window_number: window.number,
             first_window_id: window.first_id,
             previous_window_id: window.previous_id,

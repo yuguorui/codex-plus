@@ -95,6 +95,7 @@ use codex_mcp::McpResourceClient;
 use codex_mcp::McpRuntime;
 use codex_mcp::McpRuntimeContext;
 use codex_mcp::McpRuntimeInput;
+use codex_model_provider_info::WireApi;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_network_proxy::NetworkProxy;
@@ -562,6 +563,21 @@ pub(crate) const INITIAL_SUBMIT_ID: &str = "";
 pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
 const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
 const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
+
+/// Selects the tool-pair barrier contract for the turn's wire API.
+///
+/// Responses accepts context items between a call and its output, so it keeps the original
+/// context-only barrier. Chat and Anthropic require adjacent results, so they defer every item
+/// that would split the assistant tool-call message from its outputs.
+pub(crate) fn tool_pair_barrier_policy(
+    turn_context: &TurnContext,
+) -> crate::context_manager::ToolPairBarrierPolicy {
+    use crate::context_manager::ToolPairBarrierPolicy;
+    match turn_context.provider.info().wire_api {
+        WireApi::Responses => ToolPairBarrierPolicy::ContextOnly,
+        WireApi::Chat | WireApi::Anthropic => ToolPairBarrierPolicy::AdjacentResults,
+    }
+}
 
 impl Session {
     /// Spawn and initialize a new session.
@@ -1870,6 +1886,7 @@ impl Session {
             reference_context_item,
             turn_attribution,
             world_state_baseline,
+            tool_pair_repair_report,
             window_number,
             first_window_id,
             previous_window_id,
@@ -1952,6 +1969,15 @@ impl Session {
                 },
             );
             state.set_previous_turn_settings(previous_turn_settings.clone());
+        }
+        if !tool_pair_repair_report.is_empty() {
+            self.send_event(
+                turn_context,
+                EventMsg::Warning(WarningEvent {
+                    message: tool_pair_repair_report.warning_message(),
+                }),
+            )
+            .await;
         }
         let prefix_tokens = if matches!(
             turn_context.config.model_auto_compact_token_limit_scope,
@@ -3800,7 +3826,7 @@ impl Session {
         model_info: &ModelInfo,
         mut items: Vec<ResponseItemEnvelope>,
         image_preparations: Vec<ImagePreparationMetadata>,
-    ) {
+    ) -> crate::context_manager::BarrierAwareRecordOutcome {
         // Save the originating history budget for replay.
         // Preserve any existing tool-specific override.
         let policy: codex_utils_output_truncation::TruncationPolicy =
@@ -3843,52 +3869,10 @@ impl Session {
                 }
                 Some(revision)
             });
-        let response_items = items
-            .iter()
-            .map(|envelope| envelope.item.clone())
-            .collect::<Vec<_>>();
-        {
-            let mut state = self.state.lock().await;
-            state
-                .current_time_reminder
-                .note_recorded_items(&response_items);
-            let pending_orders = turn_context
-                .extension_data
-                .get::<retained_context::PendingAssistantMessageOrders>();
-            for envelope in &mut items {
-                if envelope
-                    .metadata
-                    .as_ref()
-                    .is_some_and(|metadata| metadata.compaction_output)
-                {
-                    continue;
-                }
-                if matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "assistant")
-                    || matches!(&envelope.item, ResponseItem::FunctionCall { .. })
-                    || crate::context::is_user_authorization_message(&envelope.item)
-                {
-                    let message_order = pending_orders.as_ref().and_then(|orders| {
-                        orders
-                            .0
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .remove(envelope.item.id()?.as_str())
-                    });
-                    // Preserve input acceptance and source-message start order.
-                    // Synthetic messages still receive their order here.
-                    envelope
-                        .metadata
-                        .get_or_insert_default()
-                        .user_input_order
-                        .get_or_insert_with(|| {
-                            message_order.unwrap_or_else(|| state.history.reserve_input_order())
-                        });
-                }
-            }
-            state
-                .history
-                .record_annotated_items(&mut items, model_info.truncation_policy.into());
-        }
+        let outcome = self
+            .record_prepared_items_through_barrier(turn_context, &items, policy)
+            .await;
+        let sealed_items = &outcome.sealed;
         for image in image_preparations {
             self.services
                 .analytics_events_client
@@ -3911,11 +3895,15 @@ impl Session {
         } else {
             None
         };
+        // Only recorded items reach the rollout; items the barrier queued persist when a later
+        // call closes the barrier and flushes them.
         let rollout_items = initial_settings
             .into_iter()
             .map(RolloutItem::EventMsg)
-            .chain(items.into_iter().map(RolloutItem::ResponseItem))
+            .chain(sealed_items.iter().cloned().map(RolloutItem::ResponseItem))
             .collect::<Vec<_>>();
+        // A fully deferred batch persists nothing, so its attribution checkpoint is not durable
+        // yet; keep it dirty and let the batch that actually writes it mark the revision.
         let persisted = self.persist_rollout_items(&rollout_items).await;
         drop(settings_guard);
         if persisted && let Some(revision) = mcp_revision {
@@ -3923,15 +3911,196 @@ impl Session {
                 .executed_tool_calls
                 .mark_mcp_attribution_persisted(revision);
         }
+        let recorded_response_items = sealed_items
+            .iter()
+            .filter(|envelope| should_persist_response_item(&envelope.item))
+            .map(|envelope| envelope.item.clone())
+            .collect::<Vec<_>>();
         if turn_context.config.memories.disable_on_external_context
-            && let Some(item) = response_items
+            && let Some(item) = recorded_response_items
                 .iter()
                 .find(|item| matches!(item, ResponseItem::FunctionCallOutput { call_id: None, .. }))
         {
             mark_thread_memory_mode_polluted_if_external_context(self, turn_context, item).await;
         }
+        self.send_raw_response_items(turn_context, &recorded_response_items)
+            .await;
+        outcome
+    }
+
+    /// Records prepared items through the tool-pair write barrier and returns what was recorded.
+    ///
+    /// Returns `(everything recorded, including already-deferred items that this batch
+    /// flushed)`. Callers persist the first list and surface the second to observers.
+    async fn record_prepared_items_through_barrier(
+        &self,
+        turn_context: &TurnContext,
+        items: &[ResponseItemEnvelope],
+        policy: codex_utils_output_truncation::TruncationPolicy,
+    ) -> crate::context_manager::BarrierAwareRecordOutcome {
+        let mut slots: Vec<Option<ResponseItemEnvelope>> =
+            items.iter().cloned().map(Some).collect();
+        let turn_active = self.turn_active.load(std::sync::atomic::Ordering::Acquire);
+        let barrier_policy = tool_pair_barrier_policy(turn_context);
+        let mut state = self.state.lock().await;
+        // Responses accepts context between a call and its output. Keep the historical
+        // out-of-turn behavior for it: writes made while no turn is running retain their
+        // natural order instead of waiting behind calls that no turn will settle.
+        if !turn_active
+            && barrier_policy == crate::context_manager::ToolPairBarrierPolicy::ContextOnly
+        {
+            let mut recorded = Vec::new();
+            for slot in slots.iter_mut().flatten() {
+                state
+                    .current_time_reminder
+                    .note_recorded_items(std::slice::from_ref(&slot.item));
+                self.assign_user_input_order_locked(turn_context, &mut state, slot);
+                state
+                    .history
+                    .record_annotated_items(std::slice::from_mut(slot), policy);
+                recorded.push(slot.clone());
+            }
+            return crate::context_manager::BarrierAwareRecordOutcome {
+                sealed: recorded,
+                flushed: Vec::new(),
+            };
+        }
+        for envelope in slots.iter_mut().flatten() {
+            self.assign_user_input_order_locked(turn_context, &mut state, envelope);
+        }
+        let mut outcome = state.history.record_annotated_items_with_barrier_policy(
+            &mut slots,
+            policy,
+            barrier_policy,
+        );
+        // No running turn can deliver the missing results for calls that are still open. If
+        // this out-of-turn batch queued context behind those calls, close them (real outputs in
+        // the batch win because they were recorded first) and release the context instead of
+        // leaving an out-of-turn writer stranded behind a barrier that will never advance. A
+        // batch that only records a call keeps the barrier open for its later output.
+        let deferred_by_this_batch = slots.iter().any(Option::is_none);
+        if !turn_active && deferred_by_this_batch {
+            let flushed = state.history.flush_tool_pair_barrier(policy);
+            outcome.sealed.extend(flushed.recorded);
+        }
+        // Only items that reached the model window count as recorded for reminder dedup;
+        // deferred items are noted when their flush records them.
+        let recorded_response_items: Vec<ResponseItem> = outcome
+            .sealed
+            .iter()
+            .map(|envelope| envelope.item.clone())
+            .collect();
+        state
+            .current_time_reminder
+            .note_recorded_items(&recorded_response_items);
+        outcome
+    }
+
+    /// Stamps `user_input_order` on assistant messages, tool calls and user authorization
+    /// messages so resume keeps acceptance order. Shared by the barrier and passthrough paths.
+    fn assign_user_input_order_locked(
+        &self,
+        turn_context: &TurnContext,
+        state: &mut crate::state::SessionState,
+        envelope: &mut ResponseItemEnvelope,
+    ) {
+        if envelope
+            .metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.compaction_output)
+        {
+            return;
+        }
+        if !(matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "assistant")
+            || matches!(&envelope.item, ResponseItem::FunctionCall { .. })
+            || crate::context::is_user_authorization_message(&envelope.item))
+        {
+            return;
+        }
+        let pending_orders = turn_context
+            .extension_data
+            .get::<retained_context::PendingAssistantMessageOrders>();
+        let message_order = pending_orders.as_ref().and_then(|orders| {
+            orders
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(envelope.item.id()?.as_str())
+        });
+        // Preserve input acceptance and source-message start order.
+        // Synthetic messages still receive their order here.
+        envelope
+            .metadata
+            .get_or_insert_default()
+            .user_input_order
+            .get_or_insert_with(|| {
+                message_order.unwrap_or_else(|| state.history.reserve_input_order())
+            });
+    }
+
+    /// Closes abandoned tool pairs before a hard context boundary is recorded.
+    ///
+    /// Only Chat and Anthropic require adjacent results. A prompt or inter-agent message is
+    /// admitted at a point where no live tool can deliver a result. If a call is nevertheless
+    /// open for those wires, its future is gone: append the canonical abort result first so the
+    /// boundary never splits a call from its output. Responses accepts context between a call and
+    /// its output, so it keeps the original ordering.
+    async fn close_abandoned_tool_pairs(&self, turn_context: &TurnContext, boundary: &str) {
+        if tool_pair_barrier_policy(turn_context)
+            == crate::context_manager::ToolPairBarrierPolicy::ContextOnly
+        {
+            return;
+        }
+        let has_open_tool_calls = {
+            let state = self.state.lock().await;
+            state.history.has_open_tool_calls()
+        };
+        if has_open_tool_calls {
+            tracing::warn!(
+                turn_id = %turn_context.sub_id,
+                boundary,
+                "context arrived with open tool calls; closing them first"
+            );
+            self.flush_tool_pair_barrier(turn_context).await;
+        }
+    }
+
+    /// Closes abandoned tool calls and flushes deferred context, persisting the result.
+    ///
+    /// Called at boundaries that tool outputs cannot cross (start of a turn, interrupt
+    /// handling) so user context admitted during a stuck or aborted tool call is never lost.
+    /// Returns the number of recorded items, or zero when nothing was pending.
+    pub(super) async fn flush_tool_pair_barrier(&self, turn_context: &TurnContext) -> u64 {
+        let policy: codex_utils_output_truncation::TruncationPolicy =
+            turn_context.model_info().truncation_policy.into();
+        let flushed = {
+            let mut state = self.state.lock().await;
+            if !state.history.has_open_tool_calls() && !state.history.has_deferred_user_context() {
+                return 0;
+            }
+            let flushed = state.history.flush_tool_pair_barrier(policy).recorded;
+            let items: Vec<ResponseItem> = flushed
+                .iter()
+                .map(|envelope| envelope.item.clone())
+                .collect();
+            state.current_time_reminder.note_recorded_items(&items);
+            flushed
+        };
+        let rollout_items: Vec<RolloutItem> = flushed
+            .iter()
+            .filter(|envelope| should_persist_response_item(&envelope.item))
+            .cloned()
+            .map(RolloutItem::ResponseItem)
+            .collect();
+        self.persist_rollout_items(&rollout_items).await;
+        let response_items: Vec<ResponseItem> = flushed
+            .iter()
+            .filter(|envelope| should_persist_response_item(&envelope.item))
+            .map(|envelope| envelope.item.clone())
+            .collect();
         self.send_raw_response_items(turn_context, &response_items)
             .await;
+        response_items.len() as u64
     }
 
     pub(crate) async fn record_step_world_state_if_changed(
@@ -4307,6 +4476,12 @@ impl Session {
             .acquire()
             .await
             .unwrap_or_else(|_| unreachable!("communication boundary remains open"));
+        // The message also must not split an open call from its output. It is normally
+        // admitted at a safe pending-input drain point; if a call is still open here, its
+        // output can no longer arrive before this boundary, so close the pair first instead
+        // of deferring the message behind the communication metadata.
+        self.close_abandoned_tool_pairs(turn_context, "inter_agent_message")
+            .await;
         // Older readers assign delivered assistant messages to the next physical
         // communication boundary, so persist earlier confirmed sends first.
         let (order, pending) = {
@@ -4323,26 +4498,48 @@ impl Session {
         for mut recording in pending {
             let _ = recording.changed().await;
         }
-        {
-            let mut state = self.state.lock().await;
-            state.current_time_reminder.note_recorded_items(items);
-            state.history.record_annotated_items(
-                std::slice::from_mut(&mut response_item),
+        let outcome = self
+            .record_prepared_items_through_barrier(
+                turn_context,
+                std::slice::from_ref(&response_item),
                 model_info.truncation_policy.into(),
-            );
+            )
+            .await;
+        // Items the barrier released were admitted before this message, so they must stay
+        // physically earlier in the rollout than the communication boundary they precede.
+        // A single-message batch can only flush from its prefix, never from the middle.
+        let (flushed_items, sealed_items) = outcome.sealed.split_at(outcome.flushed.len());
+        if !flushed_items.is_empty() {
+            let flushed_rollout: Vec<RolloutItem> = flushed_items
+                .iter()
+                .filter(|envelope| should_persist_response_item(&envelope.item))
+                .cloned()
+                .map(RolloutItem::ResponseItem)
+                .collect();
+            self.persist_rollout_items(&flushed_rollout).await;
         }
         if let Some(delivery) = &communication.delivery {
             delivery.consumed(self.thread_id);
         }
-        self.persist_rollout_items(&[
-            RolloutItem::InterAgentCommunicationMetadata {
-                trigger_turn: communication.trigger_turn,
-            },
-            RolloutItem::ResponseItem(response_item),
-        ])
-        .await;
+        let mut rollout_items = vec![RolloutItem::InterAgentCommunicationMetadata {
+            trigger_turn: communication.trigger_turn,
+        }];
+        rollout_items.extend(
+            sealed_items
+                .iter()
+                .filter(|envelope| should_persist_response_item(&envelope.item))
+                .cloned()
+                .map(RolloutItem::ResponseItem),
+        );
+        self.persist_rollout_items(&rollout_items).await;
         drop(boundary);
-        self.send_raw_response_items(turn_context, items).await;
+        let sealed_response_items: Vec<ResponseItem> = flushed_items
+            .iter()
+            .chain(sealed_items)
+            .map(|envelope| envelope.item.clone())
+            .collect();
+        self.send_raw_response_items(turn_context, &sealed_response_items)
+            .await;
     }
 
     async fn maybe_warn_on_server_model_mismatch(
@@ -5498,6 +5695,14 @@ impl Session {
         // Persist the user message to history, but emit the turn item from `UserInput` so
         // UI-only `text_elements` are preserved. `ResponseItem::Message` does not carry
         // those spans, and `record_response_item_and_emit_turn_item` would drop them.
+        //
+        // A prompt is admitted at a turn boundary, so no live tool call may still be waiting
+        // for its result. If one is, its future is already gone: close it with the canonical
+        // abort result before appending the prompt, otherwise the prompt would either split
+        // the pair (invalid Chat history) or be deferred while the UI already reports it as
+        // committed.
+        self.close_abandoned_tool_pairs(turn_context, "user_prompt")
+            .await;
         let mut user_image_content_indices = HashMap::new();
         let mut response_item = self.response_item_from_user_input_with_image_positions(
             input.to_vec(),
@@ -5531,19 +5736,49 @@ impl Session {
                 }],
             )
             .await;
+        let prompt_item_id = prepared_items
+            .first()
+            .and_then(|envelope| envelope.item.id().cloned());
         let mut user_message_item = UserMessageItem::new(input);
         apply_prepared_image_file_ids(
             &mut user_message_item,
             &prepared_items,
             &user_image_content_indices,
         );
-        self.record_prepared_conversation_items(
-            turn_context,
-            model_info,
-            prepared_items,
-            image_preparations,
-        )
-        .await;
+        let outcome = self
+            .record_prepared_conversation_items(
+                turn_context,
+                model_info,
+                prepared_items,
+                image_preparations,
+            )
+            .await;
+        // The prompt must be in the model window before the UI is told it was committed. If a
+        // late writer queued it behind the barrier, release it now so the transcript order and
+        // the model history agree. Responses accepts the prompt between a call and its output,
+        // so it keeps the historical deferred behavior instead of synthesizing an abort.
+        let prompt_was_recorded = prompt_item_id.is_none_or(|prompt_id| {
+            outcome
+                .sealed
+                .iter()
+                .any(|envelope| envelope.item.id() == Some(&prompt_id))
+        });
+        if !prompt_was_recorded {
+            if tool_pair_barrier_policy(turn_context)
+                == crate::context_manager::ToolPairBarrierPolicy::AdjacentResults
+            {
+                tracing::warn!(
+                    turn_id = %turn_context.sub_id,
+                    "user prompt was deferred by the tool-pair barrier; flushing before emitting it"
+                );
+                self.flush_tool_pair_barrier(turn_context).await;
+            } else {
+                tracing::debug!(
+                    turn_id = %turn_context.sub_id,
+                    "user prompt deferred until the open tool call records its output"
+                );
+            }
+        }
         user_message_item.client_id = client_id;
         let turn_item = TurnItem::UserMessage(user_message_item);
         self.emit_turn_item_started(turn_context, &turn_item).await;
