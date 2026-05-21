@@ -68,6 +68,7 @@ async fn continue_after_stream_error() {
         base_url: Some(format!("{}/v1", server.uri())),
         model_catalog_url: None,
         env_key: Some("PATH".into()),
+        env_key_auth: None,
         env_key_instructions: None,
         experimental_bearer_token: None,
         auth: None,
