@@ -27,6 +27,7 @@ use std::fmt;
 use std::num::NonZeroU64;
 use std::path::Component;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::PoisonError;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -104,6 +105,8 @@ pub enum WireApi {
     Responses,
     /// The OpenAI Chat Completions API exposed at `/v1/chat/completions`.
     Chat,
+    /// The Anthropic Messages API exposed at `/v1/messages`.
+    Anthropic,
 }
 
 impl fmt::Display for WireApi {
@@ -111,6 +114,7 @@ impl fmt::Display for WireApi {
         let value = match self {
             Self::Responses => "responses",
             Self::Chat => "chat",
+            Self::Anthropic => "anthropic",
         };
         f.write_str(value)
     }
@@ -125,11 +129,56 @@ impl<'de> Deserialize<'de> for WireApi {
         match value.as_str() {
             "responses" => Ok(Self::Responses),
             "chat" => Ok(Self::Chat),
+            "anthropic" => Ok(Self::Anthropic),
             _ => Err(serde::de::Error::unknown_variant(
                 &value,
-                &["responses", "chat"],
+                &["responses", "chat", "anthropic"],
             )),
         }
+    }
+}
+
+/// Auth header scheme used for API keys loaded from `env_key`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum EnvKeyAuthScheme {
+    /// Send the key as `Authorization: Bearer <key>`.
+    Bearer,
+    /// Send the key as `x-api-key: <key>`.
+    XApiKey,
+}
+
+impl fmt::Display for EnvKeyAuthScheme {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Bearer => "bearer",
+            Self::XApiKey => "x-api-key",
+        };
+        f.write_str(value)
+    }
+}
+
+impl FromStr for EnvKeyAuthScheme {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "bearer" => Ok(Self::Bearer),
+            "x-api-key" => Ok(Self::XApiKey),
+            _ => Err(format!("invalid env_key_auth: {value}")),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EnvKeyAuthScheme {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value
+            .parse()
+            .map_err(|_| serde::de::Error::unknown_variant(&value, &["bearer", "x-api-key"]))
     }
 }
 
@@ -147,6 +196,8 @@ pub struct ModelProviderInfo {
     pub model_catalog_url: Option<RedactedString>,
     /// Environment variable that stores the user's API key for this provider.
     pub env_key: Option<String>,
+    /// Auth header scheme to use for the API key loaded from `env_key`.
+    pub env_key_auth: Option<EnvKeyAuthScheme>,
 
     /// Optional instructions to help the user get a valid value for the
     /// variable and set it.
@@ -535,6 +586,7 @@ other non-default provider fields are not supported"
             base_url,
             model_catalog_url: None,
             env_key: None,
+            env_key_auth: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
             auth: None,
@@ -583,6 +635,7 @@ other non-default provider fields are not supported"
             base_url: None,
             model_catalog_url: None,
             env_key: None,
+            env_key_auth: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
             auth: None,
@@ -656,6 +709,13 @@ other non-default provider fields are not supported"
 
     pub fn has_command_auth(&self) -> bool {
         self.auth.is_some()
+    }
+
+    pub fn has_provider_scoped_auth(&self) -> bool {
+        self.env_key.is_some()
+            || self.experimental_bearer_token.is_some()
+            || self.auth.is_some()
+            || self.aws.is_some()
     }
 }
 
@@ -767,6 +827,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         base_url: Some(base_url.into()),
         model_catalog_url: None,
         env_key: None,
+        env_key_auth: None,
         env_key_instructions: None,
         experimental_bearer_token: None,
         auth: None,
