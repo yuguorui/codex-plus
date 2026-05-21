@@ -6,6 +6,7 @@ use codex_login::AuthKeyringBackendKind;
 use codex_login::auth::AgentIdentityAuthRecord;
 use codex_login::auth::BedrockApiKeyAuth;
 use codex_login::auth::login_with_chatgpt_auth_tokens;
+use codex_model_provider_info::EnvKeyAuthScheme;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
 use codex_protocol::account::PlanType;
@@ -308,6 +309,40 @@ fn openai_provider_rejects_bedrock_api_key_auth() {
         },
         Ok(_) => panic!("Bedrock API key auth should be rejected"),
     }
+}
+
+#[test]
+fn anthropic_api_key_auth_provider_adds_x_api_key_header() {
+    let auth = AnthropicApiKeyAuthProvider {
+        api_key: "test-api-key".to_string(),
+    };
+    let headers = auth.to_auth_headers().unwrap();
+
+    assert_eq!(
+        headers
+            .get("x-api-key")
+            .and_then(|value| value.to_str().ok()),
+        Some("test-api-key")
+    );
+    assert!(!headers.contains_key(http::header::AUTHORIZATION));
+}
+
+#[test]
+fn anthropic_provider_can_use_bearer_auth_for_env_key() {
+    let mut provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Anthropic);
+    provider.env_key_auth = Some(EnvKeyAuthScheme::Bearer);
+
+    let auth = auth_provider_for_env_key(&provider, "test-api-key".to_string());
+    let headers = auth.to_auth_headers().unwrap();
+
+    assert_eq!(
+        headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer test-api-key")
+    );
+    assert!(!headers.contains_key("x-api-key"));
 }
 
 #[tokio::test]
