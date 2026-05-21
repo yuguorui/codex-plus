@@ -40,6 +40,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
         | ApiError::RateLimit(_)
         | ApiError::InvalidRequest { .. }
         | ApiError::AccessProgramNotEnabled { .. }
+        | ApiError::InvalidToolArguments(_)
         | ApiError::InvalidAudioInput { .. }
         | ApiError::ModelNotFound { .. }
         | ApiError::InvalidPrompt { .. }
@@ -91,6 +92,9 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
         ApiError::InvalidRequest { message } => CodexErr::InvalidRequest(message),
         ApiError::AccessProgramNotEnabled { message } => {
             CodexErrorDetails::AccessProgramNotEnabled(ProviderRejection::Stream(message)).into()
+        }
+        ApiError::InvalidToolArguments(error) => {
+            CodexErr::new(CodexErrorDetails::InvalidToolArguments(error))
         }
         ApiError::InvalidAudioInput {
             message,

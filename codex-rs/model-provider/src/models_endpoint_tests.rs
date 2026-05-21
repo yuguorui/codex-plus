@@ -403,7 +403,7 @@ async fn command_auth_refresh_fetches_a_catalog_for_the_current_credentials() {
         .respond_with(ResponseTemplate::new(200).set_body_json(ModelsResponse {
             models: vec![model.clone()],
         }))
-        .expect(/*r*/ 3)
+        .expect(/*r*/ 2)
         .mount(&server)
         .await;
     let mut provider = provider_info_with_command_auth();
@@ -477,7 +477,7 @@ async fn command_auth_refresh_fetches_a_catalog_for_the_current_credentials() {
             .iter()
             .map(|request| request.headers["authorization"].to_str().unwrap())
             .collect::<Vec<_>>(),
-        vec!["Bearer token-2", "Bearer token-5", "Bearer token-9"]
+        vec!["Bearer token-1", "Bearer token-3"]
     );
 }
 
@@ -628,4 +628,22 @@ async fn explicit_catalog_rejects_redirects_without_forwarding_provider_credenti
     assert!(!error.to_string().contains("catalog-secret"));
     assert!(!format!("{error:?}").contains("catalog-secret"));
     assert_eq!(destination.received_requests().await.unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn env_key_provider_does_not_use_codex_backend_models() {
+    let endpoint = OpenAiModelsEndpoint::new(
+        ModelProviderInfo {
+            env_key: Some("THIRD_PARTY_API_KEY".to_string()),
+            requires_openai_auth: false,
+            ..ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+        },
+        Some(AuthManager::from_auth_for_testing(
+            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        )),
+        /*gateway_auth_manager*/ None,
+    );
+
+    assert!(!endpoint.uses_codex_backend().await);
+    assert!(endpoint.treats_refresh_failure_as_non_fatal().await);
 }

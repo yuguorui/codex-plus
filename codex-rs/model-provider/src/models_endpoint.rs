@@ -133,6 +133,9 @@ impl OpenAiModelsEndpoint {
     }
 
     async fn uses_codex_backend(&self) -> bool {
+        if self.provider_info.has_provider_scoped_auth() {
+            return false;
+        }
         self.auth()
             .await
             .as_ref()
@@ -346,8 +349,18 @@ impl ModelsEndpointClient for OpenAiModelsEndpoint {
         self.provider_info.has_command_auth()
     }
 
+    fn can_refresh_models_without_codex_backend(&self) -> bool {
+        self.provider_info.has_provider_scoped_auth()
+    }
+
     fn uses_codex_backend(&self) -> ModelsEndpointFuture<'_, bool> {
         Box::pin(OpenAiModelsEndpoint::uses_codex_backend(self))
+    }
+
+    fn treats_refresh_failure_as_non_fatal(&self) -> ModelsEndpointFuture<'_, bool> {
+        Box::pin(async move {
+            self.provider_info.has_provider_scoped_auth() || !self.uses_codex_backend().await
+        })
     }
 
     fn list_models<'a>(
