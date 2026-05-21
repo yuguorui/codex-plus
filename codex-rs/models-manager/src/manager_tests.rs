@@ -97,6 +97,7 @@ fn assert_models_contain(actual: &[ModelInfo], expected: &[ModelInfo]) {
 struct TestModelsEndpoint {
     has_command_auth: bool,
     uses_codex_backend: bool,
+    non_fatal_refresh_failure: bool,
     responses: Mutex<VecDeque<CoreResult<Vec<ModelInfo>>>>,
     etag: Option<String>,
     fetch_count: AtomicUsize,
@@ -219,6 +220,17 @@ impl TestModelsEndpoint {
         })
     }
 
+    fn with_non_fatal_refresh_error() -> Arc<Self> {
+        Arc::new(Self {
+            has_command_auth: true,
+            non_fatal_refresh_failure: true,
+            responses: Mutex::new(VecDeque::from([Err(CodexErr::InvalidRequest(
+                "third-party models endpoint unavailable".to_string(),
+            ))])),
+            ..Self::default()
+        })
+    }
+
     fn fetch_count(&self) -> usize {
         self.fetch_count.load(Ordering::SeqCst)
     }
@@ -293,6 +305,10 @@ impl ModelsEndpointClient for TestModelsEndpoint {
 
     fn uses_codex_backend(&self) -> ModelsEndpointFuture<'_, bool> {
         Box::pin(async { self.uses_codex_backend })
+    }
+
+    fn treats_refresh_failure_as_non_fatal(&self) -> ModelsEndpointFuture<'_, bool> {
+        Box::pin(async { self.non_fatal_refresh_failure })
     }
 
     fn list_models<'a>(
@@ -1418,6 +1434,29 @@ async fn refresh_available_models_skips_network_without_auth() {
         0,
         "endpoint that cannot refresh should avoid model fetches"
     );
+}
+
+#[tokio::test]
+async fn raw_model_catalog_tolerates_third_party_models_refresh_failure() {
+    let codex_home = tempdir().expect("temp dir");
+    let endpoint = TestModelsEndpoint::with_non_fatal_refresh_error();
+    let manager = openai_manager_for_tests_with_auth(
+        codex_home.path().to_path_buf(),
+        endpoint.clone(),
+        Some(AuthManager::from_auth_for_testing(
+            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        )),
+    );
+
+    let catalog = manager
+        .raw_model_catalog(RefreshStrategy::Online, DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+
+    assert_eq!(
+        catalog.models,
+        load_remote_models_from_file().unwrap_or_default()
+    );
+    assert_eq!(endpoint.fetch_count(), 1);
 }
 
 #[derive(Debug)]
