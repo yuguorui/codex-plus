@@ -1,6 +1,7 @@
 use crate::rate_limits::RateLimitError;
 use codex_client::TransportError;
 use codex_http_client::RetryAfter;
+use codex_protocol::error::InvalidToolArgumentsError;
 use codex_protocol::error::ResponseIncompleteError;
 use codex_protocol::protocol::MisalignmentErrorDetails;
 use http::StatusCode;
@@ -41,6 +42,8 @@ pub enum ApiError {
     RateLimit(String),
     #[error("invalid request: {message}")]
     InvalidRequest { message: String },
+    #[error("{0}")]
+    InvalidToolArguments(Box<InvalidToolArgumentsError>),
     #[error("{message}")]
     InvalidAudioInput {
         message: String,

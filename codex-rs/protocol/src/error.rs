@@ -95,6 +95,37 @@ pub struct ResponseIncompleteError {
 }
 
 /// The semantic category and diagnostic payload for a [`CodexErr`].
+#[derive(Debug, Clone, Error)]
+#[error(
+    "invalid tool call arguments for '{tool_name}' (call id '{call_id}', {argument_bytes} bytes): {message}"
+)]
+pub struct InvalidToolArgumentsError {
+    pub tool_name: String,
+    pub namespace: Option<String>,
+    pub call_id: String,
+    pub argument_bytes: usize,
+    pub message: String,
+}
+
+impl InvalidToolArgumentsError {
+    /// Model-visible feedback for a tool call that was rejected before execution.
+    pub fn feedback_message(&self) -> String {
+        let tool_name = match self.namespace.as_deref() {
+            Some(namespace) if !namespace.is_empty() => {
+                format!("{namespace}{}", self.tool_name)
+            }
+            _ => self.tool_name.clone(),
+        };
+        format!(
+            "Tool call '{tool_name}' (call id '{}', {} argument bytes) was not executed because \
+             its JSON arguments were invalid or incomplete. Parse error: {}. The arguments may \
+             have been truncated by max_tokens. Return a new tool call with a complete JSON \
+             object; split large inputs into smaller calls if necessary.",
+            self.call_id, self.argument_bytes, self.message
+        )
+    }
+}
+
 #[derive(Error, Debug, EnumDiscriminants)]
 #[strum_discriminants(name(CodexErrKind))]
 #[strum_discriminants(derive(serde::Serialize, strum_macros::IntoStaticStr))]
@@ -154,6 +185,8 @@ pub enum CodexErrorDetails {
     /// Invalid request.
     #[error("{0}")]
     InvalidRequest(String),
+    #[error("{0}")]
+    InvalidToolArguments(Box<InvalidToolArgumentsError>),
     #[error("{message}")]
     InvalidAudioInput {
         message: String,
@@ -447,6 +480,7 @@ impl CodexErr {
             | CodexErrorDetails::QuotaExceeded
             | CodexErrorDetails::InvalidImageRequest()
             | CodexErrorDetails::InvalidRequest(_)
+            | CodexErrorDetails::InvalidToolArguments(_)
             | CodexErrorDetails::InvalidAudioInput { .. }
             | CodexErrorDetails::ResponseIncomplete(_)
             | CodexErrorDetails::ModelNotFound { .. }
