@@ -14,6 +14,8 @@ pub struct TokenUsage {
     pub cached_input_tokens: i64,
     #[serde(default)]
     pub cache_write_input_tokens: i64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: i64,
     pub output_tokens: i64,
     pub reasoning_output_tokens: i64,
     pub total_tokens: i64,
@@ -25,6 +27,7 @@ impl From<codex_app_server_protocol::TokenUsageBreakdown> for TokenUsage {
             input_tokens: usage.input_tokens,
             cached_input_tokens: usage.cached_input_tokens,
             cache_write_input_tokens: usage.cache_write_input_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
             output_tokens: usage.output_tokens,
             reasoning_output_tokens: usage.reasoning_output_tokens,
             total_tokens: usage.total_tokens,
