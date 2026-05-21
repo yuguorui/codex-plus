@@ -2524,7 +2524,7 @@ fn websocket_error_detail(err: &ApiError) -> String {
             "handshake error: rate limit exceeded: [redacted]".to_string()
         }
         ApiError::RateLimit(_) => "handshake error: rate limit: [redacted]".to_string(),
-        ApiError::InvalidRequest { .. } => {
+        ApiError::InvalidRequest { .. } | ApiError::InvalidToolArguments(_) => {
             "handshake error: invalid request: [redacted]".to_string()
         }
         ApiError::InvalidAudioInput { .. } => {
