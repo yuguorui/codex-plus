@@ -27,16 +27,12 @@ impl Drop for ModelsRefreshWorker {
     }
 }
 
-pub(crate) fn spawn(
-    models_manager: &SharedModelsManager,
-    http_client_factory: HttpClientFactory,
-) -> ModelsRefreshWorker {
-    spawn_with_interval(models_manager, http_client_factory, MODELS_REFRESH_INTERVAL)
+pub(crate) fn spawn(models_manager: &SharedModelsManager) -> ModelsRefreshWorker {
+    spawn_with_interval(models_manager, MODELS_REFRESH_INTERVAL)
 }
 
 fn spawn_with_interval(
     models_manager: &SharedModelsManager,
-    http_client_factory: HttpClientFactory,
     refresh_interval: Duration,
 ) -> ModelsRefreshWorker {
     let models_manager = Arc::downgrade(models_manager);
@@ -50,9 +46,7 @@ fn spawn_with_interval(
             let Some(models_manager) = models_manager.upgrade() else {
                 break;
             };
-            models_manager
-                .list_models(RefreshStrategy::Online, http_client_factory.clone())
-                .await;
+            models_manager.list_models(RefreshStrategy::Online).await;
             drop(models_manager);
 
             tokio::select! {

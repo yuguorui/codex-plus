@@ -251,10 +251,7 @@ impl TurnContext {
             /*developer_instructions*/ None,
         );
         let available_models = models_manager
-            .list_models(
-                RefreshStrategy::OnlineIfUncached,
-                config.http_client_factory(),
-            )
+            .list_models(RefreshStrategy::OnlineIfUncached)
             .await;
 
         Self {

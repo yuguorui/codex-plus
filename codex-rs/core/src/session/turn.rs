@@ -2271,10 +2271,7 @@ async fn try_run_sampling_request(
             }
             ResponseEvent::ModelsEtag(etag) => {
                 // Update internal state with latest models etag
-                sess.services
-                    .models_manager
-                    .refresh_if_new_etag(etag, turn_context.config.http_client_factory())
-                    .await;
+                sess.services.models_manager.refresh_if_new_etag(etag).await;
             }
             ResponseEvent::Completed {
                 token_usage,

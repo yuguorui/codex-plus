@@ -57,7 +57,6 @@ impl ModelsEndpointClient for TestModelsEndpoint {
     fn list_models<'a>(
         &'a self,
         _client_version: &'a str,
-        _http_client_factory: HttpClientFactory,
     ) -> ModelsEndpointFuture<'a, CoreResult<(Vec<ModelInfo>, Option<String>)>> {
         Box::pin(async move {
             let fetch_index = self.fetch_count.fetch_add(1, Ordering::SeqCst);

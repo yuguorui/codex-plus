@@ -1,4 +1,3 @@
-use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -13,13 +12,11 @@ use codex_api::auth_header_telemetry;
 use codex_api::map_api_error;
 use codex_feedback::FeedbackRequestTags;
 use codex_feedback::emit_feedback_request_tags_with_auth_env;
-use codex_http_client::ClientRouteClass;
-use codex_http_client::HttpClientFactory;
 use codex_login::AuthEnvTelemetry;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::collect_auth_env_telemetry;
-use codex_login::default_client::build_default_reqwest_client_for_route_async;
+use codex_login::default_client::build_reqwest_client;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::manager::ModelsEndpointClient;
 use codex_models_manager::manager::ModelsEndpointFuture;
@@ -43,7 +40,6 @@ const MODELS_ENDPOINT: &str = "/models";
 pub(crate) struct OpenAiModelsEndpoint {
     provider_info: ModelProviderInfo,
     auth_manager: Option<Arc<AuthManager>>,
-    transport_builder: Arc<dyn ModelsTransportBuilder>,
 }
 
 impl OpenAiModelsEndpoint {
@@ -54,7 +50,6 @@ impl OpenAiModelsEndpoint {
         Self {
             provider_info,
             auth_manager,
-            transport_builder: Arc::new(RouteAwareModelsTransportBuilder),
         }
     }
 
@@ -66,6 +61,9 @@ impl OpenAiModelsEndpoint {
     }
 
     async fn uses_codex_backend(&self) -> bool {
+        if self.provider_info.has_provider_scoped_auth() {
+            return false;
+        }
         self.auth()
             .await
             .as_ref()
@@ -75,7 +73,6 @@ impl OpenAiModelsEndpoint {
     async fn list_models(
         &self,
         client_version: &str,
-        http_client_factory: HttpClientFactory,
     ) -> CoreResult<(Vec<ModelInfo>, Option<String>)> {
         let _timer =
             codex_otel::start_global_timer("codex.remote_models.fetch_update.duration_ms", &[]);
@@ -98,20 +95,17 @@ impl OpenAiModelsEndpoint {
             agent_identity_telemetry,
             auth_env: self.auth_env(),
         });
-        timeout(MODELS_REFRESH_TIMEOUT, async {
-            let transport = self
-                .transport_builder
-                .build(http_client_factory, request_url.clone())
-                .await?;
-            let client = ModelsClient::new(transport, api_provider, api_auth)
-                .with_telemetry(Some(request_telemetry));
-            client
-                .list_models(request_url, HeaderMap::new())
-                .await
-                .map_err(map_api_error)
-        })
+        let transport = ReqwestTransport::new(build_reqwest_client());
+        let client = ModelsClient::new(transport, api_provider, api_auth)
+            .with_telemetry(Some(request_telemetry));
+
+        timeout(
+            MODELS_REFRESH_TIMEOUT,
+            client.list_models(request_url, HeaderMap::new()),
+        )
         .await
         .map_err(|_| CodexErr::Timeout)?
+        .map_err(map_api_error)
     }
 
     fn auth_env(&self) -> AuthEnvTelemetry {
@@ -128,57 +122,30 @@ impl ModelsEndpointClient for OpenAiModelsEndpoint {
         self.provider_info.has_command_auth()
     }
 
+    fn can_refresh_models_without_codex_backend(&self) -> bool {
+        self.provider_info.has_provider_scoped_auth()
+    }
+
     fn uses_codex_backend(&self) -> ModelsEndpointFuture<'_, bool> {
         Box::pin(OpenAiModelsEndpoint::uses_codex_backend(self))
+    }
+
+    fn treats_refresh_failure_as_non_fatal(&self) -> ModelsEndpointFuture<'_, bool> {
+        Box::pin(async move {
+            self.provider_info.has_provider_scoped_auth() || !self.uses_codex_backend().await
+        })
     }
 
     fn list_models<'a>(
         &'a self,
         client_version: &'a str,
-        http_client_factory: HttpClientFactory,
     ) -> ModelsEndpointFuture<'a, CoreResult<(Vec<ModelInfo>, Option<String>)>> {
-        Box::pin(OpenAiModelsEndpoint::list_models(
-            self,
-            client_version,
-            http_client_factory,
-        ))
+        Box::pin(OpenAiModelsEndpoint::list_models(self, client_version))
     }
 }
 
 type ModelsTransportFuture<'a> =
     Pin<Box<dyn Future<Output = std::io::Result<ReqwestTransport>> + Send + 'a>>;
-
-/// Builds the concrete transport selected for one models request.
-///
-/// Implementations must honor the supplied request-time client factory and exact request URL.
-trait ModelsTransportBuilder: fmt::Debug + Send + Sync {
-    fn build(
-        &self,
-        http_client_factory: HttpClientFactory,
-        request_url: String,
-    ) -> ModelsTransportFuture<'_>;
-}
-
-#[derive(Debug)]
-struct RouteAwareModelsTransportBuilder;
-
-impl ModelsTransportBuilder for RouteAwareModelsTransportBuilder {
-    fn build(
-        &self,
-        http_client_factory: HttpClientFactory,
-        request_url: String,
-    ) -> ModelsTransportFuture<'_> {
-        Box::pin(async move {
-            build_default_reqwest_client_for_route_async(
-                http_client_factory,
-                request_url,
-                ClientRouteClass::Api,
-            )
-            .await
-            .map(ReqwestTransport::new)
-        })
-    }
-}
 
 #[derive(Clone)]
 struct ModelsRequestTelemetry {
@@ -280,42 +247,9 @@ impl RequestTelemetry for ModelsRequestTelemetry {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU64;
-    use std::sync::Mutex;
 
     use super::*;
-    use codex_http_client::OutboundProxyPolicy;
-    use codex_login::default_client::build_reqwest_client;
     use codex_protocol::config_types::ModelProviderAuthInfo;
-    use codex_protocol::openai_models::ModelsResponse;
-    use pretty_assertions::assert_eq;
-    use wiremock::Mock;
-    use wiremock::MockServer;
-    use wiremock::ResponseTemplate;
-    use wiremock::matchers::method;
-    use wiremock::matchers::path;
-    use wiremock::matchers::query_param;
-
-    #[derive(Debug)]
-    struct RecordingTransportBuilder {
-        observed_request: Arc<Mutex<Option<(OutboundProxyPolicy, String)>>>,
-    }
-
-    impl ModelsTransportBuilder for RecordingTransportBuilder {
-        fn build(
-            &self,
-            http_client_factory: HttpClientFactory,
-            request_url: String,
-        ) -> ModelsTransportFuture<'_> {
-            let observed_request = Arc::clone(&self.observed_request);
-            Box::pin(async move {
-                *observed_request
-                    .lock()
-                    .expect("observed request lock should not be poisoned") =
-                    Some((http_client_factory.outbound_proxy_policy(), request_url));
-                Ok(ReqwestTransport::new(build_reqwest_client()))
-            })
-        }
-    }
 
     fn provider_info_with_command_auth() -> ModelProviderInfo {
         ModelProviderInfo {
@@ -355,43 +289,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_request_uses_request_time_proxy_policy_and_exact_url() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/models"))
-            .and(query_param("client_version", "0.0.0"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(ModelsResponse { models: Vec::new() }),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let observed_request = Arc::new(Mutex::new(None));
-        let endpoint = OpenAiModelsEndpoint {
-            provider_info: ModelProviderInfo::create_openai_provider(Some(server.uri())),
-            auth_manager: None,
-            transport_builder: Arc::new(RecordingTransportBuilder {
-                observed_request: Arc::clone(&observed_request),
-            }),
-        };
-
-        endpoint
-            .list_models(
-                "0.0.0",
-                HttpClientFactory::new(OutboundProxyPolicy::RespectSystemProxy),
-            )
-            .await
-            .expect("models request should succeed");
-
-        assert_eq!(
-            *observed_request
-                .lock()
-                .expect("observed request lock should not be poisoned"),
-            Some((
-                OutboundProxyPolicy::RespectSystemProxy,
-                format!("{}/models?client_version=0.0.0", server.uri()),
-            ))
+    async fn env_key_provider_does_not_use_codex_backend_models() {
+        let endpoint = OpenAiModelsEndpoint::new(
+            ModelProviderInfo {
+                env_key: Some("THIRD_PARTY_API_KEY".to_string()),
+                requires_openai_auth: false,
+                ..ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+            },
+            Some(AuthManager::from_auth_for_testing(
+                CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+            )),
         );
+
+        assert!(!endpoint.uses_codex_backend().await);
+        assert!(endpoint.treats_refresh_failure_as_non_fatal().await);
     }
 }
