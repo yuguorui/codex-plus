@@ -38,6 +38,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
         | ApiError::FlexUnavailable
         | ApiError::RateLimit(_)
         | ApiError::InvalidRequest { .. }
+        | ApiError::InvalidToolArguments(_)
         | ApiError::InvalidAudioInput { .. }
         | ApiError::ModelNotFound { .. }
         | ApiError::InvalidPrompt { .. }
@@ -86,6 +87,9 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
             })
         }
         ApiError::InvalidRequest { message } => CodexErr::InvalidRequest(message),
+        ApiError::InvalidToolArguments(error) => {
+            CodexErr::new(CodexErrorDetails::InvalidToolArguments(error))
+        }
         ApiError::InvalidAudioInput {
             message,
             per_recording,

@@ -20,6 +20,7 @@ use crate::tools::parallel::ToolCallRuntime;
 use codex_memories_read::citations::parse_memory_citation;
 use codex_memories_read::citations::thread_ids_from_memory_citation;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::InvalidToolArgumentsError;
 use codex_protocol::error::Result;
 use codex_protocol::memory_citation::MemoryCitation;
 use codex_protocol::models::FunctionCallOutputBody;
@@ -33,6 +34,39 @@ use futures::Future;
 use tracing::debug;
 use tracing::instrument;
 use tracing::warn;
+
+/// Builds a protocol-valid tool call/result pair for arguments rejected before execution.
+///
+/// The assistant-side input is intentionally empty instead of replaying malformed JSON. The
+/// failed result tells the model that the tool did not run and that its arguments were truncated.
+pub(crate) fn invalid_tool_arguments_history_items(
+    error: &InvalidToolArgumentsError,
+) -> Vec<ResponseItem> {
+    vec![
+        ResponseItem::FunctionCall {
+            encrypted_content: None,
+            status: None,
+            id: None,
+            name: error.tool_name.clone(),
+            namespace: error.namespace.clone(),
+            arguments: "{}".to_string(),
+            encrypted_function_args: None,
+            call_id: error.call_id.clone(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some(error.call_id.clone()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload {
+                body: FunctionCallOutputBody::Text(error.feedback_message()),
+                success: Some(false),
+            },
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ]
+}
 
 fn strip_hidden_assistant_markup(text: &str, plan_mode: bool) -> String {
     let (without_citations, _) = strip_citations(text);
