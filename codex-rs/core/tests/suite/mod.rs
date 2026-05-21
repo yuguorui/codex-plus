@@ -33,6 +33,7 @@ mod additional_context;
 mod agent_jobs;
 mod agent_websocket;
 mod agents_md;
+mod anthropic_messages;
 mod apply_patch_cli;
 mod auto_review;
 mod chat_completions;
