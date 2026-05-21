@@ -39,6 +39,7 @@ mod additional_context;
 mod agent_execution;
 mod agent_websocket;
 mod agents_md;
+mod anthropic_messages;
 mod app_tool_exposure;
 mod apply_patch_cli;
 mod apply_patch_serialization;

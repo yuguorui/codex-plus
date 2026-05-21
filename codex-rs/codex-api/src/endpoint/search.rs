@@ -77,6 +77,7 @@ mod tests {
     use http::StatusCode;
     use pretty_assertions::assert_eq;
     use serde_json::json;
+    use std::collections::HashMap;
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -123,6 +124,7 @@ mod tests {
             base_url: "https://example.com/v1".to_string(),
             query_params: None,
             headers: HeaderMap::new(),
+            extra_body: HashMap::new(),
             retry: RetryConfig {
                 max_attempts: 1,
                 base_delay: Duration::from_millis(1),
@@ -240,7 +242,7 @@ mod tests {
             .expect("request body should be JSON");
         assert_eq!(
             body,
-            &json!({
+            json!({
                 "id": "search-session",
                 "model": "gpt-test",
                 "input": [{
