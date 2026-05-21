@@ -79,6 +79,7 @@ async fn selected_usage_is_cached_and_account_changes_discard_old_results() -> R
         input_tokens: 13_000,
         cached_input_tokens: 1_000,
         cache_write_input_tokens: 0,
+        cache_creation_input_tokens: 0,
         output_tokens: 4_000,
         reasoning_output_tokens: 0,
     };
