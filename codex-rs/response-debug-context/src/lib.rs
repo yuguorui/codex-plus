@@ -97,6 +97,7 @@ pub fn telemetry_api_error_message(error: &ApiError) -> String {
         ApiError::AccessProgramNotEnabled { .. } => "access program not enabled".to_string(),
         ApiError::ContentPolicyViolation { .. } => "content policy violation".to_string(),
         ApiError::InvalidRequest { .. }
+        | ApiError::InvalidToolArguments(_)
         | ApiError::InvalidAudioInput { .. }
         | ApiError::InvalidPrompt { .. } => "invalid request".to_string(),
         ApiError::CyberPolicy { .. } => "cyber policy".to_string(),
