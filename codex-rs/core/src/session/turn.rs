@@ -54,6 +54,7 @@ use crate::stream_events_utils::TurnItemContributorPolicy;
 use crate::stream_events_utils::finalize_non_tool_response_item;
 use crate::stream_events_utils::handle_non_tool_response_item;
 use crate::stream_events_utils::handle_output_item_done;
+use crate::stream_events_utils::invalid_tool_arguments_history_items;
 use crate::stream_events_utils::last_assistant_message_from_item;
 use crate::stream_events_utils::mark_thread_memory_mode_polluted_if_external_context;
 use crate::stream_events_utils::raw_assistant_output_text_from_item;
@@ -2035,6 +2036,33 @@ async fn run_sampling_request(
                 return Ok((output, notify_messages));
             }
             Err(err) => match err.details() {
+                CodexErrorDetails::InvalidToolArguments(details) => {
+                    let details = details.clone();
+                    let items = invalid_tool_arguments_history_items(&details);
+                    warn!(
+                        thread_id = %sess.thread_id,
+                        tool = %details.tool_name,
+                        call_id = %details.call_id,
+                        argument_bytes = details.argument_bytes,
+                        "tool call arguments were incomplete; asking the model to retry"
+                    );
+                    sess.record_conversation_items(
+                        &turn_context,
+                        &step_context.settings.model_info,
+                        &items,
+                    )
+                    .await;
+                    // A failed tool result is normal model context, not an infrastructure retry.
+                    // Continue the agent loop so the model decides how to recover.
+                    return Ok((
+                        SamplingRequestResult {
+                            needs_follow_up: true,
+                            mailbox_preempted: false,
+                            last_agent_message: None,
+                        },
+                        notify_messages,
+                    ));
+                }
                 CodexErrorDetails::ContextWindowExceeded => {
                     sess.set_total_tokens_full(&turn_context).await;
                     return Err(err);
