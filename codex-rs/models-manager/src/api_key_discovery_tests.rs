@@ -13,6 +13,8 @@ async fn api_key_discovery_disabled_preserves_command_auth_discovery_and_merging
     let endpoint = Arc::new(TestModelsEndpoint {
         has_command_auth: true,
         uses_codex_backend: false,
+        non_fatal_refresh_failure: false,
+        refresh_error: false,
         responses: Mutex::new(vec![models.clone()].into()),
         etag: None,
         fetch_count: AtomicUsize::new(0),
