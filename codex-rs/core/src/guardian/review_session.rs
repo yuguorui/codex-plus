@@ -939,6 +939,7 @@ impl codex_guardian_reviewer::ReviewerRuntime for GuardianReviewSession {
 }
 
 #[cfg(test)]
+#[cfg(test)]
 #[path = "review_session_tests.rs"]
 mod tests;
 
