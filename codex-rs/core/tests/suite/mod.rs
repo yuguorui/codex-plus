@@ -49,6 +49,7 @@ mod agent_message_wake;
 mod agent_websocket;
 mod agents_md;
 mod analytics_runtime_auth;
+mod anthropic_messages;
 mod app_tool_exposure;
 mod apply_patch_cli;
 mod apply_patch_serialization;

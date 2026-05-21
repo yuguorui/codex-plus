@@ -2066,6 +2066,7 @@ dependencies = [
  "http 1.4.0",
  "log",
  "pretty_assertions",
+ "rand 0.9.3",
  "rcgen",
  "regex-lite",
  "rustls",
