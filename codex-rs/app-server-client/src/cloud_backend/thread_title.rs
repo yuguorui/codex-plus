@@ -132,6 +132,7 @@ impl CloudTitleClient {
                 retry: codex_api::RetryConfig {
                     max_attempts: 0,
                     base_delay: Duration::ZERO,
+                    max_delay: Duration::ZERO,
                     retry_429: false,
                     retry_5xx: false,
                     retry_transport: false,
