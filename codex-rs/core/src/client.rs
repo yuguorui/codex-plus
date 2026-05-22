@@ -82,10 +82,13 @@ use codex_protocol::config_types::Verbosity as VerbosityConfig;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
+use codex_protocol::protocol::Event as ProtocolEvent;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::W3cTraceContext;
+use codex_protocol::protocol::WarningEvent;
 use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::InferenceTraceAttempt;
 use codex_rollout_trace::InferenceTraceContext;
@@ -210,6 +213,26 @@ struct RequestRouteTelemetry {
 impl RequestRouteTelemetry {
     fn for_endpoint(endpoint: &'static str) -> Self {
         Self { endpoint }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct RequestRetryNotifier {
+    tx_event: async_channel::Sender<ProtocolEvent>,
+    turn_id: String,
+}
+
+impl RequestRetryNotifier {
+    pub(crate) fn new(tx_event: async_channel::Sender<ProtocolEvent>, turn_id: String) -> Self {
+        Self { tx_event, turn_id }
+    }
+
+    fn notify(&self, message: String) {
+        let event = ProtocolEvent {
+            id: self.turn_id.clone(),
+            msg: EventMsg::Warning(WarningEvent { message }),
+        };
+        let _ = self.tx_event.try_send(event);
     }
 }
 
@@ -727,6 +750,7 @@ impl ModelClient {
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+            /*retry_notifier*/ None,
         ));
         let request_telemetry: Arc<dyn RequestTelemetry> = telemetry;
         request_telemetry
@@ -1269,6 +1293,7 @@ impl ModelClientSession {
         service_tier: Option<String>,
         turn_metadata_header: Option<&str>,
         inference_trace: &InferenceTraceContext,
+        retry_notifier: Option<RequestRetryNotifier>,
     ) -> Result<ResponseStream> {
         let auth_manager = self.client.state.provider.auth_manager();
         let mut auth_recovery = auth_manager
@@ -1288,6 +1313,7 @@ impl ModelClientSession {
                 request_auth_context,
                 RequestRouteTelemetry::for_endpoint(RESPONSES_ENDPOINT),
                 self.client.state.auth_env_telemetry.clone(),
+                retry_notifier.clone(),
             );
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
             let mut options = self
@@ -1386,6 +1412,7 @@ impl ModelClientSession {
         service_tier: Option<String>,
         turn_metadata_header: Option<&str>,
         inference_trace: &InferenceTraceContext,
+        retry_notifier: Option<RequestRetryNotifier>,
     ) -> Result<ResponseStream> {
         let auth_manager = self.client.state.provider.auth_manager();
         let mut auth_recovery = auth_manager
@@ -1405,6 +1432,7 @@ impl ModelClientSession {
                 request_auth_context,
                 RequestRouteTelemetry::for_endpoint("/chat/completions"),
                 self.client.state.auth_env_telemetry.clone(),
+                retry_notifier.clone(),
             );
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
             let responses_options = self
@@ -1503,6 +1531,7 @@ impl ModelClientSession {
         service_tier: Option<String>,
         turn_metadata_header: Option<&str>,
         inference_trace: &InferenceTraceContext,
+        retry_notifier: Option<RequestRetryNotifier>,
     ) -> Result<ResponseStream> {
         let auth_manager = self.client.state.provider.auth_manager();
         let mut auth_recovery = auth_manager
@@ -1522,6 +1551,7 @@ impl ModelClientSession {
                 request_auth_context,
                 RequestRouteTelemetry::for_endpoint("/messages"),
                 self.client.state.auth_env_telemetry.clone(),
+                retry_notifier.clone(),
             );
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
             let responses_options = self
@@ -1763,12 +1793,14 @@ impl ModelClientSession {
         auth_context: AuthRequestTelemetryContext,
         request_route_telemetry: RequestRouteTelemetry,
         auth_env_telemetry: AuthEnvTelemetry,
+        retry_notifier: Option<RequestRetryNotifier>,
     ) -> (Arc<dyn RequestTelemetry>, Arc<dyn SseTelemetry>) {
         let telemetry = Arc::new(ApiTelemetry::new(
             session_telemetry.clone(),
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+            retry_notifier,
         ));
         let request_telemetry: Arc<dyn RequestTelemetry> = telemetry.clone();
         let sse_telemetry: Arc<dyn SseTelemetry> = telemetry;
@@ -1787,6 +1819,7 @@ impl ModelClientSession {
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+            /*retry_notifier*/ None,
         ));
         let websocket_telemetry: Arc<dyn WebsocketTelemetry> = telemetry;
         websocket_telemetry
@@ -1865,6 +1898,33 @@ impl ModelClientSession {
         turn_metadata_header: Option<&str>,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
+        self.stream_with_retry_notifier(
+            prompt,
+            model_info,
+            session_telemetry,
+            effort,
+            summary,
+            service_tier,
+            turn_metadata_header,
+            inference_trace,
+            /*retry_notifier*/ None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn stream_with_retry_notifier(
+        &mut self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<String>,
+        turn_metadata_header: Option<&str>,
+        inference_trace: &InferenceTraceContext,
+        retry_notifier: Option<RequestRetryNotifier>,
+    ) -> Result<ResponseStream> {
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
             WireApi::Responses => {
@@ -1901,6 +1961,7 @@ impl ModelClientSession {
                     service_tier,
                     turn_metadata_header,
                     inference_trace,
+                    retry_notifier,
                 )
                 .await
             }
@@ -1914,6 +1975,7 @@ impl ModelClientSession {
                     service_tier,
                     turn_metadata_header,
                     inference_trace,
+                    retry_notifier,
                 )
                 .await
             }
@@ -1927,6 +1989,7 @@ impl ModelClientSession {
                     service_tier,
                     turn_metadata_header,
                     inference_trace,
+                    retry_notifier,
                 )
                 .await
             }
@@ -2410,6 +2473,7 @@ struct ApiTelemetry {
     auth_context: AuthRequestTelemetryContext,
     request_route_telemetry: RequestRouteTelemetry,
     auth_env_telemetry: AuthEnvTelemetry,
+    retry_notifier: Option<RequestRetryNotifier>,
 }
 
 impl ApiTelemetry {
@@ -2418,12 +2482,14 @@ impl ApiTelemetry {
         auth_context: AuthRequestTelemetryContext,
         request_route_telemetry: RequestRouteTelemetry,
         auth_env_telemetry: AuthEnvTelemetry,
+        retry_notifier: Option<RequestRetryNotifier>,
     ) -> Self {
         Self {
             session_telemetry,
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+            retry_notifier,
         }
     }
 }
@@ -2483,6 +2549,29 @@ impl RequestTelemetry for ApiTelemetry {
             },
             &self.auth_env_telemetry,
         );
+    }
+
+    fn on_retry(
+        &self,
+        next_attempt: u64,
+        status: Option<HttpStatusCode>,
+        _error: &TransportError,
+        delay: Duration,
+    ) {
+        if status != Some(HttpStatusCode::TOO_MANY_REQUESTS) {
+            return;
+        }
+        let Some(notifier) = &self.retry_notifier else {
+            return;
+        };
+        let retry_number = next_attempt;
+        let status = status
+            .map(|status| status.as_u16().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        notifier.notify(format!(
+            "Rate limited by the model provider (HTTP {status}); retrying request {retry_number} in {:.1}s.",
+            delay.as_secs_f64()
+        ));
     }
 }
 
