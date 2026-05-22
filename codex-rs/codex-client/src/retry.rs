@@ -9,6 +9,7 @@ use std::time::Duration;
 pub struct RetryPolicy {
     pub max_attempts: u64,
     pub base_delay: Duration,
+    pub max_delay: Duration,
     pub retry_on: RetryOn,
 }
 
@@ -51,6 +52,10 @@ pub fn backoff(base: Duration, attempt: u64) -> Duration {
     Duration::from_millis((raw as f64 * jitter) as u64)
 }
 
+pub fn capped_backoff(base: Duration, attempt: u64, max_delay: Duration) -> Duration {
+    backoff(base, attempt).min(max_delay)
+}
+
 /// Identifies a retry path and its associated trace-event layer.
 #[derive(Debug, Clone, Copy)]
 pub enum RetryOperation {
@@ -83,8 +88,23 @@ macro_rules! record_retry {
 
 pub async fn run_with_retry<T, F, Fut>(
     policy: RetryPolicy,
+    make_req: impl FnMut() -> Request,
+    op: F,
+) -> Result<T, TransportError>
+where
+    F: Fn(Request, u64) -> Fut,
+    Fut: Future<Output = Result<T, TransportError>>,
+{
+    run_with_retry_with_hook(policy, make_req, op, |_, _, _| {}).await
+}
+
+/// Same as [`run_with_retry`], but invokes `on_retry(next_attempt, error, delay)`
+/// after the retry delay is computed and before the loop sleeps.
+pub async fn run_with_retry_with_hook<T, F, Fut>(
+    policy: RetryPolicy,
     mut make_req: impl FnMut() -> Request,
     op: F,
+    mut on_retry: impl FnMut(u64, &TransportError, Duration),
 ) -> Result<T, TransportError>
 where
     F: Fn(Request, u64) -> Fut,
@@ -103,8 +123,11 @@ where
                 let retry_after = err.retry_after();
                 let delay = retry_after
                     .map(RetryAfter::remaining_delay)
-                    .unwrap_or_else(|| backoff(policy.base_delay, retry_attempt));
+                    .unwrap_or_else(|| {
+                        capped_backoff(policy.base_delay, retry_attempt, policy.max_delay)
+                    });
                 crate::record_retry!(retry_attempt, delay, RetryOperation::HttpRequest);
+                on_retry(retry_attempt, &err, delay);
                 if let Some(retry_after) = retry_after {
                     tokio::time::sleep_until(retry_after.deadline()).await;
                 } else {
@@ -115,4 +138,20 @@ where
         }
     }
     Err(TransportError::RetryLimit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capped_backoff_limits_large_exponential_delay() {
+        let delay = capped_backoff(
+            Duration::from_millis(200),
+            20,
+            Duration::from_millis(10_000),
+        );
+
+        assert_eq!(delay, Duration::from_millis(10_000));
+    }
 }

@@ -8,6 +8,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::client::ModelClientSession;
+use crate::client::RequestRetryNotifier;
 use crate::client::SamplingOptions;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
@@ -3179,6 +3180,43 @@ async fn try_run_sampling_request(
     let effort = sess
         .reasoning_effort_for_request(&step_context.settings, super::RequestEffortUsage::Sampling)
         .await;
+    let retry_notifier =
+        RequestRetryNotifier::new(sess.get_tx_event(), turn_context.sub_id.clone());
+    let hooks = hooks_for_model_request(&sess, &step_context);
+    let post_mode = hooks.execution_mode_for_event(HookEventName::PostModelRequest);
+    let defer_tool_dispatch = post_mode == Some(HookExecutionMode::Sync);
+    let finish_post_request = post_mode.map(|_| {
+        let (post_request, completed) = tokio::sync::oneshot::channel();
+        let (hook_done, wait_for_hook) = tokio::sync::oneshot::channel();
+        hooks.schedule_async_task({
+            let hooks = Arc::clone(&hooks);
+            let session = Arc::clone(&sess);
+            let step = Arc::clone(&step_context);
+            async move {
+                let event = completed.await.unwrap_or(PostModelRequest {
+                    status: ModelRequestStatus::Cancelled,
+                    error: None,
+                    token_usage: None,
+                });
+                run_model_request_hooks(&session, &step, &hooks, event).await;
+                let _ = hook_done.send(());
+            }
+        });
+        let cancellation_token = cancellation_token.clone();
+        async move |event| {
+            let _ = post_request.send(event);
+            if defer_tool_dispatch {
+                // Interrupt the wait, not the session-owned hook or final token accounting.
+                let _ = wait_for_hook.or_cancel(&cancellation_token).await;
+            }
+        }
+    });
+    if hooks
+        .execution_mode_for_event(HookEventName::PreModelRequest)
+        .is_some()
+    {
+        run_model_request_hooks(&sess, &step_context, &hooks, PreModelRequest).await;
+    }
     let sampling_timing_guard = turn_context.turn_timing_state.begin_sampling();
     let mut response_id_for_assessment = None;
     let mut answer_moderation: Option<codex_protocol::protocol::TargetedAnswerModeration> = None;
@@ -3202,6 +3240,7 @@ async fn try_run_sampling_request(
                 },
                 responses_metadata,
                 &inference_trace,
+                Some(retry_notifier.clone()),
             )
             .instrument(trace_span!("stream_request"));
         let send = async {
