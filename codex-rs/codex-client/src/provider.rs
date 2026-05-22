@@ -23,6 +23,7 @@ pub fn is_azure_provider_name(name: &str) -> bool {
 pub struct RetryConfig {
     pub max_attempts: u64,
     pub base_delay: Duration,
+    pub max_delay: Duration,
     pub retry_429: bool,
     pub retry_5xx: bool,
     pub retry_transport: bool,
@@ -33,6 +34,7 @@ impl RetryConfig {
         RetryPolicy {
             max_attempts: self.max_attempts,
             base_delay: self.base_delay,
+            max_delay: self.max_delay,
             retry_on: RetryOn {
                 retry_429: self.retry_429,
                 retry_5xx: self.retry_5xx,
