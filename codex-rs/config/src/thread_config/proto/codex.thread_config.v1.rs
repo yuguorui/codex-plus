@@ -83,6 +83,8 @@ pub struct ModelProvider {
     pub extra_body_json: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag = "21")]
     pub env_key_auth: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, optional, tag = "22")]
+    pub request_max_retry_delay_ms: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StringMap {
