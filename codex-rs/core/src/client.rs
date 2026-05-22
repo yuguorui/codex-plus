@@ -107,6 +107,7 @@ use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::W3cTraceContext;
+use codex_protocol::protocol::WarningEvent;
 use codex_rollout_trace::InferenceTraceAttempt;
 use codex_rollout_trace::InferenceTraceContext;
 use codex_tools::ToolSpec;
@@ -344,6 +345,26 @@ struct RequestRouteTelemetry {
 impl RequestRouteTelemetry {
     fn for_endpoint(endpoint: &'static str) -> Self {
         Self { endpoint }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct RequestRetryNotifier {
+    tx_event: async_channel::Sender<ProtocolEvent>,
+    turn_id: String,
+}
+
+impl RequestRetryNotifier {
+    pub(crate) fn new(tx_event: async_channel::Sender<ProtocolEvent>, turn_id: String) -> Self {
+        Self { tx_event, turn_id }
+    }
+
+    fn notify(&self, message: String) {
+        let event = ProtocolEvent {
+            id: self.turn_id.clone(),
+            msg: EventMsg::Warning(WarningEvent { message }),
+        };
+        let _ = self.tx_event.try_send(event);
     }
 }
 
@@ -1214,6 +1235,7 @@ impl ModelClient {
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+            /*retry_notifier*/ None,
         ));
         let request_telemetry: Arc<dyn RequestTelemetry> = telemetry;
         request_telemetry
@@ -2106,6 +2128,7 @@ impl ResponsesHttpExecutor<'_> {
         sampling: SamplingOptions,
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
+        retry_notifier: Option<RequestRetryNotifier>,
     ) -> Result<OpenedModelResponse> {
         let auth_manager = self.client.state.provider.auth_manager();
         let mut auth_recovery = auth_manager
@@ -2150,6 +2173,7 @@ impl ResponsesHttpExecutor<'_> {
                 request_auth_context,
                 RequestRouteTelemetry::for_endpoint("/responses"),
                 self.client.state.auth_env_telemetry.clone(),
+                retry_notifier.clone(),
             );
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
             let mut options = self
@@ -2330,6 +2354,7 @@ impl ResponsesHttpExecutor<'_> {
     )]
     async fn stream_chat_api(
         &self,
+        window_id: &str,
         prompt: &Prompt,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
@@ -2338,7 +2363,8 @@ impl ResponsesHttpExecutor<'_> {
         service_tier: Option<String>,
         turn_metadata_header: Option<&str>,
         inference_trace: &InferenceTraceContext,
-    ) -> Result<ResponseStream> {
+        retry_notifier: Option<RequestRetryNotifier>,
+    ) -> Result<OpenedModelResponse> {
         let auth_manager = self.client.state.provider.auth_manager();
         let mut auth_recovery = auth_manager
             .as_ref()
@@ -2358,10 +2384,16 @@ impl ResponsesHttpExecutor<'_> {
                 request_auth_context,
                 RequestRouteTelemetry::for_endpoint("/chat/completions"),
                 self.client.state.auth_env_telemetry.clone(),
+                retry_notifier.clone(),
             );
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
             let responses_options = self
-                .build_responses_options(turn_metadata_header, compression)
+                .build_responses_options(
+                    window_id,
+                    turn_metadata_header,
+                    compression,
+                    model_info.use_responses_lite,
+                )
                 .await;
 
             let request = self.client.build_responses_request(
@@ -2371,6 +2403,7 @@ impl ResponsesHttpExecutor<'_> {
                 effort.clone(),
                 summary,
                 service_tier.clone(),
+                window_id,
             )?;
             let inference_trace_attempt = inference_trace.start_attempt();
             let mut options = ApiChatOptions {
@@ -2390,13 +2423,14 @@ impl ResponsesHttpExecutor<'_> {
 
             match stream_result {
                 Ok(stream) => {
-                    let (stream, _) = map_response_stream(
+                    return Ok(OpenedModelResponse {
                         stream,
-                        session_telemetry.clone(),
-                        inference_trace_attempt,
-                        self.client.state.provider.clone(),
-                    );
-                    return Ok(stream);
+                        telemetry: session_telemetry.clone(),
+                        trace: inference_trace_attempt,
+                        client: Arc::clone(&self.client.state),
+                        interceptors: Vec::new(),
+                        continuation: None,
+                    });
                 }
                 Err(ApiError::Transport(
                     unauthorized_transport @ TransportError::Http { status, .. },
@@ -2449,6 +2483,7 @@ impl ResponsesHttpExecutor<'_> {
     )]
     async fn stream_anthropic_api(
         &self,
+        window_id: &str,
         prompt: &Prompt,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
@@ -2457,7 +2492,8 @@ impl ResponsesHttpExecutor<'_> {
         service_tier: Option<String>,
         turn_metadata_header: Option<&str>,
         inference_trace: &InferenceTraceContext,
-    ) -> Result<ResponseStream> {
+        retry_notifier: Option<RequestRetryNotifier>,
+    ) -> Result<OpenedModelResponse> {
         let auth_manager = self.client.state.provider.auth_manager();
         let mut auth_recovery = auth_manager
             .as_ref()
@@ -2478,10 +2514,16 @@ impl ResponsesHttpExecutor<'_> {
                 request_auth_context,
                 RequestRouteTelemetry::for_endpoint("/messages"),
                 self.client.state.auth_env_telemetry.clone(),
+                retry_notifier.clone(),
             );
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
             let responses_options = self
-                .build_responses_options(turn_metadata_header, compression)
+                .build_responses_options(
+                    window_id,
+                    turn_metadata_header,
+                    compression,
+                    model_info.use_responses_lite,
+                )
                 .await;
 
             let request = self.client.build_responses_request(
@@ -2491,6 +2533,7 @@ impl ResponsesHttpExecutor<'_> {
                 effort.clone(),
                 summary,
                 service_tier.clone(),
+                window_id,
             )?;
             let inference_trace_attempt = inference_trace.start_attempt();
             let mut options = ApiAnthropicOptions {
@@ -2513,13 +2556,14 @@ impl ResponsesHttpExecutor<'_> {
 
             match stream_result {
                 Ok(stream) => {
-                    let (stream, _) = map_response_stream(
+                    return Ok(OpenedModelResponse {
                         stream,
-                        session_telemetry.clone(),
-                        inference_trace_attempt,
-                        self.client.state.provider.clone(),
-                    );
-                    return Ok(stream);
+                        telemetry: session_telemetry.clone(),
+                        trace: inference_trace_attempt,
+                        client: Arc::clone(&self.client.state),
+                        interceptors: Vec::new(),
+                        continuation: None,
+                    });
                 }
                 Err(ApiError::Transport(
                     unauthorized_transport @ TransportError::Http { status, .. },
@@ -2955,12 +2999,14 @@ impl ModelClientSession {
         auth_context: AuthRequestTelemetryContext,
         request_route_telemetry: RequestRouteTelemetry,
         auth_env_telemetry: AuthEnvTelemetry,
+        retry_notifier: Option<RequestRetryNotifier>,
     ) -> (Arc<dyn RequestTelemetry>, Arc<dyn SseTelemetry>) {
         let telemetry = Arc::new(ApiTelemetry::new(
             session_telemetry.clone(),
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+            retry_notifier,
         ));
         let request_telemetry: Arc<dyn RequestTelemetry> = telemetry.clone();
         let sse_telemetry: Arc<dyn SseTelemetry> = telemetry;
@@ -2979,6 +3025,7 @@ impl ModelClientSession {
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+            /*retry_notifier*/ None,
         ));
         let websocket_telemetry: Arc<dyn WebsocketTelemetry> = telemetry;
         websocket_telemetry
@@ -3095,11 +3142,43 @@ impl ModelClientSession {
             },
             responses_metadata,
             inference_trace,
+            /*retry_notifier*/ None,
         )
         .await?
         .into_raw_stream()
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn stream_with_retry_notifier(
+        &mut self,
+        prompt: &Arc<Prompt>,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<String>,
+        responses_metadata: &CodexResponsesMetadata,
+        inference_trace: &InferenceTraceContext,
+        retry_notifier: Option<RequestRetryNotifier>,
+    ) -> Result<ResponseStream> {
+        self.open_model_response(
+            prompt,
+            model_info,
+            session_telemetry,
+            SamplingOptions {
+                reasoning_effort: effort,
+                reasoning_summary: summary,
+                service_tier,
+            },
+            responses_metadata,
+            inference_trace,
+            retry_notifier,
+        )
+        .await?
+        .into_stream()
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn open_model_response(
         &mut self,
         prompt: &Arc<Prompt>,
@@ -3108,7 +3187,10 @@ impl ModelClientSession {
         sampling: SamplingOptions,
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
+        retry_notifier: Option<RequestRetryNotifier>,
     ) -> Result<OpenedModelResponse> {
+        let window_id = responses_metadata.window_id.to_string();
+        let turn_metadata_header = responses_metadata.turn_metadata_json();
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
             WireApi::Responses => {
@@ -3145,32 +3227,37 @@ impl ModelClientSession {
                         sampling,
                         responses_metadata,
                         inference_trace,
+                        retry_notifier,
                     )
                     .await
             }
             WireApi::Chat => {
                 self.stream_chat_api(
+                    &window_id,
                     prompt,
                     model_info,
                     session_telemetry,
-                    effort,
-                    summary,
-                    service_tier,
-                    turn_metadata_header,
+                    sampling.reasoning_effort.clone(),
+                    sampling.reasoning_summary,
+                    sampling.service_tier.clone(),
+                    turn_metadata_header.as_deref(),
                     inference_trace,
+                    retry_notifier,
                 )
                 .await
             }
             WireApi::Anthropic => {
                 self.stream_anthropic_api(
+                    &window_id,
                     prompt,
                     model_info,
                     session_telemetry,
-                    effort,
-                    summary,
-                    service_tier,
-                    turn_metadata_header,
+                    sampling.reasoning_effort.clone(),
+                    sampling.reasoning_summary,
+                    sampling.service_tier.clone(),
+                    turn_metadata_header.as_deref(),
                     inference_trace,
+                    retry_notifier,
                 )
                 .await
             }
@@ -3791,6 +3878,7 @@ struct ApiTelemetry {
     auth_context: AuthRequestTelemetryContext,
     request_route_telemetry: RequestRouteTelemetry,
     auth_env_telemetry: AuthEnvTelemetry,
+    retry_notifier: Option<RequestRetryNotifier>,
 }
 
 impl ApiTelemetry {
@@ -3799,12 +3887,14 @@ impl ApiTelemetry {
         auth_context: AuthRequestTelemetryContext,
         request_route_telemetry: RequestRouteTelemetry,
         auth_env_telemetry: AuthEnvTelemetry,
+        retry_notifier: Option<RequestRetryNotifier>,
     ) -> Self {
         Self {
             session_telemetry,
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+            retry_notifier,
         }
     }
 }
@@ -3865,6 +3955,29 @@ impl RequestTelemetry for ApiTelemetry {
             },
             &self.auth_env_telemetry,
         );
+    }
+
+    fn on_retry(
+        &self,
+        next_attempt: u64,
+        status: Option<StatusCode>,
+        _error: &TransportError,
+        delay: Duration,
+    ) {
+        if status != Some(StatusCode::TOO_MANY_REQUESTS) {
+            return;
+        }
+        let Some(notifier) = &self.retry_notifier else {
+            return;
+        };
+        let retry_number = next_attempt;
+        let status = status
+            .map(|status| status.as_u16().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        notifier.notify(format!(
+            "Rate limited by the model provider (HTTP {status}); retrying request {retry_number} in {:.1}s.",
+            delay.as_secs_f64()
+        ));
     }
 }
 
