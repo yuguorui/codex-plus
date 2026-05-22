@@ -408,6 +408,7 @@ async fn http_retry_backoff_exhausts_attempts() {
         RetryPolicy {
             max_attempts: 2,
             base_delay: Duration::from_millis(200),
+            max_delay: Duration::from_secs(60),
             retry_on: RetryOn {
                 retry_429: false,
                 retry_5xx: true,
@@ -463,6 +464,7 @@ async fn exhausted_http_retries_preserve_deadline_through_error_mapping() {
         RetryPolicy {
             max_attempts: 1,
             base_delay: Duration::from_millis(200),
+            max_delay: Duration::from_secs(60),
             retry_on: RetryOn {
                 retry_429: false,
                 retry_5xx: true,
