@@ -7,6 +7,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::client::ModelClientSession;
+use crate::client::RequestRetryNotifier;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::compact::AutoCompactionDisabled;
@@ -2926,6 +2927,8 @@ async fn try_run_sampling_request(
     let effort = sess
         .reasoning_effort_for_request(&step_context.settings, super::RequestEffortUsage::Sampling)
         .await;
+    let retry_notifier =
+        RequestRetryNotifier::new(sess.get_tx_event(), turn_context.sub_id.clone());
     let hooks = hooks_for_model_request(&sess, &step_context);
     let post_mode = hooks.execution_mode_for_event(HookEventName::PostModelRequest);
     let defer_tool_dispatch = post_mode == Some(HookExecutionMode::Sync);
@@ -2981,7 +2984,7 @@ async fn try_run_sampling_request(
     let mut resampling = crate::guardian::ResponseResampling::new(&sess);
     let mut stream_request = async |prompt: &Prompt| {
         client_session
-            .stream(
+            .stream_with_retry_notifier(
                 prompt,
                 &step_context.settings.model_info,
                 &step_context.session_telemetry,
@@ -2990,6 +2993,7 @@ async fn try_run_sampling_request(
                 step_context.settings.service_tier.clone(),
                 responses_metadata,
                 &inference_trace,
+                Some(retry_notifier.clone()),
             )
             .instrument(trace_span!("stream_request"))
             .await

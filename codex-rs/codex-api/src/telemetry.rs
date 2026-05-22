@@ -2,10 +2,11 @@ use crate::error::ApiError;
 use codex_client::Request;
 use codex_client::RequestTelemetry;
 use codex_client::Response;
+use codex_client::RetryAfter;
 use codex_client::RetryPolicy;
 use codex_client::StreamResponse;
 use codex_client::TransportError;
-use codex_client::run_with_retry;
+use codex_client::capped_backoff;
 use http::StatusCode;
 use std::future::Future;
 use std::sync::Arc;
@@ -68,7 +69,7 @@ impl WithStatus for StreamResponse {
 pub(crate) async fn run_with_request_telemetry<T, F, Fut>(
     policy: RetryPolicy,
     telemetry: Option<Arc<dyn RequestTelemetry>>,
-    make_request: impl FnMut() -> Request,
+    mut make_request: impl FnMut() -> Request,
     send: F,
 ) -> Result<T, TransportError>
 where
@@ -76,23 +77,49 @@ where
     F: Clone + Fn(Request) -> Fut,
     Fut: Future<Output = Result<T, TransportError>>,
 {
-    // Wraps `run_with_retry` to attach per-attempt request telemetry for both
-    // unary and streaming HTTP calls.
-    run_with_retry(policy, make_request, move |req, attempt| {
-        let telemetry = telemetry.clone();
-        let send = send.clone();
-        async move {
-            let start = Instant::now();
-            let result = send(req).await;
-            if let Some(t) = telemetry.as_ref() {
-                let (status, err) = match &result {
-                    Ok(resp) => (Some(resp.status()), None),
-                    Err(err) => (http_status(err), Some(err)),
-                };
-                t.on_request(attempt, status, err, start.elapsed());
-            }
-            result
+    // Attach per-attempt request telemetry for both unary and streaming HTTP calls.
+    for attempt in 0..=policy.max_attempts {
+        let req = make_request();
+        let start = Instant::now();
+        let result = send.clone()(req).await;
+        if let Some(t) = telemetry.as_ref() {
+            let (status, err) = match &result {
+                Ok(resp) => (Some(resp.status()), None),
+                Err(err) => (http_status(err), Some(err)),
+            };
+            t.on_request(attempt, status, err, start.elapsed());
         }
-    })
-    .await
+
+        match result {
+            Ok(resp) => return Ok(resp),
+            Err(err)
+                if policy
+                    .retry_on
+                    .should_retry(&err, attempt, policy.max_attempts) =>
+            {
+                let retry_attempt = attempt + 1;
+                let retry_after = err.retry_after();
+                let delay = retry_after
+                    .map(RetryAfter::remaining_delay)
+                    .unwrap_or_else(|| {
+                        capped_backoff(policy.base_delay, retry_attempt, policy.max_delay)
+                    });
+                codex_client::record_retry!(
+                    retry_attempt,
+                    delay,
+                    codex_client::RetryOperation::HttpRequest
+                );
+                if let Some(t) = telemetry.as_ref() {
+                    t.on_retry(retry_attempt, http_status(&err), &err, delay);
+                }
+                if let Some(retry_after) = retry_after {
+                    tokio::time::sleep_until(retry_after.deadline()).await;
+                } else {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(TransportError::RetryLimit)
 }
