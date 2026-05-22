@@ -37,6 +37,7 @@ fn probe_client(base_url: String) -> ResponsesWebsocketClient {
             retry: RetryConfig {
                 max_attempts: 1,
                 base_delay: Duration::from_millis(/*millis*/ 1),
+                max_delay: Duration::from_millis(/*millis*/ 1),
                 retry_429: false,
                 retry_5xx: false,
                 retry_transport: false,

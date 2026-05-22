@@ -309,6 +309,7 @@ async fn run_remote_compaction_request_v2(
                     &turn_state, auth_owner_generation, /*event_sender*/ None, prompt, &settings.model_info, &step_context.session_telemetry, effort,
                     settings.reasoning_summary, settings.service_tier.clone(), responses_metadata,
                     &trace,
+                    /*retry_notifier*/ None,
                 ) => stream?,
             };
             return collect_compaction_output(
