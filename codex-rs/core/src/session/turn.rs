@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::client::ModelClientSession;
+use crate::client::RequestRetryNotifier;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::compact::InitialContextInjection;
@@ -2531,8 +2532,10 @@ async fn try_run_sampling_request(
     let effort = sess
         .reasoning_effort_for_request(&step_context.settings, super::RequestEffortUsage::Sampling)
         .await;
+    let retry_notifier =
+        RequestRetryNotifier::new(sess.get_tx_event(), turn_context.sub_id.clone());
     let stream = client_session
-        .stream(
+        .stream_with_retry_notifier(
             prompt,
             &step_context.settings.model_info,
             &step_context.session_telemetry,
@@ -2541,6 +2544,7 @@ async fn try_run_sampling_request(
             step_context.settings.service_tier.clone(),
             responses_metadata,
             &inference_trace,
+            Some(retry_notifier),
         )
         .instrument(trace_span!("stream_request"))
         .or_cancel(&preempt)
