@@ -8,6 +8,7 @@ use std::time::Duration;
 pub struct RetryPolicy {
     pub max_attempts: u64,
     pub base_delay: Duration,
+    pub max_delay: Duration,
     pub retry_on: RetryOn,
 }
 
@@ -48,6 +49,10 @@ pub fn backoff(base: Duration, attempt: u64) -> Duration {
     let raw = millis.saturating_mul(exp);
     let jitter: f64 = rand::rng().random_range(0.9..1.1);
     Duration::from_millis((raw as f64 * jitter) as u64)
+}
+
+pub fn capped_backoff(base: Duration, attempt: u64, max_delay: Duration) -> Duration {
+    backoff(base, attempt).min(max_delay)
 }
 
 /// Identifies a retry path and its associated trace-event layer.
@@ -100,7 +105,7 @@ where
             {
                 let retry_attempt = attempt + 1;
                 // TODO(anp): Respect Retry-After from HTTP responses before retrying the request.
-                let delay = backoff(policy.base_delay, retry_attempt);
+                let delay = capped_backoff(policy.base_delay, retry_attempt, policy.max_delay);
                 crate::record_retry!(retry_attempt, delay, RetryOperation::HttpRequest);
                 tokio::time::sleep(delay).await;
             }
@@ -108,4 +113,20 @@ where
         }
     }
     Err(TransportError::RetryLimit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capped_backoff_limits_large_exponential_delay() {
+        let delay = capped_backoff(
+            Duration::from_millis(200),
+            20,
+            Duration::from_millis(10_000),
+        );
+
+        assert_eq!(delay, Duration::from_millis(10_000));
+    }
 }
