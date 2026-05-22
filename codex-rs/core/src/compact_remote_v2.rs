@@ -325,6 +325,7 @@ async fn run_remote_compaction_request_v2(
                 },
                 responses_metadata,
                 &trace,
+                /*retry_notifier*/ None,
             );
             let stream = tokio::select! {
                 biased;
