@@ -94,6 +94,7 @@ base_url = "http://localhost:11434/v1"
         env_extra_headers: None,
         extra_body: None,
         request_max_retries: None,
+        request_max_retry_delay_ms: None,
         stream_max_retries: None,
         stream_idle_timeout_ms: None,
         websocket_connect_timeout_ms: None,
@@ -137,6 +138,7 @@ query_params = { api-version = "2025-04-01-preview" }
         env_extra_headers: None,
         extra_body: None,
         request_max_retries: None,
+        request_max_retry_delay_ms: None,
         stream_max_retries: None,
         stream_idle_timeout_ms: None,
         websocket_connect_timeout_ms: None,
@@ -184,6 +186,7 @@ supports_standalone_web_search = true
         env_extra_headers: None,
         extra_body: None,
         request_max_retries: None,
+        request_max_retry_delay_ms: None,
         stream_max_retries: None,
         stream_idle_timeout_ms: None,
         websocket_connect_timeout_ms: None,
@@ -536,6 +539,7 @@ fn test_create_amazon_bedrock_provider() {
             env_extra_headers: None,
             extra_body: None,
             request_max_retries: None,
+            request_max_retry_delay_ms: None,
             stream_max_retries: None,
             stream_idle_timeout_ms: None,
             websocket_connect_timeout_ms: None,
@@ -1054,5 +1058,23 @@ model_catalog_url = "https://gateway.example/codex/catalog?token=catalog-secret"
             .unwrap()
             .base_url,
         "https://gateway.example/v1"
+    );
+}
+
+#[test]
+fn test_request_max_retry_delay_defaults_and_caps() {
+    let default_provider = ModelProviderInfo::default();
+    assert_eq!(
+        default_provider.request_max_retry_delay(),
+        std::time::Duration::from_millis(10_000)
+    );
+
+    let configured_provider = ModelProviderInfo {
+        request_max_retry_delay_ms: Some(999_000),
+        ..ModelProviderInfo::default()
+    };
+    assert_eq!(
+        configured_provider.request_max_retry_delay(),
+        std::time::Duration::from_millis(300_000)
     );
 }
