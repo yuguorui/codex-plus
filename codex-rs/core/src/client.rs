@@ -840,6 +840,7 @@ impl ModelClient {
                     self.current_window_id(),
                 ),
             ])),
+            extra_body: model_info.extra_body.clone().unwrap_or_default(),
         };
         Ok(request)
     }
