@@ -434,6 +434,8 @@ pub struct ResponsesApiRequest {
     pub access_programs: Option<AccessPrograms>,
     #[serde(skip_serializing_if = "codex_protocol::RequestCountry::is_omitted")]
     pub request_country: codex_protocol::RequestCountry,
+    #[serde(skip_serializing)]
+    pub extra_body: HashMap<String, serde_json::Value>,
 }
 
 impl<'a> From<&'a ResponsesApiRequest> for ResponseCreateWsRequest<'a> {
@@ -459,6 +461,7 @@ impl<'a> From<&'a ResponsesApiRequest> for ResponseCreateWsRequest<'a> {
             client_metadata: request.client_metadata.clone(),
             access_programs: request.access_programs,
             request_country: &request.request_country,
+            extra_body: request.extra_body.clone(),
         }
     }
 }
@@ -500,6 +503,8 @@ pub struct ResponseCreateWsRequest<'a> {
     pub access_programs: Option<AccessPrograms>,
     #[serde(skip_serializing_if = "codex_protocol::RequestCountry::is_omitted")]
     pub request_country: &'a codex_protocol::RequestCountry,
+    #[serde(flatten)]
+    pub extra_body: HashMap<String, serde_json::Value>,
 }
 
 pub fn response_create_client_metadata(

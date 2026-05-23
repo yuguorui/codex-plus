@@ -393,6 +393,13 @@ fn default_aws_auth_refresh_timeout_ms() -> NonZeroU64 {
 }
 
 impl ModelProviderInfo {
+    /// Output-token ceiling configured for wires that require an explicit cap,
+    /// such as Anthropic Messages `max_tokens`. `None` keeps the wire default.
+    pub fn max_output_tokens(&self) -> Option<u32> {
+        self.capabilities
+            .and_then(|capabilities| capabilities.max_output_tokens)
+    }
+
     /// Checks that a configured Bedrock entry only customizes supported fields.
     /// Call this on the override before merging it with the built-in provider.
     pub fn validate_bedrock_override(&self) -> Result<(), String> {
