@@ -3,6 +3,7 @@ pub(crate) mod auth;
 pub(crate) mod common;
 pub(crate) mod endpoint;
 pub(crate) mod error;
+pub(crate) mod extra_body;
 pub(crate) mod files;
 mod guardian_assessment;
 pub(crate) mod images;
