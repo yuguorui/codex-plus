@@ -61,7 +61,7 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: metadata
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 180
     defaults:
       run:
         working-directory: codex-rs
@@ -82,7 +82,7 @@ jobs:
             target: aarch64-apple-darwin
             binaries: "codex codex-responses-api-proxy"
             cargo-build-jobs: "4"
-            release-codegen-units: "1"
+            release-codegen-units: "8"
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
