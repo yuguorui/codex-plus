@@ -58,6 +58,7 @@ fn request_with_metadata_and_source(
         text: None,
         client_metadata: None,
         access_programs: None,
+        extra_body: Default::default(),
     }
 }
 
