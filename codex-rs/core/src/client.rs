@@ -349,6 +349,7 @@ fn responses_request_properties_match(
         service_tier: previous_service_tier,
         prompt_cache_key: previous_prompt_cache_key,
         text: previous_text,
+        extra_body: previous_extra_body,
         client_metadata: _,
     } = previous;
     let ResponsesApiRequest {
@@ -366,6 +367,7 @@ fn responses_request_properties_match(
         service_tier: current_service_tier,
         prompt_cache_key: current_prompt_cache_key,
         text: current_text,
+        extra_body: current_extra_body,
         client_metadata: _,
     } = current;
 
@@ -383,6 +385,7 @@ fn responses_request_properties_match(
         && previous_service_tier == current_service_tier
         && previous_prompt_cache_key == current_prompt_cache_key
         && previous_text == current_text
+        && previous_extra_body == current_extra_body
 }
 
 impl WebsocketSession {
@@ -938,6 +941,7 @@ impl ModelClient {
             prompt_cache_key,
             text,
             client_metadata: Some(responses_metadata.client_metadata()),
+            extra_body: model_info.extra_body.clone().unwrap_or_default(),
         };
         Ok(request)
     }
@@ -1547,19 +1551,18 @@ impl ModelClientSession {
             transport = "chat_http",
             http.method = "POST",
             api.path = "chat/completions",
-            turn.has_metadata_header = turn_metadata_header.is_some()
+            turn.has_metadata_header = responses_metadata.has_turn_metadata()
         )
     )]
     async fn stream_chat_api(
         &self,
-        window_id: &str,
         prompt: &Prompt,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
         effort: Option<ReasoningEffortConfig>,
         summary: ReasoningSummaryConfig,
         service_tier: Option<String>,
-        turn_metadata_header: Option<&str>,
+        responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
         retry_notifier: Option<RequestRetryNotifier>,
     ) -> Result<ResponseStream> {
@@ -1587,8 +1590,7 @@ impl ModelClientSession {
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
             let responses_options = self
                 .build_responses_options(
-                    window_id,
-                    turn_metadata_header,
+                    responses_metadata,
                     compression,
                     model_info.use_responses_lite,
                 )
@@ -1601,7 +1603,7 @@ impl ModelClientSession {
                 effort.clone(),
                 summary,
                 service_tier.clone(),
-                window_id,
+                responses_metadata,
             )?;
             let inference_trace_attempt = inference_trace.start_attempt();
             let mut options = ApiChatOptions {
@@ -1676,19 +1678,18 @@ impl ModelClientSession {
             transport = "anthropic_http",
             http.method = "POST",
             api.path = "messages",
-            turn.has_metadata_header = turn_metadata_header.is_some()
+            turn.has_metadata_header = responses_metadata.has_turn_metadata()
         )
     )]
     async fn stream_anthropic_api(
         &self,
-        window_id: &str,
         prompt: &Prompt,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
         effort: Option<ReasoningEffortConfig>,
         summary: ReasoningSummaryConfig,
         service_tier: Option<String>,
-        turn_metadata_header: Option<&str>,
+        responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
         retry_notifier: Option<RequestRetryNotifier>,
     ) -> Result<ResponseStream> {
@@ -1716,8 +1717,7 @@ impl ModelClientSession {
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
             let responses_options = self
                 .build_responses_options(
-                    window_id,
-                    turn_metadata_header,
+                    responses_metadata,
                     compression,
                     model_info.use_responses_lite,
                 )
@@ -1730,7 +1730,7 @@ impl ModelClientSession {
                 effort.clone(),
                 summary,
                 service_tier.clone(),
-                window_id,
+                responses_metadata,
             )?;
             let inference_trace_attempt = inference_trace.start_attempt();
             let mut options = ApiAnthropicOptions {
@@ -2104,8 +2104,6 @@ impl ModelClientSession {
         inference_trace: &InferenceTraceContext,
         retry_notifier: Option<RequestRetryNotifier>,
     ) -> Result<ResponseStream> {
-        let window_id = responses_metadata.window_id.to_string();
-        let turn_metadata_header = responses_metadata.turn_metadata_json();
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
             WireApi::Responses => {
@@ -2148,14 +2146,13 @@ impl ModelClientSession {
             }
             WireApi::Chat => {
                 self.stream_chat_api(
-                    &window_id,
                     prompt,
                     model_info,
                     session_telemetry,
                     effort,
                     summary,
                     service_tier,
-                    turn_metadata_header.as_deref(),
+                    responses_metadata,
                     inference_trace,
                     retry_notifier,
                 )
@@ -2163,14 +2160,13 @@ impl ModelClientSession {
             }
             WireApi::Anthropic => {
                 self.stream_anthropic_api(
-                    &window_id,
                     prompt,
                     model_info,
                     session_telemetry,
                     effort,
                     summary,
                     service_tier,
-                    turn_metadata_header.as_deref(),
+                    responses_metadata,
                     inference_trace,
                     retry_notifier,
                 )
