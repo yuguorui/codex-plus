@@ -338,6 +338,7 @@ async fn streaming_client_retries_on_transport_error() -> Result<()> {
         prompt_cache_key: None,
         text: None,
         client_metadata: None,
+        extra_body: HashMap::new(),
     };
     let client = ResponsesClient::new(transport.clone(), provider, Arc::new(NoAuth));
 
@@ -439,6 +440,7 @@ async fn azure_default_store_attaches_ids_and_headers() -> Result<()> {
         prompt_cache_key: None,
         text: None,
         client_metadata: None,
+        extra_body: HashMap::new(),
     };
 
     let mut extra_headers = HeaderMap::new();
