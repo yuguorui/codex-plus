@@ -821,6 +821,7 @@ impl ModelClient {
                 ),
                 (X_CODEX_WINDOW_ID_HEADER.to_string(), window_id.to_string()),
             ])),
+            extra_body: model_info.extra_body.clone().unwrap_or_default(),
         };
         Ok(request)
     }
