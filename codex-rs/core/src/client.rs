@@ -796,6 +796,7 @@ impl ModelClient {
                 X_CODEX_INSTALLATION_ID_HEADER.to_string(),
                 self.state.installation_id.clone(),
             )])),
+            extra_body: model_info.extra_body.clone().unwrap_or_default(),
         };
         Ok(request)
     }
