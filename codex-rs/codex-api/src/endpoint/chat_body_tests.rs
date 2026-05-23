@@ -126,15 +126,15 @@ fn extra_body_can_override_max_completion_tokens() {
 }
 
 #[test]
-fn null_removes_a_field_the_client_sent_and_sends_any_other_null() {
+fn null_removes_a_field_and_never_adds_one() {
     let mut body = built_body();
     merge_extra_body(
         &mut body,
         &HashMap::from([
             // A model that does not reason opts out of the projected effort.
             (REASONING_EFFORT_KEY.to_string(), json!(null)),
-            // A key this client never sends is passed through as an explicit null,
-            // because a provider may require the key to be present.
+            // A key this client never sends stays absent: an explicit JSON null is
+            // what several providers reject with a 400.
             ("logprobs".to_string(), json!(null)),
         ]),
     )
@@ -144,8 +144,37 @@ fn null_removes_a_field_the_client_sent_and_sends_any_other_null() {
         body.get(REASONING_EFFORT_KEY).is_none(),
         "a catalog must be able to opt out of a field this client projects: {body}"
     );
-    assert_eq!(body["logprobs"], json!(null));
+    assert!(
+        body.get("logprobs").is_none(),
+        "a null for an absent key must be a no-op, not an explicit null: {body}"
+    );
     assert_eq!(body["stream_options"], json!({"include_usage": true}));
+}
+
+#[test]
+fn nested_objects_deep_merge_and_arrays_replace() {
+    let mut body = json!({
+        "model": "qwen",
+        "chat_template_kwargs": {"enable_thinking": true, "keep": 1},
+        "stop": ["a"],
+    });
+    merge_extra_body(
+        &mut body,
+        &HashMap::from([
+            (
+                "chat_template_kwargs".to_string(),
+                json!({"enable_thinking": false, "extra": 2}),
+            ),
+            ("stop".to_string(), json!(["b", "c"])),
+        ]),
+    )
+    .expect("merge should succeed");
+
+    assert_eq!(
+        body["chat_template_kwargs"],
+        json!({"enable_thinking": false, "keep": 1, "extra": 2})
+    );
+    assert_eq!(body["stop"], json!(["b", "c"]));
 }
 
 #[test]
