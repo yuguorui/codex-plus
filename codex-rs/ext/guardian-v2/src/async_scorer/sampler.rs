@@ -11,6 +11,7 @@ pub(super) use telemetry::SampledScore;
 use super::request::PreparedRequest;
 use super::score::PendingScore;
 use connection_pool::ConnectionPool;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use codex_api::ApiError;
@@ -247,6 +248,7 @@ impl LunaSampler {
             text: None,
             client_metadata: None,
             access_programs: None,
+            extra_body: HashMap::new(),
         };
         execution::SamplingExecution {
             auth_owner_generation,
