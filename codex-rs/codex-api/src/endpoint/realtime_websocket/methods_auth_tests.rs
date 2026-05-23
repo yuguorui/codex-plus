@@ -44,6 +44,7 @@ fn client(base_url: String) -> RealtimeWebsocketClient {
             base_url: base_url.clone(),
             query_params: None,
             headers: HeaderMap::new(),
+            extra_body: std::collections::HashMap::new(),
             retry: RetryConfig {
                 max_attempts: 1,
                 base_delay: Duration::from_millis(1),
