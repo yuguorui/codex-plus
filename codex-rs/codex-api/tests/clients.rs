@@ -419,6 +419,7 @@ async fn responses_client_stream_request_sends_routing_fields_ahead_of_large_inp
         text: None,
         client_metadata: None,
         access_programs: None,
+        extra_body: HashMap::new(),
     };
     let expected = serde_json::to_value(&request)?;
 
