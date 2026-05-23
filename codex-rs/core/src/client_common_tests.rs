@@ -29,6 +29,7 @@ fn serializes_text_verbosity_when_set() {
             format: None,
         }),
         client_metadata: None,
+        extra_body: std::collections::HashMap::new(),
     };
 
     let v = serde_json::to_value(&req).expect("json");
@@ -73,6 +74,7 @@ fn serializes_text_schema_with_strict_format() {
         service_tier: None,
         text: Some(text_controls),
         client_metadata: None,
+        extra_body: std::collections::HashMap::new(),
     };
 
     let v = serde_json::to_value(&req).expect("json");
@@ -134,6 +136,7 @@ fn omits_text_when_not_set() {
         service_tier: None,
         text: None,
         client_metadata: None,
+        extra_body: std::collections::HashMap::new(),
     };
 
     let v = serde_json::to_value(&req).expect("json");
@@ -157,6 +160,7 @@ fn serializes_flex_service_tier_when_set() {
         service_tier: Some(ServiceTier::Flex.to_string()),
         text: None,
         client_metadata: None,
+        extra_body: std::collections::HashMap::new(),
     };
 
     let v = serde_json::to_value(&req).expect("json");
