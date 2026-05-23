@@ -3381,6 +3381,12 @@
           "description": "Whether hosted web search may access the live web.",
           "type": "boolean"
         },
+        "max_output_tokens": {
+          "description": "Output-token ceiling for wires that require an explicit cap, such as the Anthropic Messages `max_tokens` field. Set this to the model's maximum output when it is below the wire default; omission keeps the wire default.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "remote_compaction": {
           "allOf": [
             {
