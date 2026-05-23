@@ -6,6 +6,24 @@ use std::num::NonZeroU64;
 use tempfile::tempdir;
 
 #[test]
+fn max_output_tokens_defaults_none_and_reads_capability_override() {
+    assert_eq!(ModelProviderInfo::default().max_output_tokens(), None);
+
+    let info = ModelProviderInfo {
+        capabilities: Some(ModelProviderCapabilities {
+            max_output_tokens: Some(4096),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(info.max_output_tokens(), Some(4096));
+
+    let parsed: ModelProviderInfo =
+        toml::from_str("[capabilities]\nmax_output_tokens = 8192\n").unwrap();
+    assert_eq!(parsed.max_output_tokens(), Some(8192));
+}
+
+#[test]
 fn runtime_internal_metadata_opt_in_is_not_serialized_or_configurable() {
     let trusted = ModelProviderInfo {
         include_internal_metadata: true,
