@@ -26,7 +26,6 @@ use http::HeaderValue;
 use http::Method;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Map;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -63,6 +62,7 @@ pub(crate) type AnthropicToolNameMap = HashMap<String, AnthropicToolName>;
 struct AnthropicRequestBody {
     body: Value,
     tool_names: AnthropicToolNameMap,
+    extra_body: HashMap<String, Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -172,12 +172,15 @@ enum AnthropicThinking {
 enum ResponsesTool {
     Function(ResponsesFunctionTool),
     Namespace(ResponsesNamespaceTool),
-    Custom {
-        #[serde(flatten)]
-        _fields: Map<String, Value>,
-    },
+    Custom(ResponsesCustomTool),
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesCustomTool {
+    name: String,
+    description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -238,6 +241,7 @@ impl<T: HttpTransport> AnthropicClient<T> {
 
         let mut request_body = anthropic_body_from_responses_request(request)?;
         merge_extra_body(&mut request_body.body, &self.session.provider().extra_body)?;
+        merge_extra_body(&mut request_body.body, &request_body.extra_body)?;
 
         let mut headers = extra_headers;
         if !headers.contains_key("anthropic-version") {
@@ -350,6 +354,7 @@ fn anthropic_body_from_responses_request(
     let tools = anthropic_tools_from_responses_tools(request.tools, &mut tool_names)?;
     let has_tools = !tools.is_empty();
     let (system, messages) = anthropic_messages_from_items(&request.instructions, request.input)?;
+    let extra_body = request.extra_body;
     let request = AnthropicMessagesRequest {
         model: request.model,
         max_tokens: DEFAULT_MAX_TOKENS,
@@ -364,7 +369,11 @@ fn anthropic_body_from_responses_request(
     };
     let body = serde_json::to_value(request)
         .map_err(|err| ApiError::Stream(format!("failed to encode Anthropic request: {err}")))?;
-    Ok(AnthropicRequestBody { body, tool_names })
+    Ok(AnthropicRequestBody {
+        body,
+        tool_names,
+        extra_body,
+    })
 }
 
 /// Maps Codex reasoning effort to the corresponding Anthropic thinking configuration.
@@ -473,7 +482,7 @@ fn anthropic_messages_from_items(
                 pending_assistant_content.push(AnthropicContentBlock::ToolUse {
                     id: call_id,
                     name,
-                    input: serde_json::from_str(&input).unwrap_or(Value::String(input)),
+                    input: serde_json::json!({ "input": input }),
                 });
             }
             ResponseItem::Reasoning {
@@ -628,7 +637,10 @@ fn anthropic_tools_from_responses_tools(
                     )?);
                 }
             }
-            Ok(ResponsesTool::Custom { .. } | ResponsesTool::Unknown) => {}
+            Ok(ResponsesTool::Custom(tool)) => {
+                converted.push(anthropic_custom_tool(tool, tool_names)?);
+            }
+            Ok(ResponsesTool::Unknown) => {}
             Err(err) => {
                 return Err(ApiError::Stream(format!(
                     "invalid Anthropic tool object: {err}"
@@ -660,6 +672,45 @@ fn anthropic_function_tool(
             .parameters
             .unwrap_or_else(|| serde_json::json!({"type": "object"})),
     })
+}
+
+fn anthropic_custom_tool(
+    tool: ResponsesCustomTool,
+    tool_names: &mut AnthropicToolNameMap,
+) -> Result<AnthropicTool, ApiError> {
+    let name = tool.name;
+    insert_tool_name_mapping(
+        tool_names,
+        name.clone(),
+        AnthropicToolName {
+            namespace: None,
+            name: name.clone(),
+        },
+    )?;
+    let input_description = custom_tool_input_description(&name);
+    Ok(AnthropicTool {
+        name,
+        description: tool.description,
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "input": {
+                    "type": "string",
+                    "description": input_description
+                }
+            },
+            "required": ["input"],
+            "additionalProperties": false
+        }),
+    })
+}
+
+fn custom_tool_input_description(name: &str) -> &'static str {
+    if name == "apply_patch" {
+        "Raw apply_patch patch text. Do not wrap it in JSON. It must start with `*** Begin Patch`, use only `*** Add File:`, `*** Delete File:`, or `*** Update File:` hunks, and end with `*** End Patch`."
+    } else {
+        "Raw input for the custom tool."
+    }
 }
 
 fn anthropic_tool_name(namespace: Option<&str>, name: &str) -> String {
@@ -712,6 +763,7 @@ mod tests {
             prompt_cache_key: None,
             text: None,
             client_metadata: None,
+            extra_body: HashMap::new(),
         }
     }
 
@@ -870,6 +922,66 @@ mod tests {
                 namespace: Some("mcp__calendar__".to_string()),
                 name: "lookup_order".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn converts_custom_tools_to_function_tools() {
+        let request_body = anthropic_body_from_responses_request(request(
+            Vec::new(),
+            vec![json!({
+                "type": "custom",
+                "name": "apply_patch",
+                "description": "patch",
+                "format": {"type": "grammar", "syntax": "lark", "definition": "start: /x/"}
+            })],
+        ))
+        .expect("Anthropic body should convert");
+
+        assert_eq!(
+            request_body.body["tools"],
+            json!([{
+                "name": "apply_patch",
+                "description": "patch",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "input": {
+                            "type": "string",
+                            "description": "Raw apply_patch patch text. Do not wrap it in JSON. It must start with `*** Begin Patch`, use only `*** Add File:`, `*** Delete File:`, or `*** Update File:` hunks, and end with `*** End Patch`."
+                        }
+                    },
+                    "required": ["input"],
+                    "additionalProperties": false
+                }
+            }])
+        );
+    }
+
+    #[test]
+    fn preserves_custom_tool_call_history_as_function_input() {
+        let body = body_from(request(
+            vec![ResponseItem::CustomToolCall {
+                id: None,
+                status: None,
+                call_id: "call-custom".to_string(),
+                name: "apply_patch".to_string(),
+                input: "*** Begin Patch\n*** End Patch".to_string(),
+            }],
+            Vec::new(),
+        ));
+
+        assert_eq!(
+            body["messages"],
+            json!([{
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "call-custom",
+                    "name": "apply_patch",
+                    "input": {"input": "*** Begin Patch\n*** End Patch"}
+                }]
+            }])
         );
     }
 
