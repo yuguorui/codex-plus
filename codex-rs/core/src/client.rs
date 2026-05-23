@@ -25,6 +25,8 @@
 //! WebSocket prewarm is treated as the first websocket connection attempt for a turn. If it
 //! fails, normal stream retry/fallback logic handles recovery on the same turn.
 
+mod custom_wire_api;
+
 use codex_login::AuthOwner;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -84,8 +86,6 @@ use codex_login::CodexAuth;
 use codex_login::RefreshTokenError;
 use codex_login::UnauthorizedRecovery;
 use codex_login::default_client::add_originator_header;
-use codex_login::default_client::create_client;
-use codex_login::default_client::create_client_for_route;
 use codex_otel::SessionTelemetry;
 use codex_otel::WEBSOCKET_CONTINUATION_COUNT_METRIC;
 use codex_otel::current_span_w3c_trace_context;
@@ -479,6 +479,7 @@ fn responses_request_properties_mismatch(
         prompt_cache_key: previous_prompt_cache_key,
         prompt_cache_options: previous_prompt_cache_options,
         text: previous_text,
+        extra_body: previous_extra_body,
         client_metadata: _,
         access_programs: _,
         request_country: _,
@@ -498,6 +499,7 @@ fn responses_request_properties_mismatch(
         prompt_cache_key: current_prompt_cache_key,
         prompt_cache_options: current_prompt_cache_options,
         text: current_text,
+        extra_body: current_extra_body,
         client_metadata: _,
         access_programs: _,
         request_country: _,
@@ -529,6 +531,8 @@ fn responses_request_properties_mismatch(
         "prompt_cache_options_changed"
     } else if previous_text != current_text {
         "text_changed"
+    } else if previous_extra_body != current_extra_body {
+        "extra_body_changed"
     } else {
         return None;
     };
@@ -1366,6 +1370,7 @@ impl ModelClient {
             client_metadata: Some(client_metadata),
             access_programs: None,
             request_country: Default::default(),
+            extra_body: model_info.extra_body.clone().unwrap_or_default(),
         };
         Ok(request)
     }
@@ -2232,270 +2237,6 @@ impl ResponsesHttpExecutor<'_> {
             }
         }
     }
-
-    /// Streams a turn via an OpenAI Chat Completions compatible endpoint.
-    #[allow(clippy::too_many_arguments)]
-    #[instrument(
-        name = "model_client.stream_chat_api",
-        level = "info",
-        skip_all,
-        fields(
-            model = %model_info.slug,
-            wire_api = %self.client.state.provider.info().wire_api,
-            transport = "chat_http",
-            http.method = "POST",
-            api.path = "chat/completions",
-            turn.has_metadata_header = turn_metadata_header.is_some()
-        )
-    )]
-    async fn stream_chat_api(
-        &self,
-        window_id: &str,
-        prompt: &Prompt,
-        model_info: &ModelInfo,
-        session_telemetry: &SessionTelemetry,
-        effort: Option<ReasoningEffortConfig>,
-        summary: ReasoningSummaryConfig,
-        service_tier: Option<String>,
-        turn_metadata_header: Option<&str>,
-        inference_trace: &InferenceTraceContext,
-        retry_notifier: Option<RequestRetryNotifier>,
-    ) -> Result<OpenedModelResponse> {
-        let auth_manager = self.client.state.provider.auth_manager();
-        let mut auth_recovery = auth_manager
-            .as_ref()
-            .map(AuthManager::unauthorized_recovery);
-        let mut pending_retry = PendingUnauthorizedRetry::default();
-        loop {
-            let client_setup = self.client.current_client_setup().await?;
-            let transport = ReqwestTransport::new(create_client());
-            let request_auth_context = AuthRequestTelemetryContext::new(
-                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
-                client_setup.api_auth.as_ref(),
-                client_setup.agent_identity_telemetry.clone(),
-                pending_retry,
-            );
-            let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
-                session_telemetry,
-                request_auth_context,
-                RequestRouteTelemetry::for_endpoint("/chat/completions"),
-                self.client.state.auth_env_telemetry.clone(),
-                retry_notifier.clone(),
-            );
-            let compression = self.responses_request_compression(client_setup.auth.as_ref());
-            let responses_options = self
-                .build_responses_options(
-                    window_id,
-                    turn_metadata_header,
-                    compression,
-                    model_info.use_responses_lite,
-                )
-                .await;
-
-            let request = self.client.build_responses_request(
-                &client_setup.api_provider,
-                prompt,
-                model_info,
-                effort.clone(),
-                summary,
-                service_tier.clone(),
-                window_id,
-            )?;
-            let inference_trace_attempt = inference_trace.start_attempt();
-            let mut options = ApiChatOptions {
-                session_id: responses_options.session_id,
-                thread_id: responses_options.thread_id,
-                session_source: responses_options.session_source,
-                extra_headers: responses_options.extra_headers,
-                compression: responses_options.compression,
-                turn_state: responses_options.turn_state,
-            };
-            inference_trace_attempt.add_request_headers(&mut options.extra_headers);
-            inference_trace_attempt.record_started(&request);
-            let client =
-                ApiChatClient::new(transport, client_setup.api_provider, client_setup.api_auth)
-                    .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
-            let stream_result = client.stream_request(request, options).await;
-
-            match stream_result {
-                Ok(stream) => {
-                    return Ok(OpenedModelResponse {
-                        stream,
-                        telemetry: session_telemetry.clone(),
-                        trace: inference_trace_attempt,
-                        client: Arc::clone(&self.client.state),
-                        interceptors: Vec::new(),
-                        continuation: None,
-                    });
-                }
-                Err(ApiError::Transport(
-                    unauthorized_transport @ TransportError::Http { status, .. },
-                )) if status == StatusCode::UNAUTHORIZED => {
-                    let response_debug_context =
-                        extract_response_debug_context(&unauthorized_transport);
-                    inference_trace_attempt.record_failed(
-                        &unauthorized_transport,
-                        response_debug_context.request_id.as_deref(),
-                        /*output_items*/ &[],
-                    );
-                    pending_retry = PendingUnauthorizedRetry::from_recovery(
-                        handle_unauthorized(
-                            unauthorized_transport,
-                            &mut auth_recovery,
-                            session_telemetry,
-                            &self.client.state.provider,
-                        )
-                        .await?,
-                    );
-                    continue;
-                }
-                Err(err) => {
-                    let response_debug_context =
-                        extract_response_debug_context_from_api_error(&err);
-                    let err = self.client.state.provider.map_api_error(err);
-                    inference_trace_attempt.record_failed(
-                        &err,
-                        response_debug_context.request_id.as_deref(),
-                        /*output_items*/ &[],
-                    );
-                    return Err(err);
-                }
-            }
-        }
-    }
-    #[allow(clippy::too_many_arguments)]
-    #[instrument(
-        name = "model_client.stream_anthropic_api",
-        level = "info",
-        skip_all,
-        fields(
-            model = %model_info.slug,
-            wire_api = %self.client.state.provider.info().wire_api,
-            transport = "anthropic_http",
-            http.method = "POST",
-            api.path = "messages",
-            turn.has_metadata_header = turn_metadata_header.is_some()
-        )
-    )]
-    async fn stream_anthropic_api(
-        &self,
-        window_id: &str,
-        prompt: &Prompt,
-        model_info: &ModelInfo,
-        session_telemetry: &SessionTelemetry,
-        effort: Option<ReasoningEffortConfig>,
-        summary: ReasoningSummaryConfig,
-        service_tier: Option<String>,
-        turn_metadata_header: Option<&str>,
-        inference_trace: &InferenceTraceContext,
-        retry_notifier: Option<RequestRetryNotifier>,
-    ) -> Result<OpenedModelResponse> {
-        let auth_manager = self.client.state.provider.auth_manager();
-        let mut auth_recovery = auth_manager
-            .as_ref()
-            .map(AuthManager::unauthorized_recovery);
-        let mut pending_retry = PendingUnauthorizedRetry::default();
-        loop {
-            let client_setup = self.client.current_client_setup().await?;
-            let transport = ReqwestTransport::new(create_client());
-            let request_auth_context = AuthRequestTelemetryContext::new(
-                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
-                client_setup.api_auth.as_ref(),
-                client_setup.agent_identity_telemetry.clone(),
-                pending_retry,
-            )
-            .map_err(|error| self.client.state.provider.map_api_error(error))?;
-            let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
-                session_telemetry,
-                request_auth_context,
-                RequestRouteTelemetry::for_endpoint("/messages"),
-                self.client.state.auth_env_telemetry.clone(),
-                retry_notifier.clone(),
-            );
-            let compression = self.responses_request_compression(client_setup.auth.as_ref());
-            let responses_options = self
-                .build_responses_options(
-                    window_id,
-                    turn_metadata_header,
-                    compression,
-                    model_info.use_responses_lite,
-                )
-                .await;
-
-            let request = self.client.build_responses_request(
-                &client_setup.api_provider,
-                prompt,
-                model_info,
-                effort.clone(),
-                summary,
-                service_tier.clone(),
-                window_id,
-            )?;
-            let inference_trace_attempt = inference_trace.start_attempt();
-            let mut options = ApiAnthropicOptions {
-                session_id: responses_options.session_id,
-                thread_id: responses_options.thread_id,
-                session_source: responses_options.session_source,
-                extra_headers: responses_options.extra_headers,
-                compression: responses_options.compression,
-                turn_state: responses_options.turn_state,
-            };
-            inference_trace_attempt.add_request_headers(&mut options.extra_headers);
-            inference_trace_attempt.record_started(&request);
-            let client = ApiAnthropicClient::new(
-                transport,
-                client_setup.api_provider,
-                client_setup.api_auth,
-            )
-            .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
-            let stream_result = client.stream_request(request, options).await;
-
-            match stream_result {
-                Ok(stream) => {
-                    return Ok(OpenedModelResponse {
-                        stream,
-                        telemetry: session_telemetry.clone(),
-                        trace: inference_trace_attempt,
-                        client: Arc::clone(&self.client.state),
-                        interceptors: Vec::new(),
-                        continuation: None,
-                    });
-                }
-                Err(ApiError::Transport(
-                    unauthorized_transport @ TransportError::Http { status, .. },
-                )) if status == StatusCode::UNAUTHORIZED => {
-                    let response_debug_context =
-                        extract_response_debug_context(&unauthorized_transport);
-                    inference_trace_attempt.record_failed(
-                        &unauthorized_transport,
-                        response_debug_context.request_id.as_deref(),
-                        /*output_items*/ &[],
-                    );
-                    pending_retry = PendingUnauthorizedRetry::from_recovery(
-                        handle_unauthorized(
-                            unauthorized_transport,
-                            &mut auth_recovery,
-                            session_telemetry,
-                            &self.client.state.provider,
-                        )
-                        .await?,
-                    );
-                    continue;
-                }
-                Err(err) => {
-                    let response_debug_context =
-                        extract_response_debug_context_from_api_error(&err);
-                    let err = self.client.state.provider.map_api_error(err);
-                    inference_trace_attempt.record_failed(
-                        &err,
-                        response_debug_context.request_id.as_deref(),
-                        /*output_items*/ &[],
-                    );
-                    return Err(err);
-                }
-            }
-        }
-    }
 }
 
 impl ModelClientSession {
@@ -2995,36 +2736,6 @@ impl ModelClientSession {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn stream_with_retry_notifier(
-        &mut self,
-        prompt: &Arc<Prompt>,
-        model_info: &ModelInfo,
-        session_telemetry: &SessionTelemetry,
-        effort: Option<ReasoningEffortConfig>,
-        summary: ReasoningSummaryConfig,
-        service_tier: Option<String>,
-        responses_metadata: &CodexResponsesMetadata,
-        inference_trace: &InferenceTraceContext,
-        retry_notifier: Option<RequestRetryNotifier>,
-    ) -> Result<ResponseStream> {
-        self.open_model_response(
-            prompt,
-            model_info,
-            session_telemetry,
-            SamplingOptions {
-                reasoning_effort: effort,
-                reasoning_summary: summary,
-                service_tier,
-            },
-            responses_metadata,
-            inference_trace,
-            retry_notifier,
-        )
-        .await?
-        .into_stream()
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn open_model_response(
         &mut self,
         prompt: &Arc<Prompt>,
@@ -3035,8 +2746,6 @@ impl ModelClientSession {
         inference_trace: &InferenceTraceContext,
         retry_notifier: Option<RequestRetryNotifier>,
     ) -> Result<OpenedModelResponse> {
-        let window_id = responses_metadata.window_id.to_string();
-        let turn_metadata_header = responses_metadata.turn_metadata_json();
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
             WireApi::Responses => {
@@ -3078,30 +2787,30 @@ impl ModelClientSession {
                     .await
             }
             WireApi::Chat => {
-                self.stream_chat_api(
-                    &window_id,
+                custom_wire_api::stream_chat_api(
+                    self,
                     prompt,
                     model_info,
                     session_telemetry,
                     sampling.reasoning_effort.clone(),
                     sampling.reasoning_summary,
                     sampling.service_tier.clone(),
-                    turn_metadata_header.as_deref(),
+                    responses_metadata,
                     inference_trace,
                     retry_notifier,
                 )
                 .await
             }
             WireApi::Anthropic => {
-                self.stream_anthropic_api(
-                    &window_id,
+                custom_wire_api::stream_anthropic_api(
+                    self,
                     prompt,
                     model_info,
                     session_telemetry,
                     sampling.reasoning_effort.clone(),
                     sampling.reasoning_summary,
                     sampling.service_tier.clone(),
-                    turn_metadata_header.as_deref(),
+                    responses_metadata,
                     inference_trace,
                     retry_notifier,
                 )

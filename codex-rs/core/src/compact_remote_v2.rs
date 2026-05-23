@@ -373,6 +373,7 @@ async fn run_remote_compaction_request_v2(
                     },
                     responses_metadata,
                     &InferenceTraceContext::disabled(),
+                    /*retry_notifier*/ None,
                 ),
             )
             .or_cancel(cancellation)
