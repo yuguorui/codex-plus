@@ -75,6 +75,7 @@ fn gpt_5_4_cmb_bedrock_model(priority: i32) -> ModelInfo {
         effective_context_window_percent: 95,
         experimental_supported_tools: Vec::new(),
         input_modalities: vec![InputModality::Text, InputModality::Image],
+        extra_body: None,
         used_fallback_model_metadata: false,
         supports_search_tool: true,
     }
@@ -117,6 +118,7 @@ fn bedrock_oss_model(slug: &str, display_name: &str, priority: i32) -> ModelInfo
         effective_context_window_percent: 95,
         experimental_supported_tools: Vec::new(),
         input_modalities: vec![InputModality::Text],
+        extra_body: None,
         used_fallback_model_metadata: false,
         supports_search_tool: false,
     }
