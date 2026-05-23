@@ -39,6 +39,9 @@ use tracing::instrument;
 use tracing::warn;
 
 const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
+/// Fallback `max_tokens` when the provider configures no output-token ceiling.
+/// The Messages API still requires `max_tokens`; `output_config.effort` only
+/// signals how hard the model should try, it does not replace the output cap.
 const DEFAULT_MAX_TOKENS: u32 = 64000;
 
 /// Process-global device identifier: 32 random bytes encoded as 64 hex chars.
@@ -93,6 +96,8 @@ pub struct AnthropicOptions {
     pub extra_headers: HeaderMap,
     pub compression: Compression,
     pub turn_state: Option<Arc<OnceLock<String>>>,
+    /// Provider-configured output-token ceiling; `None` uses [`DEFAULT_MAX_TOKENS`].
+    pub max_output_tokens: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -301,10 +306,14 @@ impl<T: HttpTransport> AnthropicClient<T> {
             extra_headers,
             compression,
             turn_state,
+            max_output_tokens,
         } = options;
 
-        let mut request_body =
-            anthropic_body_from_responses_request(request, session_id.as_deref())?;
+        let mut request_body = anthropic_body_from_responses_request(
+            request,
+            session_id.as_deref(),
+            max_output_tokens,
+        )?;
         merge_extra_body(&mut request_body.body, &self.session.provider().extra_body)?;
         merge_extra_body(&mut request_body.body, &request_body.extra_body)?;
 
@@ -390,33 +399,40 @@ impl<T: HttpTransport> AnthropicClient<T> {
     }
 }
 
-fn merge_extra_body(
+/// Merges one `extra_body` layer with the shared cross-wire semantics
+/// ([`crate::extra_body`]), guarding the one key this wire cannot let go: `stream`
+/// must stay `true` for SSE streaming, so any other value — including `null` — is
+/// rejected before anything is merged.
+pub(crate) fn merge_extra_body(
     body: &mut Value,
     extra_body: &std::collections::HashMap<String, Value>,
 ) -> Result<(), ApiError> {
     if extra_body.is_empty() {
         return Ok(());
     }
-    let Some(body) = body.as_object_mut() else {
+    if !body.is_object() {
         return Err(ApiError::Stream(
             "Anthropic request body must be a JSON object to merge extra_body".to_string(),
         ));
-    };
-    for (key, value) in extra_body {
-        if key == "stream" && value != &Value::Bool(true) {
-            return Err(ApiError::Stream(
-                "extra_body.stream must remain true for Anthropic streaming".to_string(),
-            ));
-        }
-        body.insert(key.clone(), value.clone());
     }
-    body.insert("stream".to_string(), Value::Bool(true));
+    if let Some(stream) = extra_body.get("stream")
+        && stream != &Value::Bool(true)
+    {
+        return Err(ApiError::Stream(
+            "extra_body.stream must remain true for Anthropic streaming".to_string(),
+        ));
+    }
+    crate::extra_body::merge_extra_body(body, extra_body);
+    if let Some(body) = body.as_object_mut() {
+        body.insert("stream".to_string(), Value::Bool(true));
+    }
     Ok(())
 }
 
 fn anthropic_body_from_responses_request(
     request: ResponsesApiRequest,
     session_id: Option<&str>,
+    max_output_tokens: Option<u32>,
 ) -> Result<AnthropicRequestBody, ApiError> {
     let mut tool_names = AnthropicToolNameMap::new();
     let tools = anthropic_tools_from_responses_tools(
@@ -444,7 +460,7 @@ fn anthropic_body_from_responses_request(
         .transpose()?;
     let mut request = AnthropicMessagesRequest {
         model: request.model,
-        max_tokens: DEFAULT_MAX_TOKENS,
+        max_tokens: max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         messages,
         stream: true,
         system,
@@ -1262,13 +1278,13 @@ mod tests {
     }
 
     fn body_from(request: ResponsesApiRequest) -> Value {
-        anthropic_body_from_responses_request(request, None)
+        anthropic_body_from_responses_request(request, None, None)
             .expect("Anthropic body should convert")
             .body
     }
 
     fn anthropic_body_error(input: Vec<ResponseItem>) -> String {
-        match anthropic_body_from_responses_request(request(input, Vec::new()), None) {
+        match anthropic_body_from_responses_request(request(input, Vec::new()), None, None) {
             Ok(_) => panic!("Anthropic body should fail"),
             Err(ApiError::InvalidRequest { message }) => message,
             Err(err) => panic!("unexpected error: {err}"),
@@ -1685,6 +1701,7 @@ mod tests {
                 ],
             ),
             None,
+            None,
         )
         .expect("Anthropic body should convert");
 
@@ -1725,6 +1742,7 @@ mod tests {
                     "format": {"type": "grammar", "syntax": "lark", "definition": "start: /x/"}
                 })],
             ),
+            None,
             None,
         )
         .expect("Anthropic body should convert");
@@ -1822,6 +1840,14 @@ mod tests {
         .expect_err("stream false should be rejected");
         assert!(err.to_string().contains("stream must remain true"));
 
+        let err = merge_extra_body(
+            &mut body,
+            &HashMap::from([("stream".to_string(), json!(null))]),
+        )
+        .expect_err("stream null should be rejected, not remove the key");
+        assert!(err.to_string().contains("stream must remain true"));
+        assert_eq!(body["stream"], true);
+
         let mut non_object_body = json!("not an object");
         let err = merge_extra_body(
             &mut non_object_body,
@@ -1829,6 +1855,84 @@ mod tests {
         )
         .expect_err("non-object body should be rejected");
         assert!(err.to_string().contains("must be a JSON object"));
+    }
+
+    #[test]
+    fn max_output_tokens_option_overrides_default_cap() {
+        let body = anthropic_body_from_responses_request(
+            request(Vec::new(), Vec::new()),
+            None,
+            Some(8192),
+        )
+        .expect("Anthropic body should convert")
+        .body;
+
+        assert_eq!(body["max_tokens"], 8192);
+    }
+
+    #[test]
+    fn max_output_tokens_none_keeps_documented_fallback() {
+        let body =
+            anthropic_body_from_responses_request(request(Vec::new(), Vec::new()), None, None)
+                .expect("Anthropic body should convert")
+                .body;
+
+        assert_eq!(DEFAULT_MAX_TOKENS, 64000);
+        assert_eq!(body["max_tokens"], DEFAULT_MAX_TOKENS);
+    }
+
+    #[test]
+    fn extra_body_max_tokens_overrides_configured_cap() {
+        let mut request = request(Vec::new(), Vec::new());
+        request
+            .extra_body
+            .insert("max_tokens".to_string(), json!(1024));
+        let mut request_body = anthropic_body_from_responses_request(request, None, Some(8192))
+            .expect("Anthropic body should convert");
+
+        merge_extra_body(
+            &mut request_body.body,
+            &HashMap::from([("max_tokens".to_string(), json!(2048))]),
+        )
+        .expect("provider extra body should merge");
+        assert_eq!(request_body.body["max_tokens"], 2048);
+
+        merge_extra_body(&mut request_body.body, &request_body.extra_body)
+            .expect("request extra body should merge");
+        assert_eq!(request_body.body["max_tokens"], 1024);
+    }
+
+    #[test]
+    fn extra_body_uses_the_shared_merge_semantics() {
+        let mut body = json!({
+            "model": "claude",
+            "stream": true,
+            "metadata": {"user_id": "u", "session": "s"},
+            "tools": [{"name": "shell"}],
+            "temperature": 1.0,
+        });
+        merge_extra_body(
+            &mut body,
+            &HashMap::from([
+                ("metadata".to_string(), json!({"session": null, "tag": "t"})),
+                ("tools".to_string(), json!([{"name": "web"}])),
+                ("temperature".to_string(), json!(null)),
+                ("absent".to_string(), json!(null)),
+            ]),
+        )
+        .expect("extra body should merge");
+
+        assert_eq!(body["metadata"], json!({"user_id": "u", "tag": "t"}));
+        assert_eq!(body["tools"], json!([{"name": "web"}]));
+        assert!(
+            body.get("temperature").is_none(),
+            "null must remove the key instead of sending JSON null: {body}"
+        );
+        assert!(
+            body.get("absent").is_none(),
+            "a null for an absent key must be a no-op: {body}"
+        );
+        assert_eq!(body["stream"], true);
     }
 
     #[test]

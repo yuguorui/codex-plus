@@ -127,6 +127,7 @@ async fn anthropic_wire_api_posts_to_messages_and_merges_extra_body() -> Result<
     );
     assert_eq!(body["stream"], true);
     assert_eq!(body["model"], test.session_configured.model);
+    assert_eq!(body["max_tokens"], 64000);
     let system_blocks = body["system"].as_array();
     assert!(
         system_blocks.is_some_and(|blocks| {
@@ -151,6 +152,38 @@ async fn anthropic_wire_api_posts_to_messages_and_merges_extra_body() -> Result<
                     "content": [{"type": "text", "text": "hello"}]
                 }))
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn anthropic_wire_api_uses_provider_max_output_tokens() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mock = mount_anthropic_sse_once(&server, anthropic_text_response("msg-cap", "done")).await;
+    let test = {
+        let mut builder = test_codex().with_config({
+            let base_url = format!("{}/v1", server.uri());
+            move |config| {
+                config.model_provider.base_url = Some(base_url);
+                config.model_provider.wire_api = WireApi::Anthropic;
+                config.model_provider.supports_websockets = false;
+                config.model_provider.capabilities =
+                    Some(codex_model_provider_info::ModelProviderCapabilities {
+                        max_output_tokens: Some(4096),
+                        ..Default::default()
+                    });
+            }
+        });
+        builder.build(&server).await?
+    };
+
+    submit_user_turn(&test, "hello").await?;
+
+    let request = mock.single_request();
+    let body = request.body_json();
+    assert_eq!(request.path(), "/v1/messages");
+    assert_eq!(body["max_tokens"], 4096);
     Ok(())
 }
 

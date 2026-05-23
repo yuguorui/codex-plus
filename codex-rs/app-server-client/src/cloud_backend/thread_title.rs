@@ -129,6 +129,7 @@ impl CloudTitleClient {
                 base_url,
                 query_params: None,
                 headers: Default::default(),
+                extra_body: Default::default(),
                 retry: codex_api::RetryConfig {
                     max_attempts: 0,
                     base_delay: Duration::ZERO,
