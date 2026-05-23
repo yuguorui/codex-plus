@@ -3,6 +3,7 @@
 //! These types are serialized across core, TUI, app-server, and SDK boundaries, so field defaults
 //! are used to preserve compatibility when older payloads omit newly introduced attributes.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -479,6 +480,9 @@ pub struct ModelInfo {
     /// Input modalities accepted by the backend for this model.
     #[serde(default = "default_input_modalities")]
     pub input_modalities: Vec<InputModality>,
+    /// Extra JSON object fields to merge into requests for this model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_body: Option<HashMap<String, serde_json::Value>>,
     #[serde(default)]
     pub supports_search_tool: bool,
     /// Whether experimental context management may be activated at session startup.
@@ -1202,6 +1206,7 @@ mod tests {
             effective_context_window_percent: 95,
             experimental_supported_tools: vec![],
             input_modalities: default_input_modalities(),
+            extra_body: None,
             supports_search_tool: false,
             supports_experimental_context: false,
             use_responses_lite: false,
