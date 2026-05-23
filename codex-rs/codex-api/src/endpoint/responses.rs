@@ -83,6 +83,8 @@ impl<T: HttpTransport> ResponsesClient<T> {
 
         let mut body = serde_json::to_value(&request)
             .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
+        merge_extra_body(&mut body, &self.session.provider().extra_body);
+        merge_extra_body(&mut body, &request.extra_body);
         if request.store && self.session.provider().is_azure_responses_endpoint() {
             attach_item_ids(&mut body, &request.input);
         }
@@ -149,5 +151,17 @@ impl<T: HttpTransport> ResponsesClient<T> {
             self.sse_telemetry.clone(),
             turn_state,
         ))
+    }
+}
+
+fn merge_extra_body(body: &mut Value, extra_body: &std::collections::HashMap<String, Value>) {
+    if extra_body.is_empty() {
+        return;
+    }
+    let Some(body) = body.as_object_mut() else {
+        return;
+    };
+    for (key, value) in extra_body {
+        body.insert(key.clone(), value.clone());
     }
 }
