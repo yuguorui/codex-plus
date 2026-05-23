@@ -432,6 +432,7 @@ async fn responses_client_stream_request_sends_routing_fields_ahead_of_large_inp
         text: None,
         client_metadata: None,
         access_programs: None,
+        extra_body: HashMap::new(),
     };
     let expected = serde_json::to_value(&request)?;
 
@@ -1091,5 +1092,72 @@ async fn anthropic_metadata_session_id_stable_within_same_session() -> Result<()
             "turn {i}: device_id must be stable"
         );
     }
+    Ok(())
+}
+
+fn anthropic_body_max_tokens(request: &Request) -> Value {
+    let body = request
+        .body
+        .as_ref()
+        .and_then(RequestBody::json)
+        .expect("request should have a JSON body");
+    body.get("max_tokens")
+        .cloned()
+        .expect("max_tokens is required on the Anthropic wire")
+}
+
+#[tokio::test]
+async fn anthropic_max_output_tokens_defaults_and_overrides() -> Result<()> {
+    let state = RecordingState::default();
+    let transport = RecordingTransport::new(state.clone());
+    let client = codex_api::AnthropicClient::new(transport, anthropic_provider(), Arc::new(NoAuth));
+
+    let _stream = client
+        .stream_request(anthropic_request(), codex_api::AnthropicOptions::default())
+        .await?;
+    let _stream = client
+        .stream_request(
+            anthropic_request(),
+            codex_api::AnthropicOptions {
+                max_output_tokens: Some(8192),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    let requests = state.take_stream_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(anthropic_body_max_tokens(&requests[0]), Value::from(64000));
+    assert_eq!(anthropic_body_max_tokens(&requests[1]), Value::from(8192));
+    Ok(())
+}
+
+#[tokio::test]
+async fn anthropic_extra_body_overrides_configured_max_output_tokens() -> Result<()> {
+    let state = RecordingState::default();
+    let transport = RecordingTransport::new(state.clone());
+    let mut provider = anthropic_provider();
+    provider
+        .extra_body
+        .insert("max_tokens".to_string(), Value::from(2048));
+    let client = codex_api::AnthropicClient::new(transport, provider, Arc::new(NoAuth));
+
+    let mut request = anthropic_request();
+    request
+        .extra_body
+        .insert("max_tokens".to_string(), Value::from(1024));
+    let _stream = client
+        .stream_request(
+            request,
+            codex_api::AnthropicOptions {
+                max_output_tokens: Some(8192),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    let requests = state.take_stream_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(anthropic_body_max_tokens(&requests[0]), Value::from(1024));
     Ok(())
 }

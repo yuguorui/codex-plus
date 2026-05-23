@@ -54,6 +54,7 @@ use codex_skills::SkillError;
 use codex_utils_git_discovery::GitRootDiscovery;
 use codex_utils_path::replace_path_and_deduplicate;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::Semaphore;
 use tokio_util::task::TaskTracker;
 

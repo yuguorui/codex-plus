@@ -901,6 +901,7 @@ async fn drain_to_completed(
                 // Rollout tracing currently models remote compaction only; local compaction streams
                 // are left untraced until the reducer has a first-class local compaction lifecycle.
                 &InferenceTraceContext::disabled(),
+                /*retry_notifier*/ None,
             ),
         )
         .or_cancel(cancellation)
