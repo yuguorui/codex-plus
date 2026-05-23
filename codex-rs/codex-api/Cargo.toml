@@ -18,7 +18,7 @@ futures = { workspace = true }
 http = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true, features = ["raw_value"] }
+serde_json = { workspace = true, features = ["preserve_order", "raw_value"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "net", "rt", "sync", "time"] }
 tokio-tungstenite = { workspace = true }
