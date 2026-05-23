@@ -19,6 +19,10 @@ pub struct ModelProviderCapabilities {
     pub external_web_access: Option<bool>,
     /// Remote context-compaction protocol; omission preserves provider defaults.
     pub remote_compaction: Option<RemoteCompactionSupport>,
+    /// Output-token ceiling for wires that require an explicit cap, such as the
+    /// Anthropic Messages `max_tokens` field. Set this to the model's maximum
+    /// output when it is below the wire default; omission keeps the wire default.
+    pub max_output_tokens: Option<u32>,
 }
 
 /// Remote context-compaction protocols supported by a model provider.
