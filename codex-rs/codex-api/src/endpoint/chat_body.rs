@@ -67,7 +67,7 @@ pub(super) fn chat_wire_reasoning_effort(reasoning: Option<&Reasoning>) -> Optio
 /// Only the top-level `thinking_budget` key is reconciled. A provider that nests its
 /// thinking controls elsewhere — vLLM's `chat_template_kwargs`, for one — is left exactly
 /// as configured, including alongside the projected effort.
-pub(super) fn finalize_chat_body(
+pub(crate) fn finalize_chat_body(
     body: &mut Value,
     provider_extra_body: &HashMap<String, Value>,
     model_extra_body: &HashMap<String, Value>,
@@ -99,10 +99,14 @@ pub(super) fn finalize_chat_body(
     Ok(())
 }
 
-fn merge_extra_body(body: &mut Value, extra_body: &HashMap<String, Value>) -> Result<(), ApiError> {
-    if extra_body.is_empty() {
-        return Ok(());
-    }
+/// Merges one `extra_body` layer with the shared cross-wire semantics
+/// ([`crate::extra_body`]), except that `stream_options` is object-merged with
+/// `include_usage` forced back on: usage accounting depends on it, so the key can be
+/// extended but never replaced or removed, and a non-object override is rejected.
+pub(crate) fn merge_extra_body(
+    body: &mut Value,
+    extra_body: &HashMap<String, Value>,
+) -> Result<(), ApiError> {
     let Some(body) = body.as_object_mut() else {
         return Ok(());
     };
@@ -123,18 +127,8 @@ fn merge_extra_body(body: &mut Value, extra_body: &HashMap<String, Value>) -> Re
                 base_stream_options.insert(option_key.clone(), option_value.clone());
             }
             base_stream_options.insert("include_usage".to_string(), Value::Bool(true));
-        } else if value.is_null() && body.contains_key(key) {
-            // `null` removes a field this client already put in the body, which is how a
-            // model opts out of a default it does not support — a non-reasoning model
-            // dropping the projected `reasoning_effort`, for example — without a code
-            // change. Any other null is sent as JSON null, because a provider may require
-            // the key to be present with that value. `stream_options` is handled above,
-            // so it can never be removed here. Only a JSON configuration can express the
-            // opt-out: a model catalog, or a remote thread config's `extra_body_json`.
-            // `config.toml` cannot, because TOML has no null.
-            body.remove(key);
         } else {
-            body.insert(key.clone(), value.clone());
+            crate::extra_body::merge_extra_body_entry(body, key, value);
         }
     }
     Ok(())
