@@ -57,6 +57,7 @@ pub(crate) type ChatToolNameMap = HashMap<String, ChatToolName>;
 struct ChatRequestBody {
     body: Value,
     tool_names: ChatToolNameMap,
+    extra_body: HashMap<String, Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -168,9 +169,15 @@ struct ChatFunctionTool {
 enum ResponsesTool {
     Function(ResponsesFunctionTool),
     Namespace(ResponsesNamespaceTool),
-    Custom,
+    Custom(ResponsesCustomTool),
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesCustomTool {
+    name: String,
+    description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -232,6 +239,7 @@ impl<T: HttpTransport> ChatClient<T> {
 
         let mut request_body = chat_body_from_responses_request(request)?;
         merge_extra_body(&mut request_body.body, &self.session.provider().extra_body)?;
+        merge_extra_body(&mut request_body.body, &request_body.extra_body)?;
 
         let mut headers = extra_headers;
         if let Some(ref thread_id) = thread_id {
@@ -347,6 +355,7 @@ fn chat_body_from_responses_request(
     let mut tool_names = ChatToolNameMap::new();
     let tools = chat_tools_from_responses_tools(request.tools, &mut tool_names)?;
     let has_tools = !tools.is_empty();
+    let extra_body = request.extra_body;
     let request = ChatCompletionsRequest {
         model: request.model,
         messages: chat_messages_from_items(&request.instructions, request.input)?,
@@ -360,7 +369,11 @@ fn chat_body_from_responses_request(
     };
     let body = serde_json::to_value(request)
         .map_err(|err| ApiError::Stream(format!("failed to encode chat request: {err}")))?;
-    Ok(ChatRequestBody { body, tool_names })
+    Ok(ChatRequestBody {
+        body,
+        tool_names,
+        extra_body,
+    })
 }
 
 fn chat_messages_from_items(
@@ -433,13 +446,11 @@ fn chat_messages_from_items(
                 input,
                 ..
             } => {
+                let arguments = serde_json::json!({ "input": input }).to_string();
                 pending_tool_calls.push(ChatToolCall {
                     id: call_id,
                     kind: ChatToolCallKind::Function,
-                    function: ChatToolCallFunction {
-                        name,
-                        arguments: input,
-                    },
+                    function: ChatToolCallFunction { name, arguments },
                 });
             }
             ResponseItem::Compaction { encrypted_content } => {
@@ -626,7 +637,10 @@ fn chat_tools_from_responses_tools(
                     converted.push(chat_function_tool(tool, Some(&namespace.name), tool_names)?);
                 }
             }
-            Ok(ResponsesTool::Custom | ResponsesTool::Unknown) => {}
+            Ok(ResponsesTool::Custom(tool)) => {
+                converted.push(chat_custom_tool(tool, tool_names)?);
+            }
+            Ok(ResponsesTool::Unknown) => {}
             Err(err) => {
                 return Err(ApiError::Stream(format!("invalid chat tool object: {err}")));
             }
@@ -658,6 +672,49 @@ fn chat_function_tool(
             strict: tool.strict,
         },
     })
+}
+
+fn chat_custom_tool(
+    tool: ResponsesCustomTool,
+    tool_names: &mut ChatToolNameMap,
+) -> Result<ChatTool, ApiError> {
+    let name = tool.name;
+    insert_tool_name_mapping(
+        tool_names,
+        name.clone(),
+        ChatToolName {
+            namespace: None,
+            name: name.clone(),
+        },
+    )?;
+    let input_description = custom_tool_input_description(&name);
+    Ok(ChatTool {
+        kind: ChatToolKind::Function,
+        function: ChatFunctionTool {
+            name,
+            description: tool.description,
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "input": {
+                        "type": "string",
+                        "description": input_description
+                    }
+                },
+                "required": ["input"],
+                "additionalProperties": false
+            })),
+            strict: Some(true),
+        },
+    })
+}
+
+fn custom_tool_input_description(name: &str) -> &'static str {
+    if name == "apply_patch" {
+        "Raw apply_patch patch text. Do not wrap it in JSON. It must start with `*** Begin Patch`, use only `*** Add File:`, `*** Delete File:`, or `*** Update File:` hunks, and end with `*** End Patch`."
+    } else {
+        "Raw input for the custom tool."
+    }
 }
 
 fn chat_function_name(namespace: Option<&str>, name: &str) -> String {
@@ -710,6 +767,7 @@ mod tests {
             prompt_cache_key: None,
             text: None,
             client_metadata: None,
+            extra_body: HashMap::new(),
         }
     }
 
@@ -1114,7 +1172,7 @@ mod tests {
                         "type": "function",
                         "function": {
                             "name": "apply_patch",
-                            "arguments": "*** Begin Patch\n*** End Patch"
+                            "arguments": "{\"input\":\"*** Begin Patch\\n*** End Patch\"}"
                         }
                     }]
                 },
@@ -1124,7 +1182,7 @@ mod tests {
     }
 
     #[test]
-    fn skips_custom_tools() {
+    fn converts_custom_tools_to_function_tools() {
         let body = body_from(request(
             Vec::new(),
             vec![json!({
@@ -1135,7 +1193,28 @@ mod tests {
             })],
         ));
 
-        assert!(body.get("tools").is_none());
+        assert_eq!(
+            body["tools"],
+            json!([{
+                "type": "function",
+                "function": {
+                    "name": "apply_patch",
+                    "description": "patch",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "input": {
+                                "type": "string",
+                                "description": "Raw apply_patch patch text. Do not wrap it in JSON. It must start with `*** Begin Patch`, use only `*** Add File:`, `*** Delete File:`, or `*** Update File:` hunks, and end with `*** End Patch`."
+                            }
+                        },
+                        "required": ["input"],
+                        "additionalProperties": false
+                    },
+                    "strict": true
+                }
+            }])
+        );
     }
 
     #[test]
