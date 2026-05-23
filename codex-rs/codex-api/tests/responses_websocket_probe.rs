@@ -13,6 +13,7 @@ use codex_http_client::OutboundProxyPolicy;
 use http::HeaderMap;
 use http::HeaderValue;
 use pretty_assertions::assert_eq;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
@@ -34,6 +35,7 @@ fn probe_client(base_url: String) -> ResponsesWebsocketClient {
             base_url,
             query_params: None,
             headers: HeaderMap::new(),
+            extra_body: HashMap::new(),
             retry: RetryConfig {
                 max_attempts: 1,
                 base_delay: Duration::from_millis(/*millis*/ 1),
