@@ -28,6 +28,7 @@ use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
+use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
@@ -399,6 +400,13 @@ fn responses_request_carries_model_extra_body() {
         },
         ..Default::default()
     };
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        Some("turn-extra-body"),
+        "test-window".to_string(),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
 
     let request = client
         .build_responses_request(
@@ -408,7 +416,7 @@ fn responses_request_carries_model_extra_body() {
             /*effort*/ None,
             codex_protocol::config_types::ReasoningSummary::Auto,
             /*service_tier*/ None,
-            /*window_id*/ "test-window",
+            &responses_metadata,
         )
         .expect("request should build");
 
