@@ -6,6 +6,7 @@ mod execution;
 
 use super::request::PreparedRequest;
 use connection_pool::ConnectionPool;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -243,6 +244,7 @@ impl LunaSampler {
             text: None,
             client_metadata: None,
             access_programs: None,
+            extra_body: HashMap::new(),
         };
         execution::SamplingExecution {
             auth_owner_generation,
