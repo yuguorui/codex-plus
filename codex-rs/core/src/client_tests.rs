@@ -1448,6 +1448,13 @@ fn responses_request_carries_model_extra_body() {
         },
         ..Default::default()
     };
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        Some("turn-extra-body"),
+        "test-window".to_string(),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
 
     let request = client
         .build_responses_request(
@@ -1456,7 +1463,8 @@ fn responses_request_carries_model_extra_body() {
             /*effort*/ None,
             codex_protocol::config_types::ReasoningSummary::Auto,
             /*service_tier*/ None,
-            /*window_id*/ "test-window",
+            &responses_metadata,
+            /*include_internal*/ true,
         )
         .expect("request should build");
 

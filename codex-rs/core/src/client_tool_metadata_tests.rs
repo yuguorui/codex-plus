@@ -49,6 +49,7 @@ fn request_with_metadata(metadata: &serde_json::Value) -> ResponsesApiRequest {
         text: None,
         client_metadata: None,
         access_programs: None,
+        extra_body: Default::default(),
     }
 }
 
