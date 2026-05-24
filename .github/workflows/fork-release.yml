@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version in yyyymmddhhmm format. Defaults to current UTC time."
+        description: "Release version in yyyymmddhhmm format. Defaults to current Asia/Shanghai time."
         required: false
         type: string
       prerelease:
@@ -40,7 +40,7 @@ jobs:
 
           requested_version="${{ inputs.version }}"
           if [[ -z "$requested_version" ]]; then
-            requested_version="$(date -u +%Y%m%d%H%M)"
+            requested_version="$(TZ=Asia/Shanghai date +%Y%m%d%H%M)"
           fi
 
           if [[ ! "$requested_version" =~ ^[0-9]{12}$ ]]; then
