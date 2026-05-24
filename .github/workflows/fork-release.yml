@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version. Defaults to codex-rs/Cargo.toml version."
+        description: "Release version in yyyymmddhhmm format. Defaults to current UTC time."
         required: false
         type: string
       prerelease:
@@ -38,19 +38,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          cargo_version="$(grep -m1 '^version' codex-rs/Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/')"
           requested_version="${{ inputs.version }}"
           if [[ -z "$requested_version" ]]; then
-            requested_version="$cargo_version"
+            requested_version="$(date -u +%Y%m%d%H%M)"
           fi
 
-          if [[ "$requested_version" != "$cargo_version" ]]; then
-            echo "Requested version ${requested_version} does not match codex-rs/Cargo.toml version ${cargo_version}."
-            exit 1
-          fi
-
-          if [[ ! "$requested_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta)(\.[0-9]+)?)?$ ]]; then
-            echo "Version ${requested_version} does not match the expected release version format."
+          if [[ ! "$requested_version" =~ ^[0-9]{12}$ ]]; then
+            echo "Version ${requested_version} does not match yyyymmddhhmm."
             exit 1
           fi
 
