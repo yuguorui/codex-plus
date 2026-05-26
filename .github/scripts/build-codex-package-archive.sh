@@ -8,6 +8,7 @@ Usage: build-codex-package-archive.sh \
   --bundle <primary|app-server> \
   --entrypoint-dir <dir> \
   --archive-dir <dir> \
+  [--entrypoint-stem <name>] \
   [--bwrap-bin <path>] \
   [--code-mode-host-bin <path>] \
   [--zsh-manifest <path>] \
@@ -21,6 +22,7 @@ target=""
 bundle=""
 entrypoint_dir=""
 archive_dir=""
+entrypoint_stem=""
 target_suffixed_entrypoint="false"
 resource_args=()
 bwrap_bin_provided="false"
@@ -44,6 +46,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --archive-dir)
       archive_dir="${2:?--archive-dir requires a value}"
+      shift 2
+      ;;
+    --entrypoint-stem)
+      entrypoint_stem="${2:?--entrypoint-stem requires a value}"
       shift 2
       ;;
     --bwrap-bin)
@@ -181,6 +187,9 @@ python_args=(
   --archive-output "$gzip_archive_path"
   --archive-output "$zstd_archive_path"
 )
+if [[ -n "$entrypoint_stem" ]]; then
+  python_args+=(--entrypoint-stem "$entrypoint_stem")
+fi
 if ((${#resource_args[@]} > 0)); then
   python_args+=("${resource_args[@]}")
 fi
