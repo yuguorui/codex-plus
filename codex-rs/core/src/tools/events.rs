@@ -156,6 +156,25 @@ impl ToolEmitter {
         auto_approved: bool,
         environment_id: String,
     ) -> Self {
+||||||| parent of 7b730ecdf7 (codex-cli: add hashline tool)
+    pub fn apply_patch(changes: HashMap<PathBuf, FileChange>, auto_approved: bool) -> Self {
+    pub fn read(
+        command: Vec<String>,
+        cwd: AbsolutePathBuf,
+        source: ExecCommandSource,
+        name: String,
+        path: PathBuf,
+    ) -> Self {
+        let cmd = command.join(" ");
+        Self::Shell {
+            command,
+            cwd,
+            source,
+            parsed_cmd: vec![ParsedCommand::Read { cmd, name, path }],
+        }
+    }
+
+    pub fn apply_patch(changes: HashMap<PathBuf, FileChange>, auto_approved: bool) -> Self {
         Self::ApplyPatch {
             changes,
             auto_approved,
