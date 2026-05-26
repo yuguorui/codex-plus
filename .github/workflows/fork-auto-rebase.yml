@@ -1,0 +1,145 @@
+name: fork-auto-rebase
+
+on:
+  schedule:
+    # UTC 18:00 = Asia/Shanghai 02:00.
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+    inputs:
+      trigger_release:
+        description: "Trigger fork-release.yml after a successful rebase push."
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: fork-auto-rebase
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  rebase:
+    name: Rebase fork on upstream
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Configure Git
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/openai/codex.git
+
+      - name: Rebase on upstream main
+        id: rebase
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch upstream main
+          git rebase upstream/main
+
+      - name: Download Codex++ fork binary
+        if: steps.rebase.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$(gh release view -R yuguorui/codex --json tagName -q '.tagName')"
+          asset="codex-package-x86_64-unknown-linux-musl.tar.gz"
+
+          tmp_dir="$(mktemp -d)"
+          gh release download "$tag" -R yuguorui/codex -p "$asset" --dir "$tmp_dir"
+          mkdir -p "$tmp_dir/extract"
+          tar -xzf "$tmp_dir/$asset" -C "$tmp_dir/extract"
+
+          BIN_DIR="/tmp/codexpp-bin"
+          mkdir -p "$BIN_DIR"
+          find "$tmp_dir/extract" -name 'codex++' -type f -exec cp {} "$BIN_DIR/" \;
+          chmod +x "$BIN_DIR/codex++"
+          echo "$BIN_DIR" >> "$GITHUB_PATH"
+          rm -rf "$tmp_dir"
+
+      - name: Resolve rebase with Codex++ (DeepSeek Anthropic)
+        if: steps.rebase.outcome == 'failure'
+        env:
+          DEEPSEEK_ANTHROPIC_API_KEY: ${{ secrets.DEEPSEEK_ANTHROPIC_API_KEY }}
+          DEEPSEEK_ANTHROPIC_BASE_URL: ${{ secrets.DEEPSEEK_ANTHROPIC_BASE_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          codex++ exec \
+            --model deepseek-v4-pro \
+            --ephemeral \
+            --dangerously-bypass-approvals-and-sandbox \
+            -c 'model_provider="deepseek-anthropic"' \
+            -c 'model_providers.deepseek-anthropic.name="DeepSeek Anthropic"' \
+            -c 'model_providers.deepseek-anthropic.env_base_url="DEEPSEEK_ANTHROPIC_BASE_URL"' \
+            -c 'model_providers.deepseek-anthropic.env_key="DEEPSEEK_ANTHROPIC_API_KEY"' \
+            -c 'model_providers.deepseek-anthropic.wire_api="anthropic"' \
+            -c 'model_context_window=1000000' \
+            "This is Codex++ (a fork of openai/codex) running with the DeepSeek V4 Pro
+          model via Anthropic Messages API, resolving a \`git rebase upstream/main\`
+          conflict.
+
+          Resolve the rebase safely:
+          - Inspect \`git status --short --branch\` and all conflicted files.
+          - Preserve the fork's local feature commits (Codex++ enhancements) and
+            upstream changes from openai/codex.
+          - Do not discard unrelated changes.
+          - Resolve conflicts by editing files directly.
+          - Stage resolved files with \`git add\`.
+          - Continue the rebase using \`GIT_EDITOR=true git rebase --continue\`.
+          - Repeat until the rebase completes.
+          - Run focused validation for touched areas. For Rust core changes, run:
+            \`cd codex-rs && just fmt && just test -p codex-core && just fix -p codex-core\`.
+          - If validation or formatting modifies files after the rebase completes,
+            inspect the diff, stage the intended changes, and use
+            \`git commit --amend --no-edit\` so the working tree is clean.
+          - Do not push.
+
+          If the conflict is ambiguous or cannot be resolved safely, stop and
+          explain the blocker in your final message."
+
+      - name: Verify rebase completed
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -d .git/rebase-merge || -d .git/rebase-apply ]]; then
+            echo "Rebase is still in progress."
+            git status --short --branch
+            exit 1
+          fi
+
+          if git status --porcelain=v1 -uall | grep -q .; then
+            echo "Working tree is not clean after rebase."
+            git status --short
+            exit 1
+          fi
+
+      - name: Push rebased fork branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push --force-with-lease origin HEAD:main
+
+      - name: Trigger fork release
+        if: github.event_name == 'workflow_dispatch' && inputs.trigger_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow run fork-release.yml --ref main
