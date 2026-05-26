@@ -183,6 +183,7 @@ mod tests {
             aggregated_output: None,
             exit_code: None,
             duration_ms: None,
+            tool_name: None,
         }
     }
 

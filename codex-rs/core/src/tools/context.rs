@@ -317,6 +317,7 @@ pub struct ExecCommandToolOutput {
     pub exit_code: Option<i32>,
     pub original_token_count: Option<usize>,
     pub hook_command: Option<String>,
+    pub timed_out: bool,
 }
 
 impl ToolOutput for ExecCommandToolOutput {
@@ -418,6 +419,13 @@ impl ExecCommandToolOutput {
 
         if let Some(exit_code) = self.exit_code {
             sections.push(format!("Process exited with code {exit_code}"));
+        }
+
+        if self.timed_out {
+            sections.push(format!(
+                "Command timed out after {} milliseconds",
+                self.wall_time.as_millis()
+            ));
         }
 
         if let Some(process_id) = &self.process_id {

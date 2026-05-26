@@ -249,6 +249,9 @@ pub enum ThreadItem {
         id: String,
         /// The command to be executed.
         command: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        tool_name: Option<String>,
         /// The command's working directory.
         cwd: AbsolutePathBuf,
         /// Identifier for the underlying PTY process (when available).
@@ -272,6 +275,9 @@ pub enum ThreadItem {
     #[ts(rename_all = "camelCase")]
     FileChange {
         id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        tool_name: Option<String>,
         changes: Vec<FileUpdateChange>,
         status: PatchApplyStatus,
     },
@@ -828,6 +834,7 @@ impl From<CoreTurnItem> for ThreadItem {
             },
             CoreTurnItem::FileChange(file_change) => ThreadItem::FileChange {
                 id: file_change.id,
+                tool_name: file_change.tool_name,
                 changes: convert_patch_changes(&file_change.changes),
                 status: file_change
                     .status

@@ -3007,6 +3007,10 @@ pub struct ExecCommandBeginEvent {
     pub started_at_ms: i64,
     /// The command to be executed.
     pub command: Vec<String>,
+    /// User-facing tool label when the command was produced by a compatibility wrapper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tool_name: Option<String>,
     /// The command's working directory if not the default cwd for the agent.
     pub cwd: AbsolutePathBuf,
     pub parsed_cmd: Vec<ParsedCommand>,
@@ -3033,6 +3037,10 @@ pub struct ExecCommandEndEvent {
     pub completed_at_ms: i64,
     /// The command that was executed.
     pub command: Vec<String>,
+    /// User-facing tool label when the command was produced by a compatibility wrapper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tool_name: Option<String>,
     /// The command's working directory if not the default cwd for the agent.
     pub cwd: AbsolutePathBuf,
     pub parsed_cmd: Vec<ParsedCommand>,

@@ -1895,6 +1895,7 @@ mod tests {
                 turn_id: "turn-1".into(),
                 completed_at_ms: 0,
                 command: vec!["echo".into(), "hello world".into()],
+                tool_name: None,
                 cwd: test_path_buf("/tmp").abs(),
                 parsed_cmd: vec![ParsedCommand::Unknown {
                     cmd: "echo hello world".into(),
@@ -1946,6 +1947,7 @@ mod tests {
             ThreadItem::CommandExecution {
                 id: "exec-1".into(),
                 command: "echo 'hello world'".into(),
+                tool_name: None,
                 cwd: test_path_buf("/tmp").abs(),
                 process_id: Some("pid-1".into()),
                 source: CommandExecutionSource::Agent,
@@ -2133,6 +2135,7 @@ mod tests {
                 turn_id: "turn-1".into(),
                 completed_at_ms: 0,
                 command: vec!["ls".into()],
+                tool_name: None,
                 cwd: test_path_buf("/tmp").abs(),
                 parsed_cmd: vec![ParsedCommand::Unknown { cmd: "ls".into() }],
                 source: ExecCommandSource::Agent,
@@ -2175,6 +2178,7 @@ mod tests {
             ThreadItem::CommandExecution {
                 id: "exec-declined".into(),
                 command: "ls".into(),
+                tool_name: None,
                 cwd: test_path_buf("/tmp").abs(),
                 process_id: Some("pid-2".into()),
                 source: CommandExecutionSource::Agent,
@@ -2191,6 +2195,7 @@ mod tests {
             turns[0].items[2],
             ThreadItem::FileChange {
                 id: "patch-declined".into(),
+                tool_name: None,
                 changes: vec![FileUpdateChange {
                     path: "README.md".into(),
                     kind: PatchChangeKind::Add,
@@ -2272,6 +2277,7 @@ mod tests {
             ThreadItem::CommandExecution {
                 id: "guardian-exec".into(),
                 command: "rm -rf /tmp/guardian".into(),
+                tool_name: None,
                 cwd: test_path_buf("/tmp").abs(),
                 process_id: None,
                 source: CommandExecutionSource::Agent,
@@ -2337,6 +2343,7 @@ mod tests {
             ThreadItem::CommandExecution {
                 id: "guardian-execve".into(),
                 command: "/bin/rm -f /tmp/file.sqlite".into(),
+                tool_name: None,
                 cwd: test_path_buf("/tmp").abs(),
                 process_id: None,
                 source: CommandExecutionSource::Agent,
@@ -2395,6 +2402,7 @@ mod tests {
                 turn_id: "turn-a".into(),
                 completed_at_ms: 0,
                 command: vec!["echo".into(), "done".into()],
+                tool_name: None,
                 cwd: test_path_buf("/tmp").abs(),
                 parsed_cmd: vec![ParsedCommand::Unknown {
                     cmd: "echo done".into(),
@@ -2433,6 +2441,7 @@ mod tests {
             ThreadItem::CommandExecution {
                 id: "exec-late".into(),
                 command: "echo done".into(),
+                tool_name: None,
                 cwd: test_path_buf("/tmp").abs(),
                 process_id: Some("pid-42".into()),
                 source: CommandExecutionSource::Agent,
@@ -2491,6 +2500,7 @@ mod tests {
                 turn_id: "turn-missing".into(),
                 completed_at_ms: 0,
                 command: vec!["echo".into(), "done".into()],
+                tool_name: None,
                 cwd: test_path_buf("/tmp").abs(),
                 parsed_cmd: vec![ParsedCommand::Unknown {
                     cmd: "echo done".into(),
@@ -2591,6 +2601,7 @@ mod tests {
                 },
                 ThreadItem::FileChange {
                     id: "patch-call".into(),
+                    tool_name: None,
                     changes: vec![FileUpdateChange {
                         path: "README.md".into(),
                         kind: PatchChangeKind::Add,
@@ -2659,6 +2670,7 @@ mod tests {
                 },
                 ThreadItem::FileChange {
                     id: "patch-call".into(),
+                    tool_name: None,
                     changes: vec![FileUpdateChange {
                         path: "README.md".into(),
                         kind: PatchChangeKind::Add,

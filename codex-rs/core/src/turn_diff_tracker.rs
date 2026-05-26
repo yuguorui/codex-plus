@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -21,6 +24,24 @@ pub struct TurnDiffTracker {
     baseline_by_path: HashMap<PathBuf, String>,
     current_by_path: HashMap<PathBuf, String>,
     origin_by_current_path: HashMap<PathBuf, PathBuf>,
+    simple_file_reads: HashMap<PathBuf, FileReadSnapshot>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileReadSnapshot {
+    len: usize,
+    hash: u64,
+}
+
+impl FileReadSnapshot {
+    pub fn new(content: &str) -> Self {
+        let mut hasher = DefaultHasher::new();
+        content.hash(&mut hasher);
+        Self {
+            len: content.len(),
+            hash: hasher.finish(),
+        }
+    }
 }
 
 impl Default for TurnDiffTracker {
@@ -31,6 +52,7 @@ impl Default for TurnDiffTracker {
             baseline_by_path: HashMap::new(),
             current_by_path: HashMap::new(),
             origin_by_current_path: HashMap::new(),
+            simple_file_reads: HashMap::new(),
         }
     }
 }
@@ -59,6 +81,15 @@ impl TurnDiffTracker {
 
     pub fn invalidate(&mut self) {
         self.valid = false;
+    }
+
+    pub fn record_simple_file_read(&mut self, path: impl Into<PathBuf>, content: &str) {
+        self.simple_file_reads
+            .insert(path.into(), FileReadSnapshot::new(content));
+    }
+
+    pub fn simple_file_read_snapshot(&self, path: &Path) -> Option<FileReadSnapshot> {
+        self.simple_file_reads.get(path).copied()
     }
 
     pub fn get_unified_diff(&self) -> Option<String> {

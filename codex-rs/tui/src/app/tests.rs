@@ -2474,6 +2474,7 @@ async fn inactive_thread_file_change_approval_recovers_buffered_changes() {
                     diff: "hello\n".to_string(),
                 }],
                 status: codex_app_server_protocol::PatchApplyStatus::InProgress,
+                tool_name: None,
             },
         }),
     )

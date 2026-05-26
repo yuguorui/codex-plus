@@ -154,11 +154,13 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
         let ExecCommandArgs {
             tty,
             yield_time_ms,
+            timeout_ms,
             max_output_tokens,
             sandbox_permissions,
             additional_permissions,
             justification,
             prefix_rule,
+            tool_name,
             ..
         } = args;
 
@@ -244,6 +246,7 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
                 exit_code: None,
                 original_token_count: None,
                 hook_command: None,
+                timed_out: false,
             }));
         }
 
@@ -256,6 +259,7 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
                     hook_command: hook_command.clone(),
                     process_id,
                     yield_time_ms,
+                    timeout_ms,
                     max_output_tokens,
                     cwd,
                     sandbox_cwd: turn_environment.cwd.clone(),
@@ -268,6 +272,7 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
                         .permissions_preapproved,
                     justification,
                     prefix_rule,
+                    tool_name,
                 },
                 &context,
             )
@@ -290,6 +295,7 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
                     exit_code: Some(output.exit_code),
                     original_token_count: Some(original_token_count),
                     hook_command: Some(hook_command),
+                    timed_out: false,
                 }))
             }
             Err(err) => Err(FunctionCallError::RespondToModel(format!(
