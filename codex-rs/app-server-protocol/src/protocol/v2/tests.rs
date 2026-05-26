@@ -2323,6 +2323,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
 
     let file_change_item = TurnItem::FileChange(FileChangeItem {
         id: "patch-1".to_string(),
+        tool_name: None,
         changes: [(
             PathBuf::from("README.md"),
             codex_protocol::protocol::FileChange::Add {
@@ -2341,6 +2342,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         ThreadItem::from(file_change_item),
         ThreadItem::FileChange {
             id: "patch-1".to_string(),
+            tool_name: None,
             changes: vec![FileUpdateChange {
                 path: "README.md".to_string(),
                 kind: PatchChangeKind::Add,

@@ -37,6 +37,8 @@ pub(crate) struct ExecCommandArgs {
     #[serde(default = "default_exec_yield_time_ms")]
     yield_time_ms: u64,
     #[serde(default)]
+    timeout_ms: Option<u64>,
+    #[serde(default)]
     max_output_tokens: Option<usize>,
     #[serde(default)]
     sandbox_permissions: SandboxPermissions,
@@ -46,6 +48,8 @@ pub(crate) struct ExecCommandArgs {
     justification: Option<String>,
     #[serde(default)]
     prefix_rule: Option<Vec<String>>,
+    #[serde(default)]
+    tool_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

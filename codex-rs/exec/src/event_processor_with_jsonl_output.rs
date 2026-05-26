@@ -159,6 +159,7 @@ impl EventProcessorWithJsonOutput {
             }
             ThreadItem::CommandExecution {
                 command,
+                tool_name,
                 aggregated_output,
                 exit_code,
                 status,
@@ -166,6 +167,7 @@ impl EventProcessorWithJsonOutput {
             } => Some(ExecThreadItem {
                 id: make_id(),
                 details: ThreadItemDetails::CommandExecution(CommandExecutionItem {
+                    tool_name,
                     command,
                     aggregated_output: aggregated_output.unwrap_or_default(),
                     exit_code,
@@ -178,10 +180,12 @@ impl EventProcessorWithJsonOutput {
                 }),
             }),
             ThreadItem::FileChange {
+                tool_name,
                 changes, status, ..
             } => Some(ExecThreadItem {
                 id: make_id(),
                 details: ThreadItemDetails::FileChange(FileChangeItem {
+                    tool_name,
                     changes: changes
                         .into_iter()
                         .map(|change| FileUpdateChange {

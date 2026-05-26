@@ -153,6 +153,9 @@ pub struct ImageGenerationItem {
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq)]
 pub struct FileChangeItem {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tool_name: Option<String>,
     pub changes: HashMap<PathBuf, FileChange>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]

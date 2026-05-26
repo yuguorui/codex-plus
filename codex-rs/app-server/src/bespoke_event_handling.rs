@@ -1339,6 +1339,7 @@ async fn start_command_execution_item(
             item: ThreadItem::CommandExecution {
                 id: item_id,
                 command,
+                tool_name: None,
                 cwd,
                 process_id: None,
                 source,
@@ -1383,6 +1384,7 @@ async fn complete_command_execution_item(
     let item = ThreadItem::CommandExecution {
         id: item_id,
         command,
+        tool_name: None,
         cwd,
         process_id,
         source,

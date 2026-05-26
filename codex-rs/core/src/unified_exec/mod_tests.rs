@@ -118,6 +118,7 @@ async fn exec_command_with_tty(
             hook_command: cmd.to_string(),
             tty,
             network_approval: None,
+            timed_out: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             session: Arc::downgrade(session),
             last_used: started_at,
         };
@@ -169,6 +170,7 @@ async fn exec_command_with_tty(
         exit_code,
         original_token_count: Some(approx_token_count(&text)),
         hook_command: Some(cmd.to_string()),
+        timed_out: false,
     })
 }
 

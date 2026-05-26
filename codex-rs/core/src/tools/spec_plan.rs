@@ -2,18 +2,24 @@ use crate::session::turn_context::TurnContext;
 use crate::tools::code_mode::execute_spec::create_code_mode_tool;
 use crate::tools::context::ToolInvocation;
 use crate::tools::handlers::ApplyPatchHandler;
+use crate::tools::handlers::BashHandler;
 use crate::tools::handlers::CodeModeExecuteHandler;
 use crate::tools::handlers::CodeModeWaitHandler;
 use crate::tools::handlers::CreateGoalHandler;
 use crate::tools::handlers::DynamicToolHandler;
+use crate::tools::handlers::EditHandler;
 use crate::tools::handlers::ExecCommandHandler;
 use crate::tools::handlers::ExecCommandHandlerOptions;
 use crate::tools::handlers::GetGoalHandler;
+use crate::tools::handlers::GlobHandler;
+use crate::tools::handlers::GrepHandler;
+use crate::tools::handlers::HashlineHandler;
 use crate::tools::handlers::ListAvailablePluginsToInstallHandler;
 use crate::tools::handlers::ListMcpResourceTemplatesHandler;
 use crate::tools::handlers::ListMcpResourcesHandler;
 use crate::tools::handlers::McpHandler;
 use crate::tools::handlers::PlanHandler;
+use crate::tools::handlers::ReadHandler;
 use crate::tools::handlers::ReadMcpResourceHandler;
 use crate::tools::handlers::RequestPermissionsHandler;
 use crate::tools::handlers::RequestPluginInstallHandler;
@@ -24,10 +30,12 @@ use crate::tools::handlers::TestSyncHandler;
 use crate::tools::handlers::ToolSearchHandler;
 use crate::tools::handlers::UpdateGoalHandler;
 use crate::tools::handlers::ViewImageHandler;
+use crate::tools::handlers::WriteHandler;
 use crate::tools::handlers::WriteStdinHandler;
 use crate::tools::handlers::agent_jobs::ReportAgentJobResultHandler;
 use crate::tools::handlers::agent_jobs::SpawnAgentsOnCsvHandler;
 use crate::tools::handlers::extension_tools::ExtensionToolAdapter;
+use crate::tools::handlers::hashline_spec::HashlineToolOptions;
 use crate::tools::handlers::multi_agents::CloseAgentHandler;
 use crate::tools::handlers::multi_agents::ResumeAgentHandler;
 use crate::tools::handlers::multi_agents::SendInputHandler;
@@ -44,6 +52,8 @@ use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHand
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
+use crate::tools::handlers::simple_file_tools_spec::SimpleFileToolOptions;
+use crate::tools::handlers::simple_search_tools_spec::SimpleSearchToolOptions;
 use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
 use crate::tools::hosted_spec::WebSearchToolOptions;
 use crate::tools::hosted_spec::create_image_generation_tool;
@@ -600,6 +610,39 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
     {
         let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
         planned_tools.add(ApplyPatchHandler::new(include_environment_id));
+        planned_tools.add(HashlineHandler::new(HashlineToolOptions {
+            include_environment_id,
+        }));
+    }
+
+    if environment_mode.has_environment()
+        && turn_context
+            .model_info
+            .experimental_supported_tools
+            .iter()
+            .any(|tool| tool == "claude_simple_tools")
+    {
+        let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
+        let options = SimpleFileToolOptions {
+            include_environment_id,
+        };
+        planned_tools.add(BashHandler::new(
+            options,
+            ExecCommandHandlerOptions {
+                allow_login_shell: turn_context.config.permissions.allow_login_shell,
+                exec_permission_approvals_enabled: features
+                    .enabled(Feature::ExecPermissionApprovals),
+                include_environment_id,
+            },
+        ));
+        planned_tools.add(ReadHandler::new(options));
+        planned_tools.add(EditHandler::new(options));
+        planned_tools.add(WriteHandler::new(options));
+        let search_options = SimpleSearchToolOptions {
+            include_environment_id,
+        };
+        planned_tools.add(GlobHandler::new(search_options));
+        planned_tools.add(GrepHandler::new(search_options));
     }
 
     if turn_context
