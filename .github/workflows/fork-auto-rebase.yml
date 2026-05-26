@@ -1,0 +1,111 @@
+name: fork-auto-rebase
+
+on:
+  schedule:
+    # UTC 18:00 = Asia/Shanghai 02:00.
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+    inputs:
+      trigger_release:
+        description: "Trigger fork-release.yml after a successful rebase push."
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: fork-auto-rebase
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  rebase:
+    name: Rebase fork on upstream
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Configure Git
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/openai/codex.git
+
+      - name: Rebase on upstream main
+        id: rebase
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch upstream main
+          git rebase upstream/main
+
+      - name: Resolve rebase with Codex
+        if: steps.rebase.outcome == 'failure'
+        uses: openai/codex-action@5c3f4ccdb2b8790f73d6b21751ac00e602aa0c02 # v1.7
+        with:
+          openai-api-key: ${{ secrets.CODEX_OPENAI_API_KEY }}
+          allow-users: "*"
+          safety-strategy: drop-sudo
+          sandbox: workspace-write
+          prompt: |
+            The repository is in the middle of `git rebase upstream/main` and the plain
+            rebase step failed.
+
+            Resolve the rebase safely:
+            - Inspect `git status --short --branch` and conflicted files.
+            - Preserve the fork's local feature commits and upstream changes.
+            - Do not discard unrelated changes.
+            - Resolve conflicts by editing files directly.
+            - Stage resolved files with `git add`.
+            - Continue the rebase using `GIT_EDITOR=true git rebase --continue`.
+            - Repeat until the rebase completes.
+            - Run focused validation for touched areas. For Rust core changes, run:
+              `cd codex-rs && just fmt && just test -p codex-core && just fix -p codex-core`.
+            - If validation or formatting modifies files after the rebase completes, inspect the
+              diff, stage the intended changes, and use `git commit --amend --no-edit` so the
+              working tree is clean.
+            - Do not push.
+
+            If the conflict is ambiguous or cannot be resolved safely, stop and explain the
+            blocker in your final message.
+
+      - name: Verify rebase completed
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -d .git/rebase-merge || -d .git/rebase-apply ]]; then
+            echo "Rebase is still in progress."
+            git status --short --branch
+            exit 1
+          fi
+
+          if git status --porcelain=v1 -uall | grep -q .; then
+            echo "Working tree is not clean after rebase."
+            git status --short
+            exit 1
+          fi
+
+      - name: Push rebased fork branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push --force-with-lease origin HEAD:main
+
+      - name: Trigger fork release
+        if: github.event_name == 'workflow_dispatch' && inputs.trigger_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow run fork-release.yml --ref main
