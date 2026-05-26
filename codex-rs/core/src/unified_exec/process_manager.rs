@@ -174,6 +174,7 @@ struct PreparedProcessHandles {
     pause_state: Option<watch::Receiver<bool>>,
     session: Option<Arc<crate::session::session::Session>>,
     network_approval: Option<DeferredNetworkApproval>,
+    timed_out: Arc<AtomicBool>,
     hook_command: String,
     process_id: i32,
     tty: bool,
@@ -301,6 +302,7 @@ async fn emit_failed_initial_exec_end_if_unstored(
         fallback_output,
         message,
         wall_time,
+        /*timed_out*/ false,
     )
     .await;
 }
@@ -326,6 +328,22 @@ fn terminate_process_on_network_denial(
         let message = network_denial_message_for_session(session.as_ref(), Some(deferred)).await;
         process.fail_and_terminate(message);
     });
+}
+
+fn terminate_process_on_timeout(
+    process: Arc<UnifiedExecProcess>,
+    timeout_ms: u64,
+) -> Arc<AtomicBool> {
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let timed_out_for_task = Arc::clone(&timed_out);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
+        if !process.has_exited() {
+            timed_out_for_task.store(true, Ordering::Relaxed);
+            process.terminate();
+        }
+    });
+    timed_out
 }
 
 impl UnifiedExecProcessManager {
@@ -392,6 +410,10 @@ impl UnifiedExecProcessManager {
                 deferred.clone(),
             );
         }
+        let timed_out = request
+            .timeout_ms
+            .map(|timeout_ms| terminate_process_on_timeout(Arc::clone(&process), timeout_ms))
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
 
         let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
         let event_ctx = ToolEventCtx::new(
@@ -423,6 +445,7 @@ impl UnifiedExecProcessManager {
                 start,
                 request.process_id,
                 request.tty,
+                Arc::clone(&timed_out),
                 deferred_network_approval.clone(),
                 Arc::clone(&transcript),
             )
@@ -567,6 +590,7 @@ impl UnifiedExecProcessManager {
                 text.clone(),
                 exit,
                 wall_time,
+                timed_out.load(Ordering::Relaxed),
             )
             .await;
 
@@ -587,6 +611,7 @@ impl UnifiedExecProcessManager {
             exit_code,
             original_token_count: Some(original_token_count),
             hook_command: Some(request.hook_command.clone()),
+            timed_out: timed_out.load(Ordering::Relaxed),
         };
 
         Ok(response)
@@ -608,6 +633,7 @@ impl UnifiedExecProcessManager {
             pause_state,
             session,
             network_approval,
+            timed_out,
             hook_command,
             process_id,
             tty,
@@ -732,6 +758,7 @@ impl UnifiedExecProcessManager {
             exit_code,
             original_token_count: Some(original_token_count),
             hook_command: Some(hook_command),
+            timed_out: timed_out.load(Ordering::Relaxed),
         };
 
         Ok(response)
@@ -798,6 +825,7 @@ impl UnifiedExecProcessManager {
             pause_state,
             session,
             network_approval: entry.network_approval.clone(),
+            timed_out: Arc::clone(&entry.timed_out),
             hook_command: entry.hook_command.clone(),
             process_id: entry.process_id,
             tty: entry.tty,
@@ -815,6 +843,7 @@ impl UnifiedExecProcessManager {
         started_at: Instant,
         process_id: i32,
         tty: bool,
+        timed_out: Arc<AtomicBool>,
         network_approval: Option<DeferredNetworkApproval>,
         transcript: Arc<tokio::sync::Mutex<HeadTailBuffer>>,
     ) {
@@ -825,6 +854,7 @@ impl UnifiedExecProcessManager {
             hook_command,
             tty,
             network_approval,
+            timed_out: Arc::clone(&timed_out),
             session: Arc::downgrade(&context.session),
             last_used: started_at,
         };
@@ -849,6 +879,7 @@ impl UnifiedExecProcessManager {
             command.to_vec(),
             cwd,
             process_id,
+            timed_out,
             transcript,
             started_at,
         );
@@ -1051,6 +1082,7 @@ impl UnifiedExecProcessManager {
             #[cfg(unix)]
             additional_permissions_preapproved: request.additional_permissions_preapproved,
             justification: request.justification.clone(),
+            timeout_ms: request.timeout_ms,
             exec_approval_requirement,
         };
         let tool_ctx = ToolCtx {
