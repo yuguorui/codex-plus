@@ -12,6 +12,7 @@ use crate::tools::handlers::DynamicToolHandler;
 use crate::tools::handlers::ExecCommandHandler;
 use crate::tools::handlers::ExecCommandHandlerOptions;
 use crate::tools::handlers::GetContextRemainingHandler;
+use crate::tools::handlers::HashlineHandler;
 use crate::tools::handlers::ListAvailablePluginsToInstallHandler;
 use crate::tools::handlers::ListMcpResourceTemplatesHandler;
 use crate::tools::handlers::ListMcpResourcesHandler;
@@ -32,6 +33,7 @@ use crate::tools::handlers::WriteStdinHandler;
 use crate::tools::handlers::agent_jobs::ReportAgentJobResultHandler;
 use crate::tools::handlers::agent_jobs::SpawnAgentsOnCsvHandler;
 use crate::tools::handlers::extension_tools::ExtensionToolAdapter;
+use crate::tools::handlers::hashline_spec::HashlineToolOptions;
 use crate::tools::handlers::multi_agents::CloseAgentHandler;
 use crate::tools::handlers::multi_agents::ResumeAgentHandler;
 use crate::tools::handlers::multi_agents::SendInputHandler;
@@ -740,6 +742,9 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
     {
         let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
         planned_tools.add(ApplyPatchHandler::new(include_environment_id));
+        planned_tools.add(HashlineHandler::new(HashlineToolOptions {
+            include_environment_id,
+        }));
     }
 
     if turn_context
