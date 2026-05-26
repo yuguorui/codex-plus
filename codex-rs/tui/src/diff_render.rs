@@ -1317,6 +1317,13 @@ mod tests {
     use ratatui::widgets::Wrap;
 
     #[test]
+    fn calculate_add_remove_counts_hashline_hunk_diff() {
+        let diff = "@@ -1,4 +1,4 @@\n alpha\n-one\n-two\n+ONE\n+TWO\n beta\n";
+
+        assert_eq!(calculate_add_remove_from_diff(diff), (2, 2));
+    }
+
+    #[test]
     fn ansi16_add_style_uses_foreground_only() {
         let style = style_add(
             DiffTheme::Dark,

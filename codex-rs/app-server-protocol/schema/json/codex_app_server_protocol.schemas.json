@@ -16167,6 +16167,12 @@
               "status": {
                 "$ref": "#/definitions/v2/CommandExecutionStatus"
               },
+              "toolName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "type": {
                 "enum": [
                   "commandExecution"
@@ -16199,6 +16205,12 @@
               },
               "status": {
                 "$ref": "#/definitions/v2/PatchApplyStatus"
+              },
+              "toolName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "type": {
                 "enum": [

@@ -83,28 +83,21 @@ fn tracker_update_for_known_delta(delta: &AppliedPatchDelta) -> TurnDiffTrackerU
     }
 }
 
-pub(crate) async fn emit_exec_command_begin(
-    ctx: ToolEventCtx<'_>,
-    command: &[String],
-    cwd: &AbsolutePathBuf,
-    parsed_cmd: &[ParsedCommand],
-    source: ExecCommandSource,
-    interaction_input: Option<String>,
-    process_id: Option<&str>,
-) {
+async fn emit_exec_command_begin(ctx: ToolEventCtx<'_>, exec_input: ExecCommandInput<'_>) {
     ctx.session
         .send_event(
             ctx.turn,
             EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
                 call_id: ctx.call_id.to_string(),
-                process_id: process_id.map(str::to_owned),
+                process_id: exec_input.process_id.map(str::to_owned),
                 turn_id: ctx.turn.sub_id.clone(),
                 started_at_ms: now_unix_timestamp_ms(),
-                command: command.to_vec(),
-                cwd: cwd.clone(),
-                parsed_cmd: parsed_cmd.to_vec(),
-                source,
-                interaction_input,
+                command: exec_input.command.to_vec(),
+                tool_name: exec_input.tool_name.map(str::to_owned),
+                cwd: exec_input.cwd.clone(),
+                parsed_cmd: exec_input.parsed_cmd.to_vec(),
+                source: exec_input.source,
+                interaction_input: exec_input.interaction_input.map(str::to_owned),
             }),
         )
         .await;
@@ -115,11 +108,13 @@ pub(crate) enum ToolEmitter {
         command: Vec<String>,
         cwd: AbsolutePathBuf,
         source: ExecCommandSource,
+        tool_name: Option<String>,
         parsed_cmd: Vec<ParsedCommand>,
     },
     ApplyPatch {
         changes: HashMap<PathBuf, FileChange>,
         auto_approved: bool,
+        tool_name: Option<String>,
     },
     UnifiedExec {
         command: Vec<String>,
@@ -127,6 +122,7 @@ pub(crate) enum ToolEmitter {
         source: ExecCommandSource,
         parsed_cmd: Vec<ParsedCommand>,
         process_id: Option<String>,
+        tool_name: Option<String>,
     },
 }
 
@@ -137,6 +133,7 @@ impl ToolEmitter {
             command,
             cwd,
             source,
+            tool_name: None,
             parsed_cmd,
         }
     }
@@ -145,6 +142,19 @@ impl ToolEmitter {
         Self::ApplyPatch {
             changes,
             auto_approved,
+            tool_name: None,
+        }
+    }
+
+    pub fn apply_patch_with_tool_name(
+        changes: HashMap<PathBuf, FileChange>,
+        auto_approved: bool,
+        tool_name: impl Into<String>,
+    ) -> Self {
+        Self::ApplyPatch {
+            changes,
+            auto_approved,
+            tool_name: Some(tool_name.into()),
         }
     }
 
@@ -153,6 +163,7 @@ impl ToolEmitter {
         cwd: AbsolutePathBuf,
         source: ExecCommandSource,
         process_id: Option<String>,
+        tool_name: Option<String>,
     ) -> Self {
         let parsed_cmd = parse_command(command);
         Self::UnifiedExec {
@@ -161,6 +172,7 @@ impl ToolEmitter {
             source,
             parsed_cmd,
             process_id,
+            tool_name,
         }
     }
 
@@ -171,6 +183,7 @@ impl ToolEmitter {
                     command,
                     cwd,
                     source,
+                    tool_name,
                     parsed_cmd,
                     ..
                 },
@@ -179,8 +192,13 @@ impl ToolEmitter {
                 emit_exec_stage(
                     ctx,
                     ExecCommandInput::new(
-                        command, cwd, parsed_cmd, *source, /*interaction_input*/ None,
+                        command,
+                        cwd,
+                        parsed_cmd,
+                        *source,
+                        /*interaction_input*/ None,
                         /*process_id*/ None,
+                        tool_name.as_deref(),
                     ),
                     stage,
                 )
@@ -191,6 +209,7 @@ impl ToolEmitter {
                 Self::ApplyPatch {
                     changes,
                     auto_approved,
+                    tool_name,
                     ..
                 },
                 ToolEventStage::Begin,
@@ -200,6 +219,7 @@ impl ToolEmitter {
                         ctx.turn,
                         &TurnItem::FileChange(FileChangeItem {
                             id: ctx.call_id.to_string(),
+                            tool_name: tool_name.clone(),
                             changes: changes.clone(),
                             status: None,
                             auto_approved: Some(*auto_approved),
@@ -210,7 +230,9 @@ impl ToolEmitter {
                     .await;
             }
             (
-                Self::ApplyPatch { changes, .. },
+                Self::ApplyPatch {
+                    changes, tool_name, ..
+                },
                 ToolEventStage::Success {
                     output,
                     applied_patch_delta,
@@ -231,11 +253,14 @@ impl ToolEmitter {
                     output.stderr.text.clone(),
                     status,
                     tracker_update,
+                    tool_name.clone(),
                 )
                 .await;
             }
             (
-                Self::ApplyPatch { changes, .. },
+                Self::ApplyPatch {
+                    changes, tool_name, ..
+                },
                 ToolEventStage::Failure(ToolEventFailure::Output(output)),
             ) => {
                 emit_patch_end(
@@ -249,11 +274,14 @@ impl ToolEmitter {
                         PatchApplyStatus::Failed
                     },
                     TurnDiffTrackerUpdate::Invalidate,
+                    tool_name.clone(),
                 )
                 .await;
             }
             (
-                Self::ApplyPatch { changes, .. },
+                Self::ApplyPatch {
+                    changes, tool_name, ..
+                },
                 ToolEventStage::Failure(ToolEventFailure::Message(message)),
             ) => {
                 emit_patch_end(
@@ -263,11 +291,14 @@ impl ToolEmitter {
                     (*message).to_string(),
                     PatchApplyStatus::Failed,
                     TurnDiffTrackerUpdate::None,
+                    tool_name.clone(),
                 )
                 .await;
             }
             (
-                Self::ApplyPatch { changes, .. },
+                Self::ApplyPatch {
+                    changes, tool_name, ..
+                },
                 ToolEventStage::Failure(ToolEventFailure::Rejected {
                     message,
                     applied_patch_delta,
@@ -282,6 +313,7 @@ impl ToolEmitter {
                     applied_patch_delta
                         .map(tracker_update_for_known_delta)
                         .unwrap_or(TurnDiffTrackerUpdate::None),
+                    tool_name.clone(),
                 )
                 .await;
             }
@@ -292,6 +324,7 @@ impl ToolEmitter {
                     source,
                     parsed_cmd,
                     process_id,
+                    tool_name,
                 },
                 stage,
             ) => {
@@ -304,6 +337,7 @@ impl ToolEmitter {
                         *source,
                         /*interaction_input*/ None,
                         process_id.as_deref(),
+                        tool_name.as_deref(),
                     ),
                     stage,
                 )
@@ -412,6 +446,7 @@ struct ExecCommandInput<'a> {
     source: ExecCommandSource,
     interaction_input: Option<&'a str>,
     process_id: Option<&'a str>,
+    tool_name: Option<&'a str>,
 }
 
 impl<'a> ExecCommandInput<'a> {
@@ -422,6 +457,7 @@ impl<'a> ExecCommandInput<'a> {
         source: ExecCommandSource,
         interaction_input: Option<&'a str>,
         process_id: Option<&'a str>,
+        tool_name: Option<&'a str>,
     ) -> Self {
         Self {
             command,
@@ -430,6 +466,7 @@ impl<'a> ExecCommandInput<'a> {
             source,
             interaction_input,
             process_id,
+            tool_name,
         }
     }
 }
@@ -451,16 +488,7 @@ async fn emit_exec_stage(
 ) {
     match stage {
         ToolEventStage::Begin => {
-            emit_exec_command_begin(
-                ctx,
-                exec_input.command,
-                exec_input.cwd,
-                exec_input.parsed_cmd,
-                exec_input.source,
-                exec_input.interaction_input.map(str::to_owned),
-                exec_input.process_id,
-            )
-            .await;
+            emit_exec_command_begin(ctx, exec_input).await;
         }
         ToolEventStage::Success { output, .. }
         | ToolEventStage::Failure(ToolEventFailure::Output(output)) => {
@@ -522,6 +550,7 @@ async fn emit_exec_end(
                 turn_id: ctx.turn.sub_id.clone(),
                 completed_at_ms: now_unix_timestamp_ms(),
                 command: exec_input.command.to_vec(),
+                tool_name: exec_input.tool_name.map(str::to_owned),
                 cwd: exec_input.cwd.clone(),
                 parsed_cmd: exec_input.parsed_cmd.to_vec(),
                 source: exec_input.source,
@@ -545,12 +574,14 @@ async fn emit_patch_end(
     stderr: String,
     status: PatchApplyStatus,
     tracker_update: TurnDiffTrackerUpdate<'_>,
+    tool_name: Option<String>,
 ) {
     ctx.session
         .emit_turn_item_completed(
             ctx.turn,
             TurnItem::FileChange(FileChangeItem {
                 id: ctx.call_id.to_string(),
+                tool_name,
                 changes,
                 status: Some(status),
                 auto_approved: None,

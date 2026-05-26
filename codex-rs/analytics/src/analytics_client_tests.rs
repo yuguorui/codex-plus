@@ -751,6 +751,7 @@ fn sample_command_execution_item_with_id(
     ThreadItem::CommandExecution {
         id: id.to_string(),
         command: "echo hi".to_string(),
+        tool_name: None,
         cwd: test_path_buf("/tmp").abs(),
         process_id: Some("pid-1".to_string()),
         source: CommandExecutionSource::Agent,
@@ -3659,6 +3660,7 @@ async fn turn_event_counts_completed_tool_items() {
         sample_command_execution_item(CommandExecutionStatus::Completed, Some(0), Some(1)),
         ThreadItem::FileChange {
             id: "file-change-1".to_string(),
+            tool_name: None,
             changes: Vec::new(),
             status: PatchApplyStatus::Completed,
         },

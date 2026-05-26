@@ -42,6 +42,7 @@ pub fn build_file_change_approval_request_item(
 ) -> ThreadItem {
     ThreadItem::FileChange {
         id: payload.call_id.clone(),
+        tool_name: None,
         changes: convert_patch_changes(&payload.changes),
         status: PatchApplyStatus::InProgress,
     }
@@ -50,6 +51,7 @@ pub fn build_file_change_approval_request_item(
 pub fn build_file_change_begin_item(payload: &PatchApplyBeginEvent) -> ThreadItem {
     ThreadItem::FileChange {
         id: payload.call_id.clone(),
+        tool_name: None,
         changes: convert_patch_changes(&payload.changes),
         status: PatchApplyStatus::InProgress,
     }
@@ -58,6 +60,7 @@ pub fn build_file_change_begin_item(payload: &PatchApplyBeginEvent) -> ThreadIte
 pub fn build_file_change_end_item(payload: &PatchApplyEndEvent) -> ThreadItem {
     ThreadItem::FileChange {
         id: payload.call_id.clone(),
+        tool_name: None,
         changes: convert_patch_changes(&payload.changes),
         status: (&payload.status).into(),
     }
@@ -69,6 +72,7 @@ pub fn build_command_execution_approval_request_item(
     ThreadItem::CommandExecution {
         id: payload.call_id.clone(),
         command: shlex_join(&payload.command),
+        tool_name: None,
         cwd: payload.cwd.clone(),
         process_id: None,
         source: CommandExecutionSource::Agent,
@@ -89,6 +93,7 @@ pub fn build_command_execution_begin_item(payload: &ExecCommandBeginEvent) -> Th
     ThreadItem::CommandExecution {
         id: payload.call_id.clone(),
         command: shlex_join(&payload.command),
+        tool_name: payload.tool_name.clone(),
         cwd: payload.cwd.clone(),
         process_id: payload.process_id.clone(),
         source: payload.source.into(),
@@ -116,6 +121,7 @@ pub fn build_command_execution_end_item(payload: &ExecCommandEndEvent) -> Thread
     ThreadItem::CommandExecution {
         id: payload.call_id.clone(),
         command: shlex_join(&payload.command),
+        tool_name: payload.tool_name.clone(),
         cwd: payload.cwd.clone(),
         process_id: payload.process_id.clone(),
         source: payload.source.into(),
@@ -150,6 +156,7 @@ pub fn build_item_from_guardian_event(
             Some(ThreadItem::CommandExecution {
                 id: id.clone(),
                 command,
+                tool_name: None,
                 cwd: cwd.clone(),
                 process_id: None,
                 source: CommandExecutionSource::Agent,
@@ -186,6 +193,7 @@ pub fn build_item_from_guardian_event(
             Some(ThreadItem::CommandExecution {
                 id: id.clone(),
                 command,
+                tool_name: None,
                 cwd: cwd.clone(),
                 process_id: None,
                 source: CommandExecutionSource::Agent,

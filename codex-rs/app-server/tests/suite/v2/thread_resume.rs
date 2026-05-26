@@ -2802,6 +2802,7 @@ async fn thread_resume_replays_pending_file_change_request_approval() -> Result<
     let expected_readme_path = workspace.join("README.md");
     let expected_file_change = ThreadItem::FileChange {
         id: "patch-call".to_string(),
+        tool_name: None,
         changes: vec![codex_app_server_protocol::FileUpdateChange {
             path: expected_readme_path.to_string_lossy().into_owned(),
             kind: PatchChangeKind::Add,

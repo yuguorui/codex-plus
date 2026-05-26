@@ -66,10 +66,16 @@ impl EventProcessorWithHumanOutput {
 
     fn render_item_started(&self, item: &ThreadItem) {
         match item {
-            ThreadItem::CommandExecution { command, cwd, .. } => {
+            ThreadItem::CommandExecution {
+                command,
+                cwd,
+                tool_name,
+                ..
+            } => {
+                let label = tool_name.as_deref().unwrap_or("exec");
                 eprintln!(
                     "{}\n{} in {}",
-                    "exec".style(self.italic).style(self.magenta),
+                    label.style(self.italic).style(self.magenta),
                     command.style(self.bold),
                     cwd.display()
                 );
@@ -85,8 +91,9 @@ impl EventProcessorWithHumanOutput {
             ThreadItem::WebSearch { query, .. } => {
                 eprintln!("{} {}", "web search:".style(self.bold), query);
             }
-            ThreadItem::FileChange { .. } => {
-                eprintln!("{}", "apply patch".style(self.bold));
+            ThreadItem::FileChange { tool_name, .. } => {
+                let label = tool_name.as_deref().unwrap_or("apply patch");
+                eprintln!("{}", label.style(self.bold));
             }
             ThreadItem::CollabAgentToolCall { tool, .. } => {
                 eprintln!("{} {:?}", "collab:".style(self.bold), tool);
@@ -162,7 +169,10 @@ impl EventProcessorWithHumanOutput {
                 }
             }
             ThreadItem::FileChange {
-                changes, status, ..
+                tool_name,
+                changes,
+                status,
+                ..
             } => {
                 let status_text = match status {
                     PatchApplyStatus::Completed => "completed",
@@ -170,7 +180,8 @@ impl EventProcessorWithHumanOutput {
                     PatchApplyStatus::Declined => "declined",
                     PatchApplyStatus::InProgress => "in_progress",
                 };
-                eprintln!("{} {}", "patch:".style(self.bold), status_text);
+                let label = tool_name.as_deref().unwrap_or("patch");
+                eprintln!("{} {}", format!("{label}:").style(self.bold), status_text);
                 for change in changes {
                     eprintln!("{}", change.path.style(self.dimmed));
                 }
