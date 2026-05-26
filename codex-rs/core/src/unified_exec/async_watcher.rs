@@ -1,5 +1,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use tokio::sync::Mutex;
 use tokio::time::Duration;
@@ -112,6 +114,8 @@ pub(crate) fn spawn_exit_watcher(
     command: Vec<String>,
     cwd: AbsolutePathBuf,
     process_id: i32,
+    tool_name: Option<String>,
+    timed_out: Arc<AtomicBool>,
     transcript: Arc<Mutex<HeadTailBuffer>>,
     started_at: Instant,
 ) {
@@ -131,10 +135,12 @@ pub(crate) fn spawn_exit_watcher(
                 command,
                 cwd,
                 Some(process_id.to_string()),
+                tool_name.clone(),
                 transcript,
                 String::new(),
                 message,
                 duration,
+                timed_out.load(Ordering::Relaxed),
             )
             .await;
         } else {
@@ -146,10 +152,12 @@ pub(crate) fn spawn_exit_watcher(
                 command,
                 cwd,
                 Some(process_id.to_string()),
+                tool_name.clone(),
                 transcript,
                 String::new(),
                 exit_code,
                 duration,
+                timed_out.load(Ordering::Relaxed),
             )
             .await;
         }
@@ -199,10 +207,12 @@ pub(crate) async fn emit_exec_end_for_unified_exec(
     command: Vec<String>,
     cwd: AbsolutePathBuf,
     process_id: Option<String>,
+    tool_name: Option<String>,
     transcript: Arc<Mutex<HeadTailBuffer>>,
     fallback_output: String,
     exit_code: i32,
     duration: Duration,
+    timed_out: bool,
 ) {
     let aggregated_output = resolve_aggregated_output(&transcript, fallback_output).await;
     let output = ExecToolCallOutput {
@@ -211,7 +221,7 @@ pub(crate) async fn emit_exec_end_for_unified_exec(
         stderr: StreamOutput::new(String::new()),
         aggregated_output: StreamOutput::new(aggregated_output),
         duration,
-        timed_out: false,
+        timed_out,
     };
     let event_ctx = ToolEventCtx::new(
         session_ref.as_ref(),
@@ -224,6 +234,7 @@ pub(crate) async fn emit_exec_end_for_unified_exec(
         cwd,
         ExecCommandSource::UnifiedExecStartup,
         process_id,
+        tool_name,
     );
     emitter
         .emit(
@@ -244,10 +255,12 @@ pub(crate) async fn emit_failed_exec_end_for_unified_exec(
     command: Vec<String>,
     cwd: AbsolutePathBuf,
     process_id: Option<String>,
+    tool_name: Option<String>,
     transcript: Arc<Mutex<HeadTailBuffer>>,
     fallback_output: String,
     message: String,
     duration: Duration,
+    timed_out: bool,
 ) {
     let stdout = if fallback_output.is_empty() {
         resolve_aggregated_output(&transcript, fallback_output).await
@@ -265,7 +278,7 @@ pub(crate) async fn emit_failed_exec_end_for_unified_exec(
         stderr: StreamOutput::new(message),
         aggregated_output: StreamOutput::new(aggregated_output),
         duration,
-        timed_out: false,
+        timed_out,
     };
     let event_ctx = ToolEventCtx::new(
         session_ref.as_ref(),
@@ -278,6 +291,7 @@ pub(crate) async fn emit_failed_exec_end_for_unified_exec(
         cwd,
         ExecCommandSource::UnifiedExecStartup,
         process_id,
+        tool_name,
     );
     emitter
         .emit(

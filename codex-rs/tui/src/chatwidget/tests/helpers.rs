@@ -643,6 +643,7 @@ pub(super) fn handle_patch_apply_begin(
                 id: call_id.into(),
                 changes: file_update_changes_from_tui(changes),
                 status: AppServerPatchApplyStatus::InProgress,
+                tool_name: None,
             },
         }),
         /*replay_kind*/ None,
@@ -665,6 +666,7 @@ pub(super) fn handle_patch_apply_end(
                 id: call_id.into(),
                 changes: file_update_changes_from_tui(changes),
                 status,
+                tool_name: None,
             },
         }),
         /*replay_kind*/ None,
@@ -822,6 +824,7 @@ pub(super) fn begin_exec_with_source(
         aggregated_output: None,
         exit_code: None,
         duration_ms: None,
+        tool_name: None,
     };
     handle_exec_begin(chat, item.clone());
     item
@@ -845,6 +848,7 @@ pub(super) fn begin_unified_exec_startup(
         aggregated_output: None,
         exit_code: None,
         duration_ms: None,
+        tool_name: None,
     };
     handle_exec_begin(chat, item.clone());
     item
@@ -1074,6 +1078,7 @@ pub(super) fn end_exec(
             aggregated_output: (!aggregated.is_empty()).then_some(aggregated),
             exit_code: Some(exit_code),
             duration_ms: Some(5),
+            tool_name: None,
         },
     );
 }

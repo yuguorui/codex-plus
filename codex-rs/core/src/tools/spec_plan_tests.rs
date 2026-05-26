@@ -425,6 +425,35 @@ async fn environment_count_controls_environment_backed_tools() {
 }
 
 #[tokio::test]
+async fn claude_simple_tools_include_file_and_search_tools() {
+    let plan = probe(|turn| {
+        turn.model_info
+            .experimental_supported_tools
+            .push("claude_simple_tools".to_string());
+    })
+    .await;
+
+    let tool_names = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"];
+    plan.assert_visible_contains(&tool_names);
+    plan.assert_registered_contains(&tool_names);
+
+    let multiple_environments = probe(|turn| {
+        duplicate_primary_environment(turn);
+        turn.model_info
+            .experimental_supported_tools
+            .push("claude_simple_tools".to_string());
+    })
+    .await;
+
+    for tool_name in tool_names {
+        assert!(has_parameter(
+            multiple_environments.visible_spec(tool_name),
+            "environment_id"
+        ));
+    }
+}
+
+#[tokio::test]
 async fn host_context_gates_goal_and_agent_job_tools() {
     let feature_disabled = probe(|turn| {
         set_feature(turn, Feature::Goals, /*enabled*/ false);

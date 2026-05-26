@@ -156,6 +156,7 @@ pub enum CommandExecutionStatus {
 /// A command executed by the agent.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 pub struct CommandExecutionItem {
+    pub tool_name: Option<String>,
     pub command: String,
     pub aggregated_output: String,
     pub exit_code: Option<i32>,
@@ -181,6 +182,7 @@ pub enum PatchApplyStatus {
 /// A set of file changes by the agent.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 pub struct FileChangeItem {
+    pub tool_name: Option<String>,
     pub changes: Vec<FileUpdateChange>,
     pub status: PatchApplyStatus,
 }

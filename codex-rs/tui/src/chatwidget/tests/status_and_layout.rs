@@ -3514,6 +3514,7 @@ async fn chatwidget_exec_and_status_layout_vt100_snapshot() {
             aggregated_output: None,
             exit_code: None,
             duration_ms: None,
+            tool_name: None,
         },
     );
     handle_exec_end(
@@ -3529,6 +3530,7 @@ async fn chatwidget_exec_and_status_layout_vt100_snapshot() {
             aggregated_output: None,
             exit_code: Some(0),
             duration_ms: Some(16000),
+            tool_name: None,
         },
     );
     handle_turn_started(&mut chat, "turn-1");
