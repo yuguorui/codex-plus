@@ -14,6 +14,7 @@ base_url = "http://localhost:11434/v1"
     let expected_provider = ModelProviderInfo {
         name: "Ollama".into(),
         base_url: Some("http://localhost:11434/v1".into()),
+        env_base_url: None,
         env_key: None,
         env_key_auth: None,
         env_key_instructions: None,
@@ -51,6 +52,7 @@ query_params = { api-version = "2025-04-01-preview" }
     let expected_provider = ModelProviderInfo {
         name: "Azure".into(),
         base_url: Some("https://xxxxx.openai.azure.com/openai".into()),
+        env_base_url: None,
         env_key: Some("AZURE_OPENAI_API_KEY".into()),
         env_key_auth: None,
         env_key_instructions: None,
@@ -91,6 +93,7 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
     let expected_provider = ModelProviderInfo {
         name: "Example".into(),
         base_url: Some("https://example.com".into()),
+        env_base_url: None,
         env_key: Some("API_KEY".into()),
         env_key_auth: None,
         env_key_instructions: None,
@@ -326,6 +329,7 @@ fn test_supports_remote_compaction_for_azure_name() {
     let provider = ModelProviderInfo {
         name: "Azure".into(),
         base_url: Some("https://example.com/openai".into()),
+        env_base_url: None,
         env_key: Some("AZURE_OPENAI_API_KEY".into()),
         env_key_auth: None,
         env_key_instructions: None,
@@ -366,6 +370,7 @@ fn test_supports_remote_compaction_for_non_openai_non_azure_provider() {
     let provider = ModelProviderInfo {
         name: "Example".into(),
         base_url: Some("https://example.com/v1".into()),
+        env_base_url: None,
         env_key: Some("API_KEY".into()),
         env_key_auth: None,
         env_key_instructions: None,
@@ -473,6 +478,7 @@ fn test_create_amazon_bedrock_provider() {
         ModelProviderInfo {
             name: "Amazon Bedrock".to_string(),
             base_url: Some("https://bedrock-mantle.us-east-1.api.aws/openai/v1".to_string()),
+            env_base_url: None,
             env_key: None,
             env_key_auth: None,
             env_key_instructions: None,
