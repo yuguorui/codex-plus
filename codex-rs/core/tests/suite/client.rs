@@ -856,6 +856,7 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
     let provider = ModelProviderInfo {
         name: "corp".into(),
         base_url: Some(format!("{}/v1", server.uri())),
+        env_base_url: None,
         env_key: None,
         env_key_auth: None,
         env_key_instructions: None,
@@ -2382,6 +2383,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
     let provider = ModelProviderInfo {
         name: "azure".into(),
         base_url: Some(format!("{}/openai", server.uri())),
+        env_base_url: None,
         env_key: None,
         env_key_auth: None,
         env_key_instructions: None,
