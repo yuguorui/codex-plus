@@ -3097,6 +3097,10 @@
           "description": "Absolute path to a Google ADC credential file. For GCP, overrides GOOGLE_APPLICATION_CREDENTIALS in the auth command's environment only.",
           "type": "string"
         },
+        "env_base_url": {
+          "description": "Environment variable whose value overrides `base_url` when set and non-empty.",
+          "type": "string"
+        },
         "env_extra_headers": {
           "additionalProperties": {
             "type": "string"
