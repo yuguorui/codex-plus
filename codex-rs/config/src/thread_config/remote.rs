@@ -177,6 +177,7 @@ fn model_provider_from_proto(
         name: provider.name,
         base_url: provider.base_url,
         model_catalog_url: provider.model_catalog_url.map(Into::into),
+        env_base_url: provider.env_base_url,
         env_key: provider.env_key,
         env_key_auth: provider
             .env_key_auth
@@ -233,6 +234,7 @@ fn model_provider_to_proto(
         name,
         base_url,
         model_catalog_url,
+        env_base_url,
         env_key,
         env_key_auth,
         env_key_instructions,
@@ -262,6 +264,7 @@ fn model_provider_to_proto(
         name,
         base_url,
         model_catalog_url: model_catalog_url.map(RedactedString::into_inner),
+        env_base_url,
         env_key,
         env_key_auth: env_key_auth.map(|scheme| scheme.to_string()),
         env_key_instructions,
@@ -519,6 +522,7 @@ mod tests {
                             model_catalog_url: Some(
                                 "http://127.0.0.1:8061/api/codex/models".to_string(),
                             ),
+                            env_base_url: Some("LOCAL_BASE_URL".to_string()),
                             env_key: None,
                             env_key_auth: None,
                             env_key_instructions: None,
@@ -611,6 +615,7 @@ mod tests {
             name: "Local".to_string(),
             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
             model_catalog_url: Some("http://127.0.0.1:8061/api/codex/models".into()),
+            env_base_url: Some("LOCAL_BASE_URL".to_string()),
             env_key: None,
             env_key_auth: None,
             env_key_instructions: None,
