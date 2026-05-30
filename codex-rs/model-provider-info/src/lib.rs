@@ -190,6 +190,9 @@ pub struct ModelProviderInfo {
     pub name: String,
     /// Base URL for the provider's OpenAI-compatible API.
     pub base_url: Option<String>,
+    /// Environment variable whose value overrides `base_url` when set and
+    /// non-empty.
+    pub env_base_url: Option<String>,
     /// Environment variable that stores the user's API key for this provider.
     pub env_key: Option<String>,
     /// Auth header scheme to use for the API key loaded from `env_key`.
@@ -472,8 +475,11 @@ other non-default provider fields are not supported"
         Ok(headers)
     }
 
-    /// Builds an API provider with managed residency taking precedence over configured headers.
-    pub fn to_api_provider(&self, auth_mode: Option<AuthMode>) -> CodexResult<ApiProvider> {
+    fn resolve_base_url(
+        &self,
+        auth_mode: Option<AuthMode>,
+        env_var: impl Fn(&str) -> Option<String>,
+    ) -> String {
         let default_base_url = if matches!(
             auth_mode,
             Some(
@@ -488,10 +494,17 @@ other non-default provider fields are not supported"
         } else {
             "https://api.openai.com/v1"
         };
-        let base_url = self
-            .base_url
-            .clone()
-            .unwrap_or_else(|| default_base_url.to_string());
+
+        self.env_base_url
+            .as_deref()
+            .and_then(env_var)
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| self.base_url.clone())
+            .unwrap_or_else(|| default_base_url.to_string())
+    }
+
+    pub fn to_api_provider(&self, auth_mode: Option<AuthMode>) -> CodexResult<ApiProvider> {
+        let base_url = self.resolve_base_url(auth_mode, |env_key| std::env::var(env_key).ok());
 
         let mut headers = self.build_header_map()?;
         if let Some(requirement) = read_managed_residency_requirement() {
@@ -587,6 +600,7 @@ other non-default provider fields are not supported"
         ModelProviderInfo {
             name: OPENAI_PROVIDER_NAME.into(),
             base_url,
+            env_base_url: None,
             env_key: None,
             env_key_auth: None,
             env_key_instructions: None,
@@ -631,10 +645,8 @@ other non-default provider fields are not supported"
     ) -> ModelProviderInfo {
         ModelProviderInfo {
             name: AMAZON_BEDROCK_PROVIDER_NAME.into(),
-            // The runtime provider derives the regional Mantle endpoint when
-            // this is unset. A configured value is therefore unambiguously an
-            // endpoint override.
             base_url: None,
+            env_base_url: None,
             env_key: None,
             env_key_auth: None,
             env_key_instructions: None,
@@ -826,6 +838,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
     ModelProviderInfo {
         name: "gpt-oss".into(),
         base_url: Some(base_url.into()),
+        env_base_url: None,
         env_key: None,
         env_key_auth: None,
         env_key_instructions: None,
