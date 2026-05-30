@@ -63,6 +63,7 @@ base_url = "http://localhost:11434/v1"
         name: "Ollama".into(),
         base_url: Some("http://localhost:11434/v1".into()),
         model_catalog_url: None,
+        env_base_url: None,
         env_key: None,
         env_key_auth: None,
         env_key_instructions: None,
@@ -103,6 +104,7 @@ query_params = { api-version = "2025-04-01-preview" }
         name: "Azure".into(),
         base_url: Some("https://xxxxx.openai.azure.com/openai".into()),
         model_catalog_url: None,
+        env_base_url: None,
         env_key: Some("AZURE_OPENAI_API_KEY".into()),
         env_key_auth: None,
         env_key_instructions: None,
@@ -147,6 +149,7 @@ supports_standalone_web_search = true
         name: "Example".into(),
         base_url: Some("https://example.com".into()),
         model_catalog_url: None,
+        env_base_url: None,
         env_key: Some("API_KEY".into()),
         env_key_auth: None,
         env_key_instructions: None,
@@ -395,6 +398,35 @@ fn codex_backend_routes_require_codex_base_url() {
 }
 
 #[test]
+fn test_env_base_url_overrides_configured_base_url() {
+    let provider = ModelProviderInfo {
+        base_url: Some("https://configured.example/v1".to_string()),
+        env_base_url: Some("EXAMPLE_BASE_URL".to_string()),
+        ..ModelProviderInfo::default()
+    };
+
+    let base_url = provider.resolve_base_url(/*auth_mode*/ None, |env_key| {
+        assert_eq!(env_key, "EXAMPLE_BASE_URL");
+        Some("https://environment.example/v1".to_string())
+    });
+
+    assert_eq!(base_url, "https://environment.example/v1");
+}
+
+#[test]
+fn test_blank_env_base_url_falls_back_to_configured_base_url() {
+    let provider = ModelProviderInfo {
+        base_url: Some("https://configured.example/v1".to_string()),
+        env_base_url: Some("EXAMPLE_BASE_URL".to_string()),
+        ..ModelProviderInfo::default()
+    };
+
+    let base_url = provider.resolve_base_url(/*auth_mode*/ None, |_| Some("  ".to_string()));
+
+    assert_eq!(base_url, "https://configured.example/v1");
+}
+
+#[test]
 fn test_uses_openai_actor_authorization() {
     let mut provider = ModelProviderInfo {
         http_headers: Some(maplit::hashmap! {
@@ -494,6 +526,7 @@ fn test_create_amazon_bedrock_provider() {
             name: "Amazon Bedrock".to_string(),
             base_url: None,
             model_catalog_url: None,
+            env_base_url: None,
             env_key: None,
             env_key_auth: None,
             env_key_instructions: None,
