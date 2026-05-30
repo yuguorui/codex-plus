@@ -937,9 +937,9 @@ mod tests {
             assert_eq!(
                 tail, expected,
                 "expected live table tail to be rerendered at width {width}",
-        );
+            );
+        }
     }
-}
 
     #[test]
     fn controller_set_width_partial_drain_no_lost_lines() {
@@ -1919,5 +1919,4 @@ mod tests {
             "wrapped remainder from partially emitted source line was lost after resize: {remaining:?}",
         );
     }
-
 }
