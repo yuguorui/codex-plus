@@ -2813,6 +2813,10 @@
           ],
           "description": "Optional API capability overrides for a custom Responses-compatible provider. Unspecified capabilities retain their existing provider defaults."
         },
+        "env_base_url": {
+          "description": "Environment variable whose value overrides `base_url` when set and non-empty.",
+          "type": "string"
+        },
         "env_extra_headers": {
           "additionalProperties": {
             "type": "string"
