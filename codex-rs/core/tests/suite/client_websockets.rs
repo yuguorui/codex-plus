@@ -2616,6 +2616,7 @@ fn websocket_provider_with_connect_timeout(
         name: "mock-ws".into(),
         base_url: Some(format!("{}/v1", server.uri())),
         model_catalog_url: None,
+        env_base_url: None,
         env_key: None,
         env_key_auth: None,
         env_key_instructions: None,
