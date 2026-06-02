@@ -146,6 +146,7 @@ impl From<ChatUsage> for TokenUsage {
                 .prompt_tokens_details
                 .and_then(|details| details.cached_tokens)
                 .unwrap_or_default(),
+            cache_creation_input_tokens: 0,
             output_tokens: value.completion_tokens,
             reasoning_output_tokens: value
                 .completion_tokens_details
@@ -741,6 +742,7 @@ mod tests {
                 token_usage: Some(TokenUsage {
                     input_tokens: 3,
                     cached_input_tokens: 1,
+                    cache_creation_input_tokens: 0,
                     output_tokens: 2,
                     reasoning_output_tokens: 0,
                     total_tokens: 5,
@@ -1093,6 +1095,7 @@ mod tests {
                 token_usage: Some(TokenUsage {
                     input_tokens: 11,
                     cached_input_tokens: 4,
+                    cache_creation_input_tokens: 0,
                     output_tokens: 7,
                     reasoning_output_tokens: 3,
                     total_tokens: 18,
