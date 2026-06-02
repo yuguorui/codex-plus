@@ -73,13 +73,22 @@ struct AnthropicMessagesRequest {
     messages: Vec<AnthropicMessage>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<Vec<AnthropicSystemBlock>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<AnthropicTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<AnthropicToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<AnthropicThinking>,
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicSystemBlock {
+    #[serde(rename = "type")]
+    block_type: String,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
 }
 
 #[derive(Debug, Serialize)]
@@ -100,18 +109,28 @@ enum AnthropicRole {
 enum AnthropicContentBlock {
     Text {
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     Image {
         source: AnthropicImageSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     ToolUse {
         id: String,
         name: String,
         input: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     ToolResult {
         tool_use_id: String,
-        content: String,
+        content: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     Thinking {
         thinking: String,
@@ -127,6 +146,7 @@ enum AnthropicContentBlock {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicImageSource {
     Url { url: String },
+    Base64 { media_type: String, data: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -135,6 +155,20 @@ struct AnthropicTool {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     input_schema: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    cache_type: CacheType,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CacheType {
+    Ephemeral,
 }
 
 #[derive(Debug, Serialize)]
@@ -251,6 +285,12 @@ impl<T: HttpTransport> AnthropicClient<T> {
                 HeaderValue::from_static(DEFAULT_ANTHROPIC_VERSION),
             );
         }
+        if !headers.contains_key("anthropic-beta") {
+            headers.insert(
+                "anthropic-beta",
+                HeaderValue::from_static("interleaved-thinking-2025-05-14"),
+            );
+        }
         if let Some(ref thread_id) = thread_id {
             insert_header(&mut headers, "x-client-request-id", thread_id);
         }
@@ -359,7 +399,7 @@ fn anthropic_body_from_responses_request(
     let has_tools = !tools.is_empty();
     let (system, messages) = anthropic_messages_from_items(&request.instructions, request.input)?;
     let extra_body = request.extra_body;
-    let request = AnthropicMessagesRequest {
+    let mut request = AnthropicMessagesRequest {
         model: request.model,
         max_tokens: DEFAULT_MAX_TOKENS,
         messages,
@@ -371,6 +411,7 @@ fn anthropic_body_from_responses_request(
             .flatten(),
         thinking: anthropic_thinking_from_reasoning(request.reasoning.as_ref()),
     };
+    apply_cache_breakpoints(&mut request);
     let body = serde_json::to_value(request)
         .map_err(|err| ApiError::Stream(format!("failed to encode Anthropic request: {err}")))?;
     Ok(AnthropicRequestBody {
@@ -427,10 +468,14 @@ fn anthropic_tool_choice(tool_choice: &str) -> Option<AnthropicToolChoice> {
 fn anthropic_messages_from_items(
     instructions: &str,
     items: Vec<ResponseItem>,
-) -> Result<(Option<String>, Vec<AnthropicMessage>), ApiError> {
-    let mut system = Vec::new();
+) -> Result<(Option<Vec<AnthropicSystemBlock>>, Vec<AnthropicMessage>), ApiError> {
+    let mut system: Vec<AnthropicSystemBlock> = Vec::new();
     if !instructions.is_empty() {
-        system.push(instructions.to_string());
+        system.push(AnthropicSystemBlock {
+            block_type: "text".to_string(),
+            text: instructions.to_string(),
+            cache_control: None,
+        });
     }
 
     let mut messages = Vec::new();
@@ -445,14 +490,21 @@ fn anthropic_messages_from_items(
                     flush_pending_tool_results(&mut messages, &mut pending_tool_results);
                     let text = anthropic_content_from_items(content).into_text();
                     if !text.is_empty() {
-                        system.push(text);
+                        system.push(AnthropicSystemBlock {
+                            block_type: "text".to_string(),
+                            text,
+                            cache_control: None,
+                        });
                     }
                 }
                 "assistant" => {
                     flush_pending_tool_results(&mut messages, &mut pending_tool_results);
                     let text = anthropic_content_from_items(content).into_text();
                     if !text.is_empty() {
-                        pending_assistant_content.push(AnthropicContentBlock::Text { text });
+                        pending_assistant_content.push(AnthropicContentBlock::Text {
+                            text,
+                            cache_control: None,
+                        });
                     }
                 }
                 _ => {
@@ -477,6 +529,7 @@ fn anthropic_messages_from_items(
                     id: call_id,
                     name,
                     input: serde_json::from_str(&arguments).unwrap_or(Value::String(arguments)),
+                    cache_control: None,
                 });
             }
             ResponseItem::CustomToolCall {
@@ -490,6 +543,7 @@ fn anthropic_messages_from_items(
                     id: call_id,
                     name,
                     input: serde_json::json!({ "input": input }),
+                    cache_control: None,
                 });
             }
             ResponseItem::Reasoning {
@@ -523,7 +577,9 @@ fn anthropic_messages_from_items(
                 flush_pending_assistant_content(&mut messages, &mut pending_assistant_content);
                 pending_tool_results.push(AnthropicContentBlock::ToolResult {
                     tool_use_id: call_id,
-                    content: function_output_to_anthropic_content(output.body),
+                    content: Value::String(function_output_to_anthropic_content(output.body)),
+                    is_error: None,
+                    cache_control: None,
                 });
             }
             ResponseItem::Compaction {
@@ -538,7 +594,11 @@ fn anthropic_messages_from_items(
             } => {
                 flush_pending_assistant_content(&mut messages, &mut pending_assistant_content);
                 flush_pending_tool_results(&mut messages, &mut pending_tool_results);
-                system.push(encrypted_content);
+                system.push(AnthropicSystemBlock {
+                    block_type: "text".to_string(),
+                    text: encrypted_content,
+                    cache_control: None,
+                });
             }
             _ => {
                 flush_pending_assistant_content(&mut messages, &mut pending_assistant_content);
@@ -549,7 +609,7 @@ fn anthropic_messages_from_items(
 
     flush_pending_assistant_content(&mut messages, &mut pending_assistant_content);
     flush_pending_tool_results(&mut messages, &mut pending_tool_results);
-    Ok(((!system.is_empty()).then(|| system.join("\n\n")), messages))
+    Ok(((!system.is_empty()).then_some(system), messages))
 }
 
 struct AnthropicContent {
@@ -561,7 +621,7 @@ impl AnthropicContent {
         self.blocks
             .into_iter()
             .filter_map(|block| match block {
-                AnthropicContentBlock::Text { text } => Some(text),
+                AnthropicContentBlock::Text { text, .. } => Some(text),
                 AnthropicContentBlock::Image { .. }
                 | AnthropicContentBlock::ToolUse { .. }
                 | AnthropicContentBlock::ToolResult { .. }
@@ -592,13 +652,29 @@ fn anthropic_content_from_items(content: Vec<ContentItem>) -> AnthropicContent {
     for item in content {
         match item {
             ContentItem::InputText { text } | ContentItem::OutputText { text } => {
-                blocks.push(AnthropicContentBlock::Text { text });
+                blocks.push(AnthropicContentBlock::Text {
+                    text,
+                    cache_control: None,
+                });
             }
             ContentItem::InputImage { image_url, detail } => {
-                // Anthropic Messages does not expose an image-detail knob.
                 let _detail: Option<ImageDetail> = detail;
+                let source = if let Some(rest) = image_url.strip_prefix("data:") {
+                    // Parse "image/png;base64,ACTUAL_DATA"
+                    if let Some((media_type, data)) = rest.split_once(";base64,") {
+                        AnthropicImageSource::Base64 {
+                            media_type: media_type.to_string(),
+                            data: data.to_string(),
+                        }
+                    } else {
+                        AnthropicImageSource::Url { url: image_url }
+                    }
+                } else {
+                    AnthropicImageSource::Url { url: image_url }
+                };
                 blocks.push(AnthropicContentBlock::Image {
-                    source: AnthropicImageSource::Url { url: image_url },
+                    source,
+                    cache_control: None,
                 });
             }
         }
@@ -613,9 +689,18 @@ fn flush_pending_assistant_content(
     if pending_assistant_content.is_empty() {
         return;
     }
+    let content = std::mem::take(pending_assistant_content);
+    let (thinking, other): (Vec<_>, Vec<_>) = content.into_iter().partition(|block| {
+        matches!(
+            block,
+            AnthropicContentBlock::Thinking { .. } | AnthropicContentBlock::RedactedThinking { .. }
+        )
+    });
+    let mut sorted = thinking;
+    sorted.extend(other);
     messages.push(AnthropicMessage {
         role: AnthropicRole::Assistant,
-        content: std::mem::take(pending_assistant_content),
+        content: sorted,
     });
 }
 
@@ -689,6 +774,7 @@ fn anthropic_function_tool(
         input_schema: tool
             .parameters
             .unwrap_or_else(|| serde_json::json!({"type": "object"})),
+        cache_control: None,
     })
 }
 
@@ -720,6 +806,7 @@ fn anthropic_custom_tool(
             "required": ["input"],
             "additionalProperties": false
         }),
+        cache_control: None,
     })
 }
 
@@ -738,6 +825,60 @@ fn anthropic_tool_name(namespace: Option<&str>, name: &str) -> String {
         }
         Some(namespace) => format!("{namespace}_{name}"),
         None => name.to_string(),
+    }
+}
+
+fn apply_cache_breakpoints(request: &mut AnthropicMessagesRequest) {
+    let ephemeral = || CacheControl {
+        cache_type: CacheType::Ephemeral,
+    };
+
+    // Breakpoint 1: system last block
+    if let Some(ref mut system_blocks) = request.system
+        && let Some(last) = system_blocks.last_mut()
+    {
+        last.cache_control = Some(ephemeral());
+    }
+
+    // Breakpoint 2: tools last
+    if let Some(last_tool) = request.tools.last_mut() {
+        last_tool.cache_control = Some(ephemeral());
+    }
+
+    // Breakpoint 3: second-to-last user message
+    let user_indices: Vec<usize> = request
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| matches!(m.role, AnthropicRole::User))
+        .map(|(i, _)| i)
+        .collect();
+
+    if user_indices.len() >= 2 {
+        let target_idx = user_indices[user_indices.len() - 2];
+        let msg = &mut request.messages[target_idx];
+        if let Some(block) = msg.content.iter_mut().rev().find(|b| {
+            !matches!(
+                b,
+                AnthropicContentBlock::Thinking { .. }
+                    | AnthropicContentBlock::RedactedThinking { .. }
+            )
+        }) {
+            set_cache_control_on_block(block, ephemeral());
+        }
+    }
+}
+
+fn set_cache_control_on_block(block: &mut AnthropicContentBlock, cc: CacheControl) {
+    match block {
+        AnthropicContentBlock::Text { cache_control, .. }
+        | AnthropicContentBlock::Image { cache_control, .. }
+        | AnthropicContentBlock::ToolUse { cache_control, .. }
+        | AnthropicContentBlock::ToolResult { cache_control, .. } => {
+            *cache_control = Some(cc);
+        }
+        AnthropicContentBlock::Thinking { .. } | AnthropicContentBlock::RedactedThinking { .. } => {
+        }
     }
 }
 
@@ -834,13 +975,16 @@ mod tests {
             Vec::new(),
         ));
 
-        assert_eq!(body["system"], "system prompt");
+        assert_eq!(
+            body["system"],
+            json!([{"type": "text", "text": "system prompt", "cache_control": {"type": "ephemeral"}}])
+        );
         assert_eq!(body["stream"], true);
         assert_eq!(body["max_tokens"], DEFAULT_MAX_TOKENS);
         assert_eq!(
             body["messages"],
             json!([
-                {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+                {"role": "user", "content": [{"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}}]},
                 {
                     "role": "assistant",
                     "content": [
@@ -930,7 +1074,8 @@ mod tests {
                 {
                     "name": "mcp__calendar__lookup_order",
                     "description": "lookup",
-                    "input_schema": {"type": "object"}
+                    "input_schema": {"type": "object"},
+                    "cache_control": {"type": "ephemeral"}
                 }
             ])
         );
@@ -971,7 +1116,8 @@ mod tests {
                     },
                     "required": ["input"],
                     "additionalProperties": false
-                }
+                },
+                "cache_control": {"type": "ephemeral"}
             }])
         );
     }
@@ -1090,5 +1236,211 @@ mod tests {
         let body = body_from(request);
 
         assert_eq!(body.get("thinking"), None);
+    }
+
+    #[test]
+    fn cache_breakpoints_on_system_tools_and_second_to_last_user() {
+        let body = body_from(request(
+            vec![
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "first".to_string(),
+                    }],
+                    phase: None,
+                },
+                ResponseItem::Message {
+                    id: None,
+                    role: "assistant".to_string(),
+                    content: vec![ContentItem::OutputText {
+                        text: "reply".to_string(),
+                    }],
+                    phase: None,
+                },
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "second".to_string(),
+                    }],
+                    phase: None,
+                },
+            ],
+            vec![json!({
+                "type": "function",
+                "name": "shell",
+                "parameters": {"type": "object"}
+            })],
+        ));
+
+        assert_eq!(
+            body["system"],
+            json!([{"type": "text", "text": "system prompt", "cache_control": {"type": "ephemeral"}}])
+        );
+
+        assert_eq!(
+            body["tools"],
+            json!([{
+                "name": "shell",
+                "input_schema": {"type": "object"},
+                "cache_control": {"type": "ephemeral"}
+            }])
+        );
+
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(messages[2]["content"][0].get("cache_control"), None);
+    }
+
+    #[test]
+    fn thinking_blocks_never_get_cache_control() {
+        let body = body_from(request(
+            vec![
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "first".to_string(),
+                    }],
+                    phase: None,
+                },
+                ResponseItem::Reasoning {
+                    id: "r1".to_string(),
+                    summary: Vec::new(),
+                    content: Some(vec![ReasoningItemContent::ReasoningText {
+                        text: "think".to_string(),
+                    }]),
+                    encrypted_content: Some("sig".to_string()),
+                },
+                ResponseItem::Message {
+                    id: None,
+                    role: "assistant".to_string(),
+                    content: vec![ContentItem::OutputText {
+                        text: "reply".to_string(),
+                    }],
+                    phase: None,
+                },
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "second".to_string(),
+                    }],
+                    phase: None,
+                },
+            ],
+            Vec::new(),
+        ));
+
+        let messages = body["messages"].as_array().unwrap();
+        let assistant_msg = &messages[1];
+        let content = assistant_msg["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[0].get("cache_control"), None);
+        assert_eq!(content[1]["type"], "text");
+        // Breakpoint targets user messages, not assistant; assistant text has no cache_control
+        assert_eq!(content[1].get("cache_control"), None);
+        // First user message (second-to-last user) is the breakpoint target
+        assert_eq!(
+            messages[0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+    }
+
+    #[test]
+    fn single_turn_skips_message_breakpoint() {
+        let body = body_from(request(
+            vec![ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "only".to_string(),
+                }],
+                phase: None,
+            }],
+            Vec::new(),
+        ));
+
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["content"][0].get("cache_control"), None);
+    }
+
+    #[test]
+    fn cache_control_none_fields_are_omitted() {
+        let body = body_from(request(
+            vec![ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "hello".to_string(),
+                }],
+                phase: None,
+            }],
+            Vec::new(),
+        ));
+
+        let messages = body["messages"].as_array().unwrap();
+        let user_content = &messages[0]["content"][0];
+        assert!(
+            user_content.get("cache_control").is_none(),
+            "cache_control should be omitted when None"
+        );
+    }
+
+    #[test]
+    fn base64_image_data_url_uses_base64_source() {
+        let body = body_from(request(
+            vec![ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputImage {
+                    image_url: "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                    detail: None,
+                }],
+                phase: None,
+            }],
+            Vec::new(),
+        ));
+
+        let messages = body["messages"].as_array().unwrap();
+        let image = &messages[0]["content"][0];
+        assert_eq!(image["type"], "image");
+        assert_eq!(image["source"]["type"], "base64");
+        assert_eq!(image["source"]["media_type"], "image/png");
+        assert_eq!(image["source"]["data"], "iVBORw0KGgo=");
+    }
+
+    #[test]
+    fn thinking_blocks_are_reordered_before_text() {
+        let body = body_from(request(
+            vec![
+                ResponseItem::Message {
+                    id: None,
+                    role: "assistant".to_string(),
+                    content: vec![ContentItem::OutputText {
+                        text: "text first".to_string(),
+                    }],
+                    phase: None,
+                },
+                ResponseItem::Reasoning {
+                    id: "r1".to_string(),
+                    summary: Vec::new(),
+                    content: Some(vec![ReasoningItemContent::ReasoningText {
+                        text: "thinking".to_string(),
+                    }]),
+                    encrypted_content: None,
+                },
+            ],
+            Vec::new(),
+        ));
+
+        let messages = body["messages"].as_array().unwrap();
+        let content = messages[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[1]["type"], "text");
     }
 }
