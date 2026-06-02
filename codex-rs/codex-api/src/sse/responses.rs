@@ -125,6 +125,7 @@ impl From<ResponseCompletedUsage> for TokenUsage {
                 .input_tokens_details
                 .map(|d| d.cached_tokens)
                 .unwrap_or(0),
+            cache_creation_input_tokens: 0,
             output_tokens: val.output_tokens,
             reasoning_output_tokens: val
                 .output_tokens_details
