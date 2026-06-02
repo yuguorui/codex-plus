@@ -236,6 +236,9 @@ impl GoalTurnAccountingSnapshot {
             cached_input_tokens: current
                 .cached_input_tokens
                 .saturating_sub(last.cached_input_tokens),
+            cache_creation_input_tokens: current
+                .cache_creation_input_tokens
+                .saturating_sub(last.cache_creation_input_tokens),
             output_tokens: current.output_tokens.saturating_sub(last.output_tokens),
             reasoning_output_tokens: current
                 .reasoning_output_tokens
@@ -1582,6 +1585,7 @@ mod tests {
         let usage = TokenUsage {
             input_tokens: 900,
             cached_input_tokens: 400,
+            cache_creation_input_tokens: 0,
             output_tokens: 80,
             reasoning_output_tokens: 20,
             total_tokens: 1_000,
