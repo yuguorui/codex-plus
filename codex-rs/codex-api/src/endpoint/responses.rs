@@ -88,11 +88,9 @@ impl<T: HttpTransport> ResponsesClient<T> {
         merge_extra_body(&mut body, &request.extra_body);
         if request.store && self.session.provider().is_azure_responses_endpoint() {
             attach_item_ids(&mut body, &request.input);
-            EncodedJsonBody::encode(&body)
-        } else {
-            EncodedJsonBody::encode(&request)
         }
-        .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
+        let body = EncodedJsonBody::encode(&body)
+            .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
 
         let mut headers = extra_headers;
         if let Some(ref thread_id) = thread_id {
