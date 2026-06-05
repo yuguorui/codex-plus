@@ -36,6 +36,45 @@ use tracing::instrument;
 const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 64000;
 
+/// Process-global device identifier: 32 random bytes encoded as 64 hex chars.
+/// Generated once per process lifetime, mirroring Claude Code's `crypto.randomBytes(32).toString("hex")`.
+fn process_device_id() -> &'static str {
+    static DEVICE_ID: OnceLock<String> = OnceLock::new();
+    DEVICE_ID.get_or_init(|| {
+        let mut bytes = [0u8; 32];
+        use rand::RngCore;
+        rand::rng().fill_bytes(&mut bytes);
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    })
+}
+
+/// Metadata attached to every Anthropic Messages request for prompt-cache routing.
+///
+/// - `device_id`: random 64-hex string, stable for the process lifetime.
+/// - `account_uuid`: always empty (no OAuth account context).
+/// - `session_id`: UUID v4, regenerated each session.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+struct AnthropicMetadata {
+    device_id: String,
+    account_uuid: String,
+    session_id: String,
+}
+
+/// Wrapper that serializes as `{"user_id": "<stringified metadata>"}` per the Anthropic Messages API contract.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AnthropicRequestMetadata {
+    user_id: String,
+}
+
+impl Serialize for AnthropicRequestMetadata {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry("user_id", &self.user_id)?;
+        map.end()
+    }
+}
+
 pub struct AnthropicClient<T: HttpTransport> {
     session: EndpointSession<T>,
     sse_telemetry: Option<Arc<dyn SseTelemetry>>,
@@ -80,6 +119,8 @@ struct AnthropicMessagesRequest {
     tool_choice: Option<AnthropicToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<AnthropicThinking>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<AnthropicRequestMetadata>,
 }
 
 #[derive(Debug, Serialize)]
@@ -274,7 +315,8 @@ impl<T: HttpTransport> AnthropicClient<T> {
             turn_state,
         } = options;
 
-        let mut request_body = anthropic_body_from_responses_request(request)?;
+        let mut request_body =
+            anthropic_body_from_responses_request(request, session_id.as_deref())?;
         merge_extra_body(&mut request_body.body, &self.session.provider().extra_body)?;
         merge_extra_body(&mut request_body.body, &request_body.extra_body)?;
 
@@ -392,6 +434,7 @@ fn merge_extra_body(
 
 fn anthropic_body_from_responses_request(
     request: ResponsesApiRequest,
+    session_id: Option<&str>,
 ) -> Result<AnthropicRequestBody, ApiError> {
     let mut tool_names = AnthropicToolNameMap::new();
     let tools =
@@ -399,6 +442,17 @@ fn anthropic_body_from_responses_request(
     let has_tools = !tools.is_empty();
     let (system, messages) = anthropic_messages_from_items(&request.instructions, request.input)?;
     let extra_body = request.extra_body;
+    let metadata = session_id
+        .map(|sid| {
+            let inner = serde_json::to_string(&AnthropicMetadata {
+                device_id: process_device_id().to_string(),
+                account_uuid: String::new(),
+                session_id: sid.to_string(),
+            })
+            .map_err(|err| ApiError::Stream(format!("failed to encode metadata: {err}")))?;
+            Ok::<_, ApiError>(AnthropicRequestMetadata { user_id: inner })
+        })
+        .transpose()?;
     let mut request = AnthropicMessagesRequest {
         model: request.model,
         max_tokens: DEFAULT_MAX_TOKENS,
@@ -410,6 +464,7 @@ fn anthropic_body_from_responses_request(
             .then(|| anthropic_tool_choice(&request.tool_choice))
             .flatten(),
         thinking: anthropic_thinking_from_reasoning(request.reasoning.as_ref()),
+        metadata,
     };
     apply_cache_breakpoints(&mut request);
     let body = serde_json::to_value(request)
@@ -913,12 +968,13 @@ mod tests {
             model: "claude-sonnet-4-5".to_string(),
             instructions: "system prompt".to_string(),
             input,
-            tools,
+            tools: Some(tools),
             tool_choice: "auto".to_string(),
             parallel_tool_calls: false,
             reasoning: None,
             store: false,
             stream: true,
+            stream_options: None,
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
@@ -929,7 +985,7 @@ mod tests {
     }
 
     fn body_from(request: ResponsesApiRequest) -> Value {
-        anthropic_body_from_responses_request(request)
+        anthropic_body_from_responses_request(request, None)
             .expect("Anthropic body should convert")
             .body
     }
@@ -945,14 +1001,16 @@ mod tests {
                         text: "hello".to_string(),
                     }],
                     phase: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Reasoning {
-                    id: "reasoning-1".to_string(),
+                    id: None,
                     summary: Vec::new(),
                     content: Some(vec![ReasoningItemContent::ReasoningText {
                         text: "think".to_string(),
                     }]),
                     encrypted_content: Some("signature".to_string()),
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
                     id: None,
@@ -961,6 +1019,7 @@ mod tests {
                         text: "about to call a tool".to_string(),
                     }],
                     phase: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
                     id: None,
@@ -968,10 +1027,13 @@ mod tests {
                     namespace: None,
                     arguments: "{\"cmd\":\"ls\"}".to_string(),
                     call_id: "call-1".to_string(),
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCallOutput {
                     call_id: "call-1".to_string(),
                     output: FunctionCallOutputPayload::from_text("ok".to_string()),
+                    internal_chat_message_metadata_passthrough: None,
+                    id: None,
                 },
             ],
             Vec::new(),
@@ -1023,10 +1085,11 @@ mod tests {
     fn converts_redacted_reasoning_for_replay() {
         let body = body_from(request(
             vec![ResponseItem::Reasoning {
-                id: "reasoning-1".to_string(),
+                id: None,
                 summary: Vec::new(),
                 content: None,
                 encrypted_content: Some("redacted-data".to_string()),
+                internal_chat_message_metadata_passthrough: None,
             }],
             Vec::new(),
         ));
@@ -1042,27 +1105,30 @@ mod tests {
 
     #[test]
     fn converts_function_and_namespace_tools() {
-        let request_body = anthropic_body_from_responses_request(request(
-            Vec::new(),
-            vec![
-                json!({
-                    "type": "function",
-                    "name": "shell",
-                    "description": "run",
-                    "parameters": {"type": "object"}
-                }),
-                json!({
-                    "type": "namespace",
-                    "name": "mcp__calendar__",
-                    "tools": [{
+        let request_body = anthropic_body_from_responses_request(
+            request(
+                Vec::new(),
+                vec![
+                    json!({
                         "type": "function",
-                        "name": "lookup_order",
-                        "description": "lookup",
+                        "name": "shell",
+                        "description": "run",
                         "parameters": {"type": "object"}
-                    }]
-                }),
-            ],
-        ))
+                    }),
+                    json!({
+                        "type": "namespace",
+                        "name": "mcp__calendar__",
+                        "tools": [{
+                            "type": "function",
+                            "name": "lookup_order",
+                            "description": "lookup",
+                            "parameters": {"type": "object"}
+                        }]
+                    }),
+                ],
+            ),
+            None,
+        )
         .expect("Anthropic body should convert");
 
         assert_eq!(
@@ -1092,15 +1158,18 @@ mod tests {
 
     #[test]
     fn converts_custom_tools_to_function_tools() {
-        let request_body = anthropic_body_from_responses_request(request(
-            Vec::new(),
-            vec![json!({
-                "type": "custom",
-                "name": "apply_patch",
-                "description": "patch",
-                "format": {"type": "grammar", "syntax": "lark", "definition": "start: /x/"}
-            })],
-        ))
+        let request_body = anthropic_body_from_responses_request(
+            request(
+                Vec::new(),
+                vec![json!({
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "patch",
+                    "format": {"type": "grammar", "syntax": "lark", "definition": "start: /x/"}
+                })],
+            ),
+            None,
+        )
         .expect("Anthropic body should convert");
 
         assert_eq!(
@@ -1133,6 +1202,8 @@ mod tests {
                 call_id: "call-custom".to_string(),
                 name: "apply_patch".to_string(),
                 input: "*** Begin Patch\n*** End Patch".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+                namespace: None,
             }],
             Vec::new(),
         ));
@@ -1251,6 +1322,7 @@ mod tests {
                         text: "first".to_string(),
                     }],
                     phase: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
                     id: None,
@@ -1259,6 +1331,7 @@ mod tests {
                         text: "reply".to_string(),
                     }],
                     phase: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
                     id: None,
@@ -1267,6 +1340,7 @@ mod tests {
                         text: "second".to_string(),
                     }],
                     phase: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
             ],
             vec![json!({
@@ -1309,14 +1383,16 @@ mod tests {
                         text: "first".to_string(),
                     }],
                     phase: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Reasoning {
-                    id: "r1".to_string(),
+                    id: None,
                     summary: Vec::new(),
                     content: Some(vec![ReasoningItemContent::ReasoningText {
                         text: "think".to_string(),
                     }]),
                     encrypted_content: Some("sig".to_string()),
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
                     id: None,
@@ -1325,6 +1401,7 @@ mod tests {
                         text: "reply".to_string(),
                     }],
                     phase: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
                     id: None,
@@ -1333,6 +1410,7 @@ mod tests {
                         text: "second".to_string(),
                     }],
                     phase: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
             ],
             Vec::new(),
@@ -1363,6 +1441,7 @@ mod tests {
                     text: "only".to_string(),
                 }],
                 phase: None,
+                internal_chat_message_metadata_passthrough: None,
             }],
             Vec::new(),
         ));
@@ -1381,6 +1460,7 @@ mod tests {
                     text: "hello".to_string(),
                 }],
                 phase: None,
+                internal_chat_message_metadata_passthrough: None,
             }],
             Vec::new(),
         ));
@@ -1404,6 +1484,7 @@ mod tests {
                     detail: None,
                 }],
                 phase: None,
+                internal_chat_message_metadata_passthrough: None,
             }],
             Vec::new(),
         ));
@@ -1427,14 +1508,16 @@ mod tests {
                         text: "text first".to_string(),
                     }],
                     phase: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Reasoning {
-                    id: "r1".to_string(),
+                    id: None,
                     summary: Vec::new(),
                     content: Some(vec![ReasoningItemContent::ReasoningText {
                         text: "thinking".to_string(),
                     }]),
                     encrypted_content: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
             ],
             Vec::new(),
