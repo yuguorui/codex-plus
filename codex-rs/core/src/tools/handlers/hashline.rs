@@ -203,7 +203,7 @@ impl ToolExecutor<ToolInvocation> for HashlineHandler {
                             move_path: None,
                         },
                     )]);
-                    let emitter = ToolEmitter::apply_patch(changes, /*auto_approved*/ true);
+                    let emitter = ToolEmitter::apply_patch_for_environment(changes, /*auto_approved*/ true, turn_environment.environment_id.clone());
                     let event_ctx = ToolEventCtx::new(
                         session.as_ref(),
                         turn.as_ref(),
