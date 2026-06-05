@@ -1,4 +1,6 @@
 #![allow(clippy::expect_used)]
+
+use serde_json::Value;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -329,8 +331,9 @@ async fn responses_client_stream_request_preserves_exact_json_body() -> Result<(
         prompt_cache_key: None,
         text: None,
         client_metadata: None,
+        extra_body: HashMap::new(),
     };
-    let expected = serde_json::to_vec(&request)?;
+    let expected = serde_json::to_vec(&serde_json::to_value(&request)?)?;
 
     let _stream = client
         .stream_request(request, ResponsesOptions::default())
@@ -590,5 +593,215 @@ async fn azure_default_store_attaches_ids_and_headers() -> Result<()> {
         .and_then(|id| id.as_str());
     assert_eq!(input_id, Some("msg_1"));
 
+    Ok(())
+}
+
+fn anthropic_provider() -> Provider {
+    Provider {
+        name: "anthropic".to_string(),
+        base_url: "https://api.anthropic.com/v1".to_string(),
+        query_params: None,
+        headers: HeaderMap::new(),
+        extra_body: HashMap::new(),
+        retry: codex_api::RetryConfig {
+            max_attempts: 1,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            retry_429: false,
+            retry_5xx: false,
+            retry_transport: true,
+        },
+        stream_idle_timeout: Duration::from_millis(10),
+    }
+}
+
+fn anthropic_request() -> ResponsesApiRequest {
+    ResponsesApiRequest {
+        model: "claude-sonnet-4-5".into(),
+        instructions: "test".into(),
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".into(),
+            content: vec![ContentItem::InputText { text: "hi".into() }],
+            phase: None,
+        }],
+        tools: Vec::new(),
+        tool_choice: "auto".into(),
+        parallel_tool_calls: false,
+        reasoning: None,
+        store: false,
+        stream: true,
+        include: Vec::new(),
+        service_tier: None,
+        prompt_cache_key: None,
+        text: None,
+        client_metadata: None,
+        extra_body: HashMap::new(),
+    }
+}
+
+fn extract_metadata(req: &Request) -> Value {
+    let body = req
+        .body
+        .as_ref()
+        .and_then(RequestBody::json)
+        .expect("request body should be JSON");
+    let raw = body
+        .get("metadata")
+        .and_then(|metadata| {
+            metadata
+                .get("user_id")
+                .or(Some(metadata))
+                .and_then(Value::as_str)
+        })
+        .expect("request body should contain metadata string");
+    serde_json::from_str(raw).expect("metadata should be valid JSON")
+}
+
+#[tokio::test]
+async fn anthropic_stream_attaches_metadata_with_session_id() -> Result<()> {
+    let state = RecordingState::default();
+    let transport = RecordingTransport::new(state.clone());
+    let client = codex_api::AnthropicClient::new(transport, anthropic_provider(), Arc::new(NoAuth));
+
+    let _stream = client
+        .stream_request(
+            anthropic_request(),
+            codex_api::AnthropicOptions {
+                session_id: Some("sess-abc-123".into()),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    let requests = state.take_stream_requests();
+    assert_eq!(requests.len(), 1);
+
+    let metadata = extract_metadata(&requests[0]);
+    assert_eq!(metadata["session_id"], "sess-abc-123");
+    assert_eq!(metadata["account_uuid"], "");
+
+    let device_id = metadata["device_id"]
+        .as_str()
+        .expect("device_id should be a string");
+    assert_eq!(device_id.len(), 64, "device_id should be 64 hex chars");
+    assert!(
+        device_id.chars().all(|c| c.is_ascii_hexdigit()),
+        "device_id should be hex-encoded"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn anthropic_stream_omits_metadata_without_session_id() -> Result<()> {
+    let state = RecordingState::default();
+    let transport = RecordingTransport::new(state.clone());
+    let client = codex_api::AnthropicClient::new(transport, anthropic_provider(), Arc::new(NoAuth));
+
+    let _stream = client
+        .stream_request(anthropic_request(), codex_api::AnthropicOptions::default())
+        .await?;
+
+    let requests = state.take_stream_requests();
+    assert_eq!(requests.len(), 1);
+
+    let body = requests[0]
+        .body
+        .as_ref()
+        .and_then(RequestBody::json)
+        .expect("request should have a JSON body");
+    assert!(
+        body.get("metadata").is_none(),
+        "metadata should be absent when no session_id is provided"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn anthropic_metadata_device_id_stable_session_id_varies() -> Result<()> {
+    let state = RecordingState::default();
+    let transport = RecordingTransport::new(state.clone());
+    let client = codex_api::AnthropicClient::new(transport, anthropic_provider(), Arc::new(NoAuth));
+
+    // First request with session A
+    let _stream = client
+        .stream_request(
+            anthropic_request(),
+            codex_api::AnthropicOptions {
+                session_id: Some("session-A".into()),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    // Second request with session B (same process, same client)
+    let _stream = client
+        .stream_request(
+            anthropic_request(),
+            codex_api::AnthropicOptions {
+                session_id: Some("session-B".into()),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    let requests = state.take_stream_requests();
+    assert_eq!(requests.len(), 2);
+
+    let meta_a = extract_metadata(&requests[0]);
+    let meta_b = extract_metadata(&requests[1]);
+
+    // device_id must be identical across both requests (same process)
+    assert_eq!(
+        meta_a["device_id"], meta_b["device_id"],
+        "device_id must be process-stable across requests"
+    );
+
+    // account_uuid must be empty in both
+    assert_eq!(meta_a["account_uuid"], "");
+    assert_eq!(meta_b["account_uuid"], "");
+
+    // session_id must differ
+    assert_eq!(meta_a["session_id"], "session-A");
+    assert_eq!(meta_b["session_id"], "session-B");
+    Ok(())
+}
+
+#[tokio::test]
+async fn anthropic_metadata_session_id_stable_within_same_session() -> Result<()> {
+    let state = RecordingState::default();
+    let transport = RecordingTransport::new(state.clone());
+    let client = codex_api::AnthropicClient::new(transport, anthropic_provider(), Arc::new(NoAuth));
+
+    // Simulate multiple turns within the same session (same session_id)
+    let session_id = "stable-session-xyz";
+    for _ in 0..3 {
+        let _stream = client
+            .stream_request(
+                anthropic_request(),
+                codex_api::AnthropicOptions {
+                    session_id: Some(session_id.into()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+    }
+
+    let requests = state.take_stream_requests();
+    assert_eq!(requests.len(), 3);
+
+    let metas: Vec<Value> = requests.iter().map(extract_metadata).collect();
+
+    // All three requests must have identical session_id and device_id
+    for (i, meta) in metas.iter().enumerate() {
+        assert_eq!(
+            meta["session_id"], session_id,
+            "turn {i}: session_id must be stable within a session"
+        );
+        assert_eq!(
+            meta["device_id"], metas[0]["device_id"],
+            "turn {i}: device_id must be stable"
+        );
+    }
     Ok(())
 }
