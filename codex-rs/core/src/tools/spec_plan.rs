@@ -9,7 +9,6 @@ use crate::tools::handlers::CodeModeWaitHandler;
 use crate::tools::handlers::DynamicToolHandler;
 use crate::tools::handlers::ExecCommandHandler;
 use crate::tools::handlers::ExecCommandHandlerOptions;
-use crate::tools::handlers::GetGoalHandler;
 use crate::tools::handlers::HashlineHandler;
 use crate::tools::handlers::ListAvailablePluginsToInstallHandler;
 use crate::tools::handlers::ListMcpResourceTemplatesHandler;

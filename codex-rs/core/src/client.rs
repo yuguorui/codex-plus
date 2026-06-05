@@ -1431,7 +1431,11 @@ impl ModelClientSession {
             );
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
             let responses_options = self
-                .build_responses_options(turn_metadata_header, compression)
+                .build_responses_options(
+                    turn_metadata_header,
+                    compression,
+                    model_info.use_responses_lite,
+                )
                 .await;
 
             let request = self.client.build_responses_request(
@@ -1550,7 +1554,11 @@ impl ModelClientSession {
             );
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
             let responses_options = self
-                .build_responses_options(turn_metadata_header, compression)
+                .build_responses_options(
+                    turn_metadata_header,
+                    compression,
+                    model_info.use_responses_lite,
+                )
                 .await;
 
             let request = self.client.build_responses_request(
