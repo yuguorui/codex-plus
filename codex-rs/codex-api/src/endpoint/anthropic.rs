@@ -35,6 +35,30 @@ use tracing::instrument;
 const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 32768;
 
+/// Process-global device identifier: 32 random bytes encoded as 64 hex chars.
+/// Generated once per process lifetime, mirroring Claude Code's `crypto.randomBytes(32).toString("hex")`.
+fn process_device_id() -> &'static str {
+    static DEVICE_ID: OnceLock<String> = OnceLock::new();
+    DEVICE_ID.get_or_init(|| {
+        let mut bytes = [0u8; 32];
+        use rand::RngCore;
+        rand::rng().fill_bytes(&mut bytes);
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    })
+}
+
+/// Metadata attached to every Anthropic Messages request for prompt-cache routing.
+///
+/// - `device_id`: random 64-hex string, stable for the process lifetime.
+/// - `account_uuid`: always empty (no OAuth account context).
+/// - `session_id`: UUID v4, regenerated each session.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+struct AnthropicMetadata {
+    device_id: String,
+    account_uuid: String,
+    session_id: String,
+}
+
 pub struct AnthropicClient<T: HttpTransport> {
     session: EndpointSession<T>,
     sse_telemetry: Option<Arc<dyn SseTelemetry>>,
@@ -79,6 +103,8 @@ struct AnthropicMessagesRequest {
     tool_choice: Option<AnthropicToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<AnthropicThinking>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<AnthropicMetadata>,
 }
 
 #[derive(Debug, Serialize)]
@@ -273,7 +299,8 @@ impl<T: HttpTransport> AnthropicClient<T> {
             turn_state,
         } = options;
 
-        let mut request_body = anthropic_body_from_responses_request(request)?;
+        let mut request_body =
+            anthropic_body_from_responses_request(request, session_id.as_deref())?;
         merge_extra_body(&mut request_body.body, &self.session.provider().extra_body)?;
         merge_extra_body(&mut request_body.body, &request_body.extra_body)?;
 
@@ -389,12 +416,18 @@ fn merge_extra_body(
 
 fn anthropic_body_from_responses_request(
     request: ResponsesApiRequest,
+    session_id: Option<&str>,
 ) -> Result<AnthropicRequestBody, ApiError> {
     let mut tool_names = AnthropicToolNameMap::new();
     let tools = anthropic_tools_from_responses_tools(request.tools, &mut tool_names)?;
     let has_tools = !tools.is_empty();
     let (system, messages) = anthropic_messages_from_items(&request.instructions, request.input)?;
     let extra_body = request.extra_body;
+    let metadata = session_id.map(|sid| AnthropicMetadata {
+        device_id: process_device_id().to_string(),
+        account_uuid: String::new(),
+        session_id: sid.to_string(),
+    });
     let mut request = AnthropicMessagesRequest {
         model: request.model,
         max_tokens: DEFAULT_MAX_TOKENS,
@@ -406,6 +439,7 @@ fn anthropic_body_from_responses_request(
             .then(|| anthropic_tool_choice(&request.tool_choice))
             .flatten(),
         thinking: anthropic_thinking_from_reasoning(request.reasoning.as_ref()),
+        metadata,
     };
     apply_cache_breakpoints(&mut request);
     let body = serde_json::to_value(request)
@@ -909,7 +943,7 @@ mod tests {
     }
 
     fn body_from(request: ResponsesApiRequest) -> Value {
-        anthropic_body_from_responses_request(request)
+        anthropic_body_from_responses_request(request, None)
             .expect("Anthropic body should convert")
             .body
     }
@@ -1042,7 +1076,7 @@ mod tests {
                     }]
                 }),
             ],
-        ))
+        ), None)
         .expect("Anthropic body should convert");
 
         assert_eq!(
@@ -1080,7 +1114,7 @@ mod tests {
                 "description": "patch",
                 "format": {"type": "grammar", "syntax": "lark", "definition": "start: /x/"}
             })],
-        ))
+        ), None)
         .expect("Anthropic body should convert");
 
         assert_eq!(
