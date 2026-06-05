@@ -854,6 +854,7 @@ mod tests {
                 "traceparent".to_string(),
                 "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01".to_string(),
             )])),
+            extra_body: HashMap::new(),
         });
 
         let previous_payload = serde_json::to_value(&request).expect("serialize previous payload");
