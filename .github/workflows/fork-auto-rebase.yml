@@ -13,6 +13,7 @@ concurrency:
 permissions:
   actions: write
   contents: write
+  workflows: write
 
 jobs:
   rebase:
@@ -21,6 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          token: ${{ secrets.CODEX_PAT }}
           ref: main
           fetch-depth: 0
           persist-credentials: true
@@ -59,7 +61,7 @@ jobs:
       - name: Download Codex++ fork binary
         if: steps.rebase.outcome == 'failure'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.CODEX_PAT }}
         shell: bash
         run: |
           set -euo pipefail
@@ -150,7 +152,7 @@ jobs:
       - name: Trigger fork release
         if: steps.push.outputs.pushed == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.CODEX_PAT }}
         shell: bash
         run: |
           set -euo pipefail
