@@ -21,6 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          token: ${{ secrets.CODEX_PAT }}
           ref: main
           fetch-depth: 0
           persist-credentials: true
@@ -52,7 +53,7 @@ jobs:
       - name: Download Codex++ fork binary
         if: steps.check.outputs.has_changes == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.CODEX_PAT }}
         shell: bash
         run: |
           set -euo pipefail
@@ -119,7 +120,7 @@ jobs:
         with:
           target: x86_64-unknown-linux-gnu
 
-      - name: Rebase and validate with Codex++ (DeepSeek Anthropic)
+      - name: Rebase with Codex++ (DeepSeek Anthropic)
         if: steps.check.outputs.has_changes == 'true'
         env:
           DEEPSEEK_ANTHROPIC_API_KEY: ${{ secrets.DEEPSEEK_ANTHROPIC_API_KEY }}
@@ -141,8 +142,9 @@ jobs:
             "This is Codex++ (a fork of openai/codex) running with the DeepSeek V4 Pro
           model via Anthropic Messages API.
 
-          Rebase this fork on upstream/main, run the compile check yourself,
-          and fix any compile errors before the workflow pushes the result.
+          Rebase this fork on upstream/main. The workflow runs formatting and
+          compilation validation after you finish, so do not run formatters,
+          Cargo commands, or other validation commands yourself.
 
           Complete the rebase safely:
           - Inspect \`git status --short --branch\` and the fork-local commits
@@ -153,19 +155,7 @@ jobs:
           - Resolve conflicts by editing files directly, stage resolved files
             with \`git add\`, and continue with
             \`GIT_EDITOR=true git rebase --continue\`. Repeat until complete.
-          - Run \`cd codex-rs && just fmt\`.
-          - Run \`cd codex-rs && cargo check --bin codex --bin codex-responses-api-proxy\`.
-          - Treat compiler, formatter, API, type, schema, or behavior failures
-            as upstream rebase drift. Fix them before finishing.
-          - If validation or formatting modifies files after the rebase
-            completes, inspect the diff and keep the fork commit history clean.
-            If a change belongs to the commit currently being replayed, stage
-            the intended changes and use \`git commit --amend --no-edit\`. If it
-            belongs to a different existing fork commit, identify that target
-            commit with \`git log\` or \`git blame\`, stage only those changes,
-            run \`git commit --fixup=<commit>\`, then fold it in with
-            \`GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash upstream/main\`.
-            Do not leave standalone rebase-drift fix commits.
+          - Finish with no rebase in progress and a clean working tree.
           - Do not push.
 
           If the rebase or validation is ambiguous or cannot be repaired safely,
@@ -212,7 +202,7 @@ jobs:
       - name: Trigger fork release
         if: steps.push.outputs.pushed == 'true' || github.event_name == 'workflow_dispatch'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.CODEX_PAT }}
         shell: bash
         run: |
           set -euo pipefail
