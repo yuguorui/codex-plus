@@ -4,6 +4,7 @@ use codex_protocol::exec_output::StreamOutput;
 use codex_protocol::protocol::ExecCommandSource;
 use codex_protocol::protocol::FileChange;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use serde::Deserialize;
 use similar::TextDiff;
 use std::collections::HashMap;
@@ -223,8 +224,14 @@ impl HashlineHandler {
                     );
                     emitter.begin(event_ctx).await;
                     let fs = turn_environment.environment.get_filesystem();
+                    let path_uri = PathUri::from_abs_path(&path).map_err(|error| {
+                        FunctionCallError::RespondToModel(format!(
+                            "fuzz_view_edit failed to write `{}`: {error}",
+                            path.display()
+                        ))
+                    })?;
                     if let Err(error) = fs
-                        .write_file(&path, after.into_bytes(), Some(&sandbox))
+                        .write_file(&path_uri, after.into_bytes(), Some(&sandbox))
                         .await
                     {
                         let message = format!(
@@ -326,7 +333,13 @@ async fn read_document(
     sandbox: Option<&FileSystemSandboxContext>,
 ) -> Result<Document, FunctionCallError> {
     let fs = turn_environment.environment.get_filesystem();
-    let bytes = fs.read_file(path, sandbox).await.map_err(|error| {
+    let path_uri = PathUri::from_abs_path(path).map_err(|error| {
+        FunctionCallError::RespondToModel(format!(
+            "fuzz_view_edit failed to read `{}`: {error}",
+            path.display()
+        ))
+    })?;
+    let bytes = fs.read_file(&path_uri, sandbox).await.map_err(|error| {
         FunctionCallError::RespondToModel(format!(
             "fuzz_view_edit failed to read `{}`: {error}",
             path.display()

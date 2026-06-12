@@ -1508,6 +1508,10 @@
           "description": "Base URL for the provider's OpenAI-compatible API.",
           "type": "string"
         },
+        "env_base_url": {
+          "description": "Environment variable that stores the base URL for the provider's OpenAI-compatible API. If set, this takes precedence over base_url.",
+          "type": "string"
+        },
         "env_extra_headers": {
           "additionalProperties": {
             "type": "string"
