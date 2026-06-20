@@ -34,6 +34,7 @@ use codex_tools::ToolSpec;
 const DEFAULT_CONTEXT_LINES: usize = 2;
 const FUZZY_RELOCATE_RADIUS: usize = 3;
 const MAX_READ_LINES: usize = 500;
+const MAX_FORMATTED_LINE_CHARS: usize = 4000;
 
 pub(crate) struct HashlineHandler {
     options: HashlineToolOptions,
@@ -76,7 +77,6 @@ struct HashlineArgs {
 #[serde(rename_all = "snake_case")]
 enum HashlineAction {
     Read,
-    Verify,
     Edit,
     Insert,
     Delete,
@@ -99,9 +99,13 @@ enum Anchor {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ResolvedAnchor {
     index: usize,
-    requested_line: Option<usize>,
     hash: u8,
-    relocated: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResolveMode {
+    Strict,
+    Fuzzy,
 }
 
 impl ToolExecutor<ToolInvocation> for HashlineHandler {
@@ -152,23 +156,14 @@ impl HashlineHandler {
         );
 
         let output = match args.action {
-            HashlineAction::Read | HashlineAction::Verify => {
+            HashlineAction::Read => {
                 let emitter = hashline_read_emitter(args.action, &path, cwd);
                 let event_ctx = ToolEventCtx::new(session.as_ref(), turn.as_ref(), &call_id, None);
                 emitter.begin(event_ctx).await;
                 let result = match read_document(turn_environment, &path, Some(&sandbox)).await {
-                    Ok(doc) => match args.action {
-                        HashlineAction::Read => {
-                            read_output(&doc, args.anchor.as_deref(), context_lines(args.context))
-                        }
-                        HashlineAction::Verify => match require_anchor(&args) {
-                            Ok(anchor) => verify_output(&doc, anchor),
-                            Err(error) => Err(error),
-                        },
-                        HashlineAction::Edit | HashlineAction::Insert | HashlineAction::Delete => {
-                            unreachable!("mutation actions are handled separately")
-                        }
-                    },
+                    Ok(doc) => {
+                        read_output(&doc, args.anchor.as_deref(), context_lines(args.context))
+                    }
                     Err(error) => Err(error),
                 };
                 match result {
@@ -299,7 +294,6 @@ fn hashline_output(exit_code: i32, stdout: String, stderr: String) -> ExecToolCa
         timed_out: false,
     }
 }
-
 fn hashline_read_emitter(action: HashlineAction, path: &PathUri, cwd: &PathUri) -> ToolEmitter {
     let action_name_str = action_name(action);
     let path_display = path_display(path);
@@ -404,7 +398,6 @@ fn context_lines(context: Option<usize>) -> usize {
 fn action_name(action: HashlineAction) -> &'static str {
     match action {
         HashlineAction::Read => "read",
-        HashlineAction::Verify => "verify",
         HashlineAction::Edit => "edit",
         HashlineAction::Insert => "insert",
         HashlineAction::Delete => "delete",
@@ -459,6 +452,7 @@ fn read_output(
     anchor: Option<&str>,
     context: usize,
 ) -> Result<String, FunctionCallError> {
+    let mut notes = Vec::new();
     let (start, end) = if let Some(anchor) = anchor {
         if let Some((left, right)) = anchor.split_once("..") {
             if right.contains("..") {
@@ -467,21 +461,45 @@ fn read_output(
             let start_index = if left.is_empty() {
                 0
             } else {
-                resolve_anchor(doc, parse_anchor(left, /*allow_bare_line*/ true)?)?.index
+                read_anchor_index(doc, left)?
             };
             let end_index = if right.is_empty() {
                 (start_index + MAX_READ_LINES).min(doc.lines.len())
             } else {
-                resolve_anchor(doc, parse_anchor(right, /*allow_bare_line*/ true)?)?.index + 1
+                read_anchor_index(doc, right)?.saturating_add(1)
             };
+            let requested_end_line = read_requested_end_line(right, end_index);
+            if start_index >= doc.lines.len() {
+                return Ok(format!(
+                    "(no lines: requested range starts past end of file; file has {} lines)",
+                    doc.lines.len()
+                ));
+            }
+            let clamped_end_index = end_index.min(doc.lines.len());
             if start_index > end_index {
                 return Err(FunctionCallError::RespondToModel(format!(
                     "fuzz_view_edit range `{anchor}` resolves backwards"
                 )));
             }
-            (start_index, end_index)
+            if end_index > clamped_end_index {
+                notes.push(format!(
+                    "(showing through end of file; requested range extends past line {} but file has {} lines)",
+                    requested_end_line,
+                    doc.lines.len()
+                ));
+            }
+            (start_index, clamped_end_index)
         } else {
-            let resolved = resolve_anchor(doc, parse_anchor(anchor, /*allow_bare_line*/ true)?)?;
+            let parsed = parse_anchor(anchor, /*allow_bare_line*/ true)?;
+            if let Anchor::Line(line) = parsed
+                && line > doc.lines.len()
+            {
+                return Ok(format!(
+                    "(no lines: requested line {line} is past end of file; file has {} lines)",
+                    doc.lines.len()
+                ));
+            }
+            let resolved = resolve_anchor(doc, parsed, ResolveMode::Fuzzy)?;
             context_window(doc.lines.len(), resolved.index, resolved.index, context)
         }
     } else {
@@ -495,23 +513,29 @@ fn read_output(
             doc.lines.len()
         ));
     }
+    for note in notes {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&note);
+    }
     Ok(output)
 }
 
-fn verify_output(doc: &Document, anchor: &str) -> Result<String, FunctionCallError> {
-    let resolved = resolve_anchor(doc, parse_anchor(anchor, /*allow_bare_line*/ false)?)?;
-    let mut output = format!(
-        "Verified {}:{}",
-        resolved.index + 1,
-        format_short_hash(resolved.hash)
-    );
-    if resolved.relocated
-        && let Some(requested_line) = resolved.requested_line
-    {
-        output.push_str(&format!(" (relocated from line {requested_line})"));
+fn read_anchor_index(doc: &Document, anchor: &str) -> Result<usize, FunctionCallError> {
+    match parse_anchor(anchor, /*allow_bare_line*/ true)? {
+        Anchor::Line(line) => Ok((line - 1).min(doc.lines.len())),
+        anchor => Ok(resolve_anchor(doc, anchor, ResolveMode::Fuzzy)?.index),
     }
-    output.push('.');
-    Ok(output)
+}
+
+fn read_requested_end_line(right_anchor: &str, end_index: usize) -> usize {
+    right_anchor
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|line| *line > 0)
+        .unwrap_or(end_index)
 }
 
 fn apply_mutation(
@@ -536,7 +560,11 @@ fn apply_mutation(
                     "fuzz_view_edit action `insert` requires `content`".to_string(),
                 )
             })?;
-            let resolved = resolve_anchor(doc, parse_anchor(anchor, /*allow_bare_line*/ false)?)?;
+            let resolved = resolve_anchor(
+                doc,
+                parse_anchor(anchor, /*allow_bare_line*/ false)?,
+                ResolveMode::Strict,
+            )?;
             let inserted = split_content(content);
             let insert_at = if args.before {
                 resolved.index
@@ -555,7 +583,7 @@ fn apply_mutation(
             let snippet_index = start.min(doc.lines.len().saturating_sub(1));
             Ok((snippet_index, snippet_index, "Deleted".to_string()))
         }
-        HashlineAction::Read | HashlineAction::Verify => Err(FunctionCallError::RespondToModel(
+        HashlineAction::Read => Err(FunctionCallError::RespondToModel(
             "internal fuzz_view_edit mutation dispatch error".to_string(),
         )),
     }
@@ -605,8 +633,16 @@ fn resolve_anchor_or_range(
         if right.contains("..") {
             return Err(invalid_anchor(anchor_or_range));
         }
-        let start = resolve_anchor(doc, parse_anchor(left, /*allow_bare_line*/ false)?)?;
-        let end = resolve_anchor(doc, parse_anchor(right, /*allow_bare_line*/ false)?)?;
+        let start = resolve_anchor(
+            doc,
+            parse_anchor(left, /*allow_bare_line*/ false)?,
+            ResolveMode::Strict,
+        )?;
+        let end = resolve_anchor(
+            doc,
+            parse_anchor(right, /*allow_bare_line*/ false)?,
+            ResolveMode::Strict,
+        )?;
         if start.index > end.index {
             return Err(FunctionCallError::RespondToModel(format!(
                 "fuzz_view_edit range `{anchor_or_range}` resolves backwards"
@@ -617,6 +653,7 @@ fn resolve_anchor_or_range(
     let resolved = resolve_anchor(
         doc,
         parse_anchor(anchor_or_range, /*allow_bare_line*/ false)?,
+        ResolveMode::Strict,
     )?;
     Ok((resolved.index, resolved.index))
 }
@@ -637,10 +674,8 @@ fn parse_anchor(anchor: &str, allow_bare_line: bool) -> Result<Anchor, FunctionC
             hash: parse_hash(hash, anchor)?,
         });
     }
-    if allow_bare_line {
-        if let Some(line) = anchor.parse::<usize>().ok().filter(|line| *line > 0) {
-            return Ok(Anchor::Line(line));
-        }
+    if allow_bare_line && let Some(line) = anchor.parse::<usize>().ok().filter(|line| *line > 0) {
+        return Ok(Anchor::Line(line));
     }
     Ok(Anchor::Hash(parse_hash(anchor, anchor)?))
 }
@@ -658,7 +693,11 @@ fn invalid_anchor(anchor: &str) -> FunctionCallError {
     ))
 }
 
-fn resolve_anchor(doc: &Document, anchor: Anchor) -> Result<ResolvedAnchor, FunctionCallError> {
+fn resolve_anchor(
+    doc: &Document,
+    anchor: Anchor,
+    mode: ResolveMode,
+) -> Result<ResolvedAnchor, FunctionCallError> {
     let index = doc.hash_index();
     match anchor {
         Anchor::Hash(hash) => match index[hash as usize].as_slice() {
@@ -666,12 +705,7 @@ fn resolve_anchor(doc: &Document, anchor: Anchor) -> Result<ResolvedAnchor, Func
                 "fuzz_view_edit hash `{}` was not found",
                 format_short_hash(hash)
             ))),
-            [line] => Ok(ResolvedAnchor {
-                index: *line,
-                requested_line: None,
-                hash,
-                relocated: false,
-            }),
+            [line] => Ok(ResolvedAnchor { index: *line, hash }),
             matches => Err(FunctionCallError::RespondToModel(format!(
                 "fuzz_view_edit hash `{}` is ambiguous; it appears on lines {}",
                 format_short_hash(hash),
@@ -687,19 +721,15 @@ fn resolve_anchor(doc: &Document, anchor: Anchor) -> Result<ResolvedAnchor, Func
             {
                 return Ok(ResolvedAnchor {
                     index: requested_index,
-                    requested_line: Some(line),
                     hash,
-                    relocated: false,
                 });
+            }
+            if mode == ResolveMode::Strict {
+                return Err(stale_anchor(doc, line, hash));
             }
 
             match relocate_anchor(requested_index, &index[hash as usize]) {
-                Some(index) => Ok(ResolvedAnchor {
-                    index,
-                    requested_line: Some(line),
-                    hash,
-                    relocated: true,
-                }),
+                Some(index) => Ok(ResolvedAnchor { index, hash }),
                 None => Err(stale_anchor(doc, line, hash)),
             }
         }
@@ -713,9 +743,7 @@ fn resolve_anchor(doc: &Document, anchor: Anchor) -> Result<ResolvedAnchor, Func
             }
             Ok(ResolvedAnchor {
                 index,
-                requested_line: Some(line),
                 hash: doc.hash_at(index),
-                relocated: false,
             })
         }
     }
@@ -777,10 +805,23 @@ fn format_lines(doc: &Document, start: usize, end: usize, marker_index: Option<u
             "{}:{}|{}\n",
             index + 1,
             format_short_hash(doc.hash_at(index)),
-            doc.lines[index]
+            format_line_content(&doc.lines[index])
         ));
     }
     output
+}
+
+fn format_line_content(line: &str) -> String {
+    let mut chars = line.chars();
+    let truncated: String = chars.by_ref().take(MAX_FORMATTED_LINE_CHARS).collect();
+    if chars.next().is_some() {
+        let total_chars = MAX_FORMATTED_LINE_CHARS + 1 + chars.count();
+        format!(
+            "{truncated}... [truncated to first {MAX_FORMATTED_LINE_CHARS} of {total_chars} chars]"
+        )
+    } else {
+        truncated
+    }
 }
 
 fn join_line_numbers(indices: &[usize]) -> String {

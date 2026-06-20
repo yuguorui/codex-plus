@@ -16,7 +16,6 @@ pub(crate) fn create_hashline_tool(options: HashlineToolOptions) -> ToolSpec {
             JsonSchema::string_enum(
                 vec![
                     json!("read"),
-                    json!("verify"),
                     json!("edit"),
                     json!("insert"),
                     json!("delete"),
@@ -34,7 +33,7 @@ pub(crate) fn create_hashline_tool(options: HashlineToolOptions) -> ToolSpec {
         (
             "anchor".to_string(),
             JsonSchema::string(Some(
-                "Hashline anchor such as `LINE:HASH` (e.g. `12:ab`), bare hash (e.g. `ab`), bare line number for read (e.g. `12`), or inclusive range (`12:ab..15:ef`, `12..15`, `12..15:ef`, `12..`, `..50`). Edit/delete require hash-verified anchors; bare line numbers are only valid for read."
+                "Hashline anchor such as `LINE:HASH` (e.g. `12:ab`), bare hash (e.g. `ab`), bare line number for read (e.g. `12`), or inclusive range (`12:ab..15:ef`, `12..15`, `12..15:ef`, `12..`, `..50`). Edit/insert/delete require strict anchors: `LINE:HASH` must still match that exact line, while bare hashes are allowed only when they uniquely identify one line. Bare line numbers are only valid for read."
                     .to_string(),
             )),
         ),
@@ -71,7 +70,7 @@ pub(crate) fn create_hashline_tool(options: HashlineToolOptions) -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "fuzz_view_edit".to_string(),
-        description: "Read or edit text files using line-hash anchors (`LINE:HASH|content`). Hashes are 2-character xxHash anchors over each line with trailing whitespace ignored, so edits reject stale or ambiguous targets instead of relying on exact old text. Read supports bare line numbers and ranges (e.g. `12`, `12..15`, `12..`, `..50`) and defaults to the first 500 lines when no anchor is given.".to_string(),
+        description: "Read or edit text files using line-hash anchors (`LINE:HASH|content`). Hashes are 2-character xxHash anchors over each line with trailing whitespace ignored. Writes use strict stale checks for `LINE:HASH` anchors and reject ambiguous bare-hash targets. Read supports bare line numbers and ranges (e.g. `12`, `12..15`, `12..`, `..50`), clamps out-of-range line ranges where possible, truncates very long displayed lines, and defaults to the first 500 lines when no anchor is given.".to_string(),
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(

@@ -21,6 +21,18 @@ fn anchored(line_no: usize, content: &str) -> String {
     )
 }
 
+fn mutation_args(action: HashlineAction, anchor: String, content: Option<&str>) -> HashlineArgs {
+    HashlineArgs {
+        action,
+        path: "demo.txt".to_string(),
+        environment_id: None,
+        anchor: Some(anchor),
+        content: content.map(ToString::to_string),
+        before: false,
+        context: None,
+    }
+}
+
 #[test]
 fn hashes_match_hashline_examples() {
     assert_eq!(xxh32(b"", 0), 0x02cc_5d05);
@@ -51,24 +63,61 @@ fn render_preserves_missing_trailing_newline() {
 #[test]
 fn edit_replaces_anchor_range_with_multiline_content() {
     let mut doc = Document::parse("alpha\nbeta\ngamma\ndelta\n");
-    let args = HashlineArgs {
-        action: HashlineAction::Edit,
-        path: "demo.txt".to_string(),
-        environment_id: None,
-        anchor: Some(format!(
+    let args = mutation_args(
+        HashlineAction::Edit,
+        format!(
             "2:{}..3:{}",
             format_short_hash(short_hash("beta")),
             format_short_hash(short_hash("gamma"))
-        )),
-        content: Some("B\nC".to_string()),
-        before: false,
-        context: None,
-    };
+        ),
+        Some("B\nC"),
+    );
 
     let changed = apply_mutation(&mut doc, &args, args.content.as_deref()).unwrap();
 
     assert_eq!(changed, (1, 2, "Edited".to_string()));
     assert_eq!(doc.render(), "alpha\nB\nC\ndelta\n");
+}
+
+#[test]
+fn edit_rejects_stale_line_hash_without_relocation() {
+    let mut doc = Document::parse("new\nalpha\nbeta\ngamma\n");
+    let args = mutation_args(
+        HashlineAction::Edit,
+        format!("2:{}", format_short_hash(short_hash("beta"))),
+        Some("BETA"),
+    );
+
+    let error = apply_mutation(&mut doc, &args, args.content.as_deref()).unwrap_err();
+
+    assert_respond_to_model_contains(error, &["content changed", ">>> 2:", "|alpha"]);
+    assert_eq!(doc.render(), "new\nalpha\nbeta\ngamma\n");
+}
+
+#[test]
+fn delete_rejects_stale_line_hash_that_collides_with_another_line() {
+    let mut doc = Document::parse("alpha\nbravo\nCHARLIE_EDIT\ndelta\n");
+    let args = mutation_args(HashlineAction::Delete, "3:29".to_string(), None);
+
+    let error = apply_mutation(&mut doc, &args, args.content.as_deref()).unwrap_err();
+
+    assert_respond_to_model_contains(error, &["content changed", ">>> 3:", "|CHARLIE_EDIT"]);
+    assert_eq!(doc.render(), "alpha\nbravo\nCHARLIE_EDIT\ndelta\n");
+}
+
+#[test]
+fn edit_range_rejects_stale_endpoint() {
+    let mut doc = Document::parse("alpha\nbeta\nGAMMA\ndelta\n");
+    let args = mutation_args(
+        HashlineAction::Edit,
+        format!("2:{}..3:{}", format_short_hash(short_hash("beta")), "00"),
+        Some("B\nC"),
+    );
+
+    let error = apply_mutation(&mut doc, &args, args.content.as_deref()).unwrap_err();
+
+    assert_respond_to_model_contains(error, &["content changed", ">>> 3:", "|GAMMA"]);
+    assert_eq!(doc.render(), "alpha\nbeta\nGAMMA\ndelta\n");
 }
 
 #[test]
@@ -110,18 +159,88 @@ fn hashline_unified_diff_counts_replaced_lines() {
 }
 
 #[test]
-fn qualified_anchor_relocates_to_unique_hash_match() {
+fn fuzzy_resolution_relocates_qualified_anchor_to_unique_hash_match() {
     let doc = Document::parse("new\nalpha\nbeta\ngamma\n");
     let anchor = format!("2:{}", format_short_hash(short_hash("beta")));
 
     let resolved = resolve_anchor(
         &doc,
         parse_anchor(&anchor, /*allow_bare_line*/ false).unwrap(),
+        ResolveMode::Fuzzy,
     )
     .unwrap();
 
     assert_eq!(resolved.index, 2);
-    assert!(resolved.relocated);
+    assert_eq!(resolved.hash, short_hash("beta"));
+}
+
+#[test]
+fn strict_resolution_rejects_relocated_qualified_anchor() {
+    let doc = Document::parse("new\nalpha\nbeta\ngamma\n");
+    let anchor = format!("2:{}", format_short_hash(short_hash("beta")));
+
+    let error = resolve_anchor(
+        &doc,
+        parse_anchor(&anchor, /*allow_bare_line*/ false).unwrap(),
+        ResolveMode::Strict,
+    )
+    .unwrap_err();
+
+    assert_respond_to_model_contains(error, &["content changed", ">>> 2:", "|alpha"]);
+}
+
+#[test]
+fn read_range_clamps_line_numbers_past_end_of_file() {
+    let doc = Document::parse("alpha\nbeta\n");
+
+    let output = read_output(&doc, Some("1..20"), DEFAULT_CONTEXT_LINES).unwrap();
+
+    assert_eq!(
+        output,
+        format!(
+            "{}\n{}\n\n(showing through end of file; requested range extends past line 20 but file has 2 lines)",
+            anchored(1, "alpha"),
+            anchored(2, "beta")
+        )
+    );
+}
+
+#[test]
+fn read_range_start_past_end_returns_note() {
+    let doc = Document::parse("alpha\nbeta\n");
+
+    let output = read_output(&doc, Some("20..30"), DEFAULT_CONTEXT_LINES).unwrap();
+
+    assert_eq!(
+        output,
+        "(no lines: requested range starts past end of file; file has 2 lines)"
+    );
+}
+
+#[test]
+fn read_line_past_end_returns_note() {
+    let doc = Document::parse("alpha\nbeta\n");
+
+    let output = read_output(&doc, Some("20"), DEFAULT_CONTEXT_LINES).unwrap();
+
+    assert_eq!(
+        output,
+        "(no lines: requested line 20 is past end of file; file has 2 lines)"
+    );
+}
+
+#[test]
+fn read_output_truncates_very_long_lines() {
+    let long_line = "x".repeat(MAX_FORMATTED_LINE_CHARS + 1);
+    let doc = Document::parse(&long_line);
+
+    let output = read_output(&doc, None, DEFAULT_CONTEXT_LINES).unwrap();
+
+    assert!(output.contains(&"x".repeat(MAX_FORMATTED_LINE_CHARS)));
+    assert!(output.contains(&format!(
+        "... [truncated to first {MAX_FORMATTED_LINE_CHARS} of {} chars]",
+        MAX_FORMATTED_LINE_CHARS + 1
+    )));
 }
 
 #[tokio::test]
@@ -197,13 +316,14 @@ async fn read_emits_standard_explored_command_item() {
     let (session, turn, rx_event) = make_session_and_context_with_rx().await;
     let path =
         AbsolutePathBuf::try_from(PathBuf::from("/tmp/hashline_demo.txt")).expect("absolute path");
+    let path_uri = PathUri::from_abs_path(&path);
     let cwd = turn
         .environments
         .primary()
         .expect("primary environment")
         .cwd()
         .clone();
-    let emitter = hashline_read_emitter(HashlineAction::Read, &path, cwd);
+    let emitter = hashline_read_emitter(HashlineAction::Read, &path_uri, &cwd);
     let event_ctx = ToolEventCtx::new(session.as_ref(), turn.as_ref(), "call-hashline", None);
     emitter.begin(event_ctx).await;
     let event_ctx = ToolEventCtx::new(session.as_ref(), turn.as_ref(), "call-hashline", None);
@@ -273,6 +393,7 @@ fn bare_hash_rejects_ambiguous_matches() {
     let error = resolve_anchor(
         &doc,
         parse_anchor(&anchor, /*allow_bare_line*/ false).unwrap(),
+        ResolveMode::Strict,
     )
     .unwrap_err();
 
@@ -293,14 +414,22 @@ fn stale_anchor_reports_fresh_line_context() {
     let error = resolve_anchor(
         &doc,
         parse_anchor(&stale, /*allow_bare_line*/ false).unwrap(),
+        ResolveMode::Strict,
     )
     .unwrap_err();
 
+    assert_respond_to_model_contains(error, &["content changed", ">>> 2:", "|DELTA"]);
+}
+
+fn assert_respond_to_model_contains(error: FunctionCallError, snippets: &[&str]) {
     match error {
         FunctionCallError::RespondToModel(message) => {
-            assert!(message.contains("content changed"));
-            assert!(message.contains(">>> 2:"));
-            assert!(message.contains("|DELTA"));
+            for snippet in snippets {
+                assert!(
+                    message.contains(snippet),
+                    "expected error message to contain {snippet:?}: {message}"
+                );
+            }
         }
         FunctionCallError::Fatal(message) => panic!("unexpected fatal error: {message}"),
     }
