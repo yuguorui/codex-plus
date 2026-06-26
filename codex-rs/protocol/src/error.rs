@@ -195,9 +195,9 @@ impl CodexErr {
             | CodexErr::Spawn
             | CodexErr::SessionConfiguredNotFirstEvent
             | CodexErr::UsageLimitReached(_)
-            | CodexErr::ServerOverloaded
             | CodexErr::CyberPolicy { .. } => false,
             CodexErr::Stream(..)
+            | CodexErr::ServerOverloaded
             | CodexErr::Timeout
             | CodexErr::RequestTimeout
             | CodexErr::UnexpectedStatus(_)
