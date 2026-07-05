@@ -133,11 +133,9 @@ impl From<ResponseCompletedUsage> for TokenUsage {
         let input_tokens_details = val.input_tokens_details.unwrap_or_default();
         TokenUsage {
             input_tokens: val.input_tokens,
-            cached_input_tokens: val
-                .input_tokens_details
-                .map(|d| d.cached_tokens)
-                .unwrap_or(0),
+            cached_input_tokens: input_tokens_details.cached_tokens,
             cache_creation_input_tokens: 0,
+            cache_write_input_tokens: input_tokens_details.cache_write_tokens,
             output_tokens: val.output_tokens,
             reasoning_output_tokens: val
                 .output_tokens_details
@@ -828,6 +826,7 @@ mod tests {
             TokenUsage {
                 input_tokens: 100,
                 cached_input_tokens: 40,
+                cache_creation_input_tokens: 0,
                 cache_write_input_tokens: 60,
                 output_tokens: 10,
                 reasoning_output_tokens: 5,
