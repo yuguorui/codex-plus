@@ -130,14 +130,15 @@ struct ResponseCompletedUsage {
 
 impl From<ResponseCompletedUsage> for TokenUsage {
     fn from(val: ResponseCompletedUsage) -> Self {
-        let input_tokens_details = val.input_tokens_details.unwrap_or_default();
         TokenUsage {
             input_tokens: val.input_tokens,
             cached_input_tokens: val
                 .input_tokens_details
+                .as_ref()
                 .map(|d| d.cached_tokens)
                 .unwrap_or(0),
             cache_creation_input_tokens: 0,
+            cache_write_input_tokens: 0,
             output_tokens: val.output_tokens,
             reasoning_output_tokens: val
                 .output_tokens_details
