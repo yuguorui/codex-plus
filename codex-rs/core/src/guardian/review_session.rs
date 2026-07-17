@@ -131,6 +131,7 @@ fn token_usage_delta(start: &TokenUsage, end: &TokenUsage) -> TokenUsage {
         cache_creation_input_tokens: (end.cache_creation_input_tokens
             - start.cache_creation_input_tokens)
             .max(0),
+        cache_write_input_tokens: 0,
         output_tokens: (end.output_tokens - start.output_tokens).max(0),
         reasoning_output_tokens: (end.reasoning_output_tokens - start.reasoning_output_tokens)
             .max(0),
@@ -1640,6 +1641,7 @@ mod tests {
             input_tokens: 10,
             cached_input_tokens: 8,
             cache_creation_input_tokens: 0,
+            cache_write_input_tokens: 0,
             output_tokens: 6,
             reasoning_output_tokens: 4,
             total_tokens: 28,
@@ -1648,6 +1650,7 @@ mod tests {
             input_tokens: 15,
             cached_input_tokens: 7,
             cache_creation_input_tokens: 0,
+            cache_write_input_tokens: 0,
             output_tokens: 10,
             reasoning_output_tokens: 2,
             total_tokens: 34,
@@ -1659,6 +1662,7 @@ mod tests {
                 input_tokens: 5,
                 cached_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                cache_write_input_tokens: 0,
                 output_tokens: 4,
                 reasoning_output_tokens: 0,
                 total_tokens: 6,
