@@ -733,6 +733,7 @@ fn anthropic_content_from_items(content: Vec<ContentItem>) -> AnthropicContent {
                     cache_control: None,
                 });
             }
+            ContentItem::InputAudio { .. } => {}
         }
     }
     AnthropicContent { blocks }

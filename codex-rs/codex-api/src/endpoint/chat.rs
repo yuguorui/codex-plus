@@ -713,6 +713,7 @@ fn chat_content_from_items(content: Vec<ContentItem>) -> ChatContent {
                     },
                 });
             }
+            ContentItem::InputAudio { .. } => {}
         }
     }
 
