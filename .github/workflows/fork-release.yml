@@ -87,6 +87,7 @@ jobs:
       CARGO_PROFILE_RELEASE_LTO: "false"
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
       CARGO_BUILD_JOBS: ${{ matrix.cargo-build-jobs }}
+      CODEX_FORK_RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
       # Fetch git dependencies and their nested native-library submodules via
       # the git CLI; libgit2/SecureTransport can drop long rusty_v8 fetches.
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
