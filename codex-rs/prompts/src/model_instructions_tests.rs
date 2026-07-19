@@ -99,3 +99,61 @@ fn missing_and_empty_templates_render_empty_but_retain_presence() {
         );
     }
 }
+
+#[test]
+fn default_instructions_align_file_edit_guidance_with_apply_patch_tool_type() {
+    let base_messages = || {
+        Some(ModelMessages {
+            instructions_template: Some(BASE_INSTRUCTIONS_DEFAULT.to_string()),
+            ..Default::default()
+        })
+    };
+
+    let none_model = test_model(base_messages());
+    let rendered_none = render_model_instructions(&none_model);
+    assert_eq!(rendered_none, BASE_INSTRUCTIONS_DEFAULT);
+    assert!(rendered_none.contains(GENERIC_FILE_EDIT_GUIDANCE));
+
+    for (tool_type, expected_needle, forbidden) in [
+        (
+            ApplyPatchToolType::Freeform,
+            "Use the `apply_patch` tool to edit files",
+            ["fuzz_view_edit", "Use `Read` and `Edit`"],
+        ),
+        (
+            ApplyPatchToolType::Hashline,
+            "Use `fuzz_view_edit` for text file edits",
+            ["Use the `apply_patch` tool", "Use `Read` and `Edit`"],
+        ),
+        (
+            ApplyPatchToolType::ClaudeCode,
+            "Use `Read` and `Edit` for file inspection and edits",
+            ["fuzz_view_edit", "Use the `apply_patch` tool"],
+        ),
+    ] {
+        let mut model = test_model(base_messages());
+        model.apply_patch_tool_type = Some(tool_type);
+        let rendered = render_model_instructions(&model);
+        assert!(
+            rendered.contains(expected_needle),
+            "expected `{expected_needle}` for {tool_type:?}"
+        );
+        for unexpected in forbidden {
+            assert!(
+                !rendered.contains(unexpected),
+                "did not expect `{unexpected}` for {tool_type:?}"
+            );
+        }
+    }
+
+    // Custom catalog prompts are preserved verbatim regardless of apply_patch_tool_type.
+    let mut custom = test_model(Some(ModelMessages {
+        instructions_template: Some("Custom model instructions.".to_string()),
+        ..Default::default()
+    }));
+    custom.apply_patch_tool_type = Some(ApplyPatchToolType::ClaudeCode);
+    assert_eq!(
+        render_model_instructions(&custom),
+        "Custom model instructions."
+    );
+}
