@@ -78,7 +78,7 @@ impl AccountRequestProcessor {
             )
         {
             return Err(invalid_request(
-                "Codex-managed Bedrock credentials are already configured and take priority over AWS environment credentials. Run `codex logout` and try again.",
+                "Codex-managed Bedrock credentials are already configured and take priority over AWS environment credentials. Run `codex++ logout` and try again.",
             ));
         }
 
