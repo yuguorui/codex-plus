@@ -26,7 +26,7 @@ pub(super) fn background_terminals_blocker(
                             || source.message.contains("unknown method"))) =>
         {
             Some(if features.enabled(Feature::DaemonUpdates) {
-                "The local Codex service cannot check background terminals. Run `codex app-server daemon update`, then restart Codex."
+                "The local Codex service cannot check background terminals. Run `codex++ app-server daemon update`, then restart Codex."
             } else {
                 "The local Codex service cannot check background terminals. Contact your administrator to update it."
             })
