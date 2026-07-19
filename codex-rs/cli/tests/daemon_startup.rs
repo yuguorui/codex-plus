@@ -133,7 +133,7 @@ async fn daemon_startup(command: &str) -> Result<()> {
         // A selected package with a stopped daemon avoids installing a release.
         let managed = home
             .path()
-            .join("packages/app-server-daemon/current/bin/codex");
+            .join("packages/app-server-daemon/current/bin/codex++");
         fs::create_dir_all(home.path().join("packages/app-server-daemon/current/bin"))?;
         // Hard links change the executable's ctime and invalidate Rosetta's translation cache.
         #[cfg(unix)]

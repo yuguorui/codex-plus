@@ -148,7 +148,7 @@ pub async fn read_connector_metadata(
     );
     anyhow::ensure!(
         auth.get_account_id().is_some(),
-        "ChatGPT account ID not available, please re-run codex login"
+        "ChatGPT account ID not available, please re-run codex++ login"
     );
 
     let store = ConnectorMetadataStore::new(
