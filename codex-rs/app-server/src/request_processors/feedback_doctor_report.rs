@@ -2,7 +2,7 @@
 //!
 //! Feedback upload should never depend on doctor succeeding. This module runs
 //! the configured Codex executable as a subprocess, accepts only valid JSON from
-//! `codex doctor --json --feedback`, derives a small set of Sentry tags, and otherwise
+//! `codex++ doctor --json --feedback`, derives a small set of Sentry tags, and otherwise
 //! skips the attachment with a warning. Keeping the report generation out of the
 //! app-server process avoids sharing doctor internals across crates while still
 //! using the CLI's JSON report format with bounded database scans.
@@ -33,7 +33,7 @@ pub(crate) struct DoctorFeedbackReport {
     pub(crate) tags: BTreeMap<String, String>,
 }
 
-/// Runs `codex --cd <workspace> doctor --json --feedback` and returns a best-effort
+/// Runs `codex++ --cd <workspace> doctor --json --feedback` and returns a best-effort
 /// feedback attachment.
 ///
 /// Failure to spawn Codex, finish before the timeout, or parse JSON means the
