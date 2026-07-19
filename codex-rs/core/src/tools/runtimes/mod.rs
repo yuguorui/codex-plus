@@ -37,6 +37,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 pub(crate) mod apply_patch;
+pub(crate) mod file_edit;
 pub(crate) mod unified_exec;
 
 const SNAPSHOT_ORIGINAL_BASH_ENV_ENV_KEY: &str = "CODEX_NETWORK_PROXY_SNAPSHOT_ORIGINAL_BASH_ENV";

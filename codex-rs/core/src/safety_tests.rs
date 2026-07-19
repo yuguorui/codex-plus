@@ -521,3 +521,60 @@ fn missing_project_dot_codex_config_requires_approval() {
         SafetyCheck::AskUser,
     );
 }
+
+#[test]
+fn file_write_safety_matches_patch_policy() {
+    let cwd = PathUri::parse("file:///C:/workspace").expect("Windows cwd");
+    let context = local_context(&cwd);
+    let permission_profile = PermissionProfile::workspace_write();
+    let policy = permission_profile.file_system_sandbox_policy();
+    let inside = PathUri::parse("file:///C:/workspace/in.txt").expect("inside");
+    let outside = PathUri::parse("file:///C:/outside.txt").expect("outside");
+    let matching = PatchSandboxRoute::ExecutorManaged
+        .prepare_matching(&policy, &context)
+        .expect("prepare patch matching");
+
+    assert_eq!(
+        assess_file_write_safety(
+            &inside,
+            AskForApproval::OnRequest,
+            &permission_profile,
+            &matching,
+        )
+        .expect("assess inside write"),
+        SafetyCheck::AutoApprove,
+    );
+    assert_eq!(
+        assess_file_write_safety(
+            &outside,
+            AskForApproval::OnRequest,
+            &permission_profile,
+            &matching,
+        )
+        .expect("assess outside write"),
+        SafetyCheck::AskUser,
+    );
+    assert_eq!(
+        assess_file_write_safety(
+            &outside,
+            AskForApproval::Never,
+            &permission_profile,
+            &matching
+        )
+        .expect("assess never write"),
+        SafetyCheck::Reject {
+            reason: "writing outside of the project; rejected by user approval settings"
+                .to_string(),
+        },
+    );
+    assert_eq!(
+        assess_file_write_safety(
+            &inside,
+            AskForApproval::UnlessTrusted,
+            &permission_profile,
+            &matching,
+        )
+        .expect("assess untrusted write"),
+        SafetyCheck::AskUser,
+    );
+}
