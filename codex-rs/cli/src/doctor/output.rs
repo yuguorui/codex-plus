@@ -464,7 +464,7 @@ fn write_footer(out: &mut String, options: HumanOutputOptions) {
             out,
             "{}",
             dim(
-                "Run codex doctor without --summary for detailed diagnostics.",
+                "Run codex++ doctor without --summary for detailed diagnostics.",
                 options
             )
         );
@@ -1308,7 +1308,7 @@ mod tests {
                 "token expired",
             )
             .detail("OPENAI_API_KEY: present")
-            .remediation("Run `codex login`."),
+            .remediation("Run `codex++ login`."),
             DoctorCheck::new(
                 "updates.status",
                 "updates",
@@ -1358,7 +1358,7 @@ Codex Doctor v0.0.0
 
 Notes
    ⚠ terminal     narrow terminal
-   ✗ auth         token expired - Run `codex login`.
+   ✗ auth         token expired - Run `codex++ login`.
 ─────────────────────────────────────────────────────────────
 
 Environment
@@ -1387,7 +1387,7 @@ Environment
   ✓ state        state paths inspectable
 
 Configuration
-  ✗ auth         token expired — Run `codex login`.
+  ✗ auth         token expired — Run `codex++ login`.
       OPENAI_API_KEY           present
 
 Updates
@@ -1493,7 +1493,7 @@ Codex Doctor v0.0.0
 
 Notes
    ⚠ terminal     narrow terminal
-   ✗ auth         token expired - Run `codex login`.
+   ✗ auth         token expired - Run `codex++ login`.
 ─────────────────────────────────────────────────────────────
 
 Environment
@@ -1507,7 +1507,7 @@ Environment
   ✓ state        state paths inspectable
 
 Configuration
-  ✗ auth         token expired — Run `codex login`.
+  ✗ auth         token expired — Run `codex++ login`.
 
 Updates
   ✓ updates      update configuration is locally consistent
@@ -1523,7 +1523,7 @@ Background Server
 {}
 12 ok · 2 notes · 1 warn · 1 fail failed
 
-Run codex doctor without --summary for detailed diagnostics.
+Run codex++ doctor without --summary for detailed diagnostics.
 --all expand truncated lists       --json redacted report
 ",
             "─".repeat(SEPARATOR_WIDTH)
@@ -1601,7 +1601,7 @@ Codex Doctor v0.0.0
 
 Notes
    [!!] terminal     narrow terminal
-   [XX] auth         token expired - Run `codex login`.
+   [XX] auth         token expired - Run `codex++ login`.
 -------------------------------------------------------------
 
 Environment
@@ -1615,7 +1615,7 @@ Environment
   [ok] state        state paths inspectable
 
 Configuration
-  [XX] auth         token expired - Run `codex login`.
+  [XX] auth         token expired - Run `codex++ login`.
 
 Updates
   [ok] updates      update configuration is locally consistent
@@ -1631,7 +1631,7 @@ Background Server
 {}
 12 ok | 2 notes | 1 warn | 1 fail failed
 
-Run codex doctor without --summary for detailed diagnostics.
+Run codex++ doctor without --summary for detailed diagnostics.
 --all expand truncated lists       --json redacted report
 ",
             "-".repeat(SEPARATOR_WIDTH)
@@ -1971,8 +1971,7 @@ Run codex doctor without --summary for detailed diagnostics.
 
     #[test]
     fn copyable_items_use_check_status() {
-        let description =
-            "/tmp/logs_2.sqlite, ~/goals_1.sqlite integrity check; try --summary or `codex doctor`";
+        let description = "/tmp/logs_2.sqlite, ~/goals_1.sqlite integrity check; try --summary or `codex++ doctor`";
         let details = r"see ./logs, ../goals. C:\logs, D:/goals. c:\logs, \\server\share\logs, \\?\C:\logs, \\?\UNC\server\share\logs, \\.\pipe\codex, \??\C:\logs, \DosDevices\C:\logs, \rooted. http://localhost:8080: https://example.com; wss://example.com) and `/tmp/my data/logs_2.sqlite`";
         let mut rendered = String::new();
 
