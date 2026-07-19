@@ -31,7 +31,7 @@ pub async fn run_session_queue_command(
 ) -> Result<String> {
     if options.cli.no_daemon && options.explicit_remote_endpoint.is_none() {
         return Err(eyre!(
-            "--no-daemon cannot be used with codex queue. Queuing must discover the shared server to avoid writing through a separate server."
+            "--no-daemon cannot be used with codex++ queue. Queuing must discover the shared server to avoid writing through a separate server."
         ));
     }
     let codex_home = find_codex_home().wrap_err("failed to find Codex home")?;
