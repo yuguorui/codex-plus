@@ -76,6 +76,41 @@ pub fn assess_patch_safety(
         });
     }
 
+    let constrained = is_write_patch_constrained_to_writable_paths(action, matching)?;
+    Ok(assess_constrained_write_safety(
+        constrained,
+        policy,
+        permission_profile,
+        matching,
+    ))
+}
+
+/// Assesses a single exact-byte file write (e.g. the Claude-compatible Edit tool)
+/// with the same policy rules used for apply_patch.
+pub(crate) fn assess_file_write_safety(
+    path: &PathUri,
+    policy: AskForApproval,
+    permission_profile: &PermissionProfile,
+    matching: &PatchPolicyMatcher<'_>,
+) -> io::Result<SafetyCheck> {
+    let constrained = matching
+        .configured_policy
+        .has_full_disk_write_access_with_context(&matching.context)
+        || matching.can_write_path(path)?;
+    Ok(assess_constrained_write_safety(
+        constrained,
+        policy,
+        permission_profile,
+        matching,
+    ))
+}
+
+fn assess_constrained_write_safety(
+    constrained_to_writable_paths: bool,
+    policy: AskForApproval,
+    permission_profile: &PermissionProfile,
+    matching: &PatchPolicyMatcher<'_>,
+) -> SafetyCheck {
     match policy {
         AskForApproval::Never | AskForApproval::OnRequest | AskForApproval::Granular(_) => {
             // Continue to see if this can be auto-approved.
@@ -83,7 +118,7 @@ pub fn assess_patch_safety(
         // TODO(ragona): I'm not sure this is actually correct? I believe in this case
         // we want to continue to the writable paths check before asking the user.
         AskForApproval::UnlessTrusted => {
-            return Ok(SafetyCheck::AskUser);
+            return SafetyCheck::AskUser;
         }
     }
 
@@ -99,28 +134,28 @@ pub fn assess_patch_safety(
         }
     };
 
-    // Even though the patch appears to be constrained to writable paths, it is
-    // possible that paths in the patch are hard links to files outside the
-    // writable roots, so we should still run `apply_patch` in a sandbox in that case.
+    // Even though the write appears constrained to writable paths, it is
+    // possible that the target is a hard link to a file outside the
+    // writable roots, so we should still run it in a sandbox in that case.
     // Disabled and External profiles intentionally do not apply an outer sandbox.
-    if is_write_patch_constrained_to_writable_paths(action, matching)?
+    if constrained_to_writable_paths
         && (matches!(
             permission_profile,
             PermissionProfile::Disabled | PermissionProfile::External { .. }
         ) || sandbox_available)
     {
-        Ok(SafetyCheck::AutoApprove)
+        SafetyCheck::AutoApprove
     } else if rejects_sandbox_approval {
-        Ok(SafetyCheck::Reject {
+        SafetyCheck::Reject {
             reason: patch_rejection_reason(
                 permission_profile,
                 matching.configured_policy,
                 &matching.context,
             )
             .to_string(),
-        })
+        }
     } else {
-        Ok(SafetyCheck::AskUser)
+        SafetyCheck::AskUser
     }
 }
 
