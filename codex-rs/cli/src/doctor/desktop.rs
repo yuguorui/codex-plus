@@ -302,7 +302,7 @@ fn stopped_desktop_check() -> DoctorCheck {
 
 fn unavailable(id: &'static str, summary: &'static str) -> DoctorCheck {
     platform::desktop_check(id, CheckStatus::Warning, summary)
-        .remediation("restore desktop diagnostic access and rerun codex doctor")
+        .remediation("restore desktop diagnostic access and rerun codex++ doctor")
 }
 
 fn redacted_path(path: &Path) -> String {

@@ -1,7 +1,15 @@
 ---
 source: tui/tests/suite/focus_palette.rs
-assertion_line: 484
 expression: failure.trim()
 ---
-Error: daemon executable not found at [CODEX_HOME]/packages/app-server-daemon/current/bin/codex; repair the existing installation, or run `codex app-server daemon start` to install a missing daemon
+Error: managed standalone Codex++ install not found at [CODEX_HOME]/packages/app-server-daemon/current/bin/codex++
+
+This command requires the standalone install managed by the Codex++ installer, because the daemon starts and updates app-server from that fixed path.
+
+Repair the existing installation, or run `codex++ app-server daemon start` to install a missing daemon.
+
+Install it with:
+  curl -fsSL https://github.com/yuguorui/codex/releases/latest/download/install-fork.sh | sh
+
+Then rerun the command you just tried.
 To work without the background server, rerun the same command with --no-daemon (including resume or fork and its arguments).
