@@ -275,7 +275,7 @@ async fn feedback_upload_recovers_persisted_evidence_and_reports_sqlite_failures
                 serde_json::from_value(notification.params.unwrap())?;
             assert_eq!(warning, codex_app_server_protocol::WarningNotification {
                 thread_id: None,
-                message: "Codex couldn't save diagnostic logs to its local database. Use /feedback with logs included before closing Codex, or run `codex doctor` for diagnostics.".to_string(),
+                message: "Codex couldn't save diagnostic logs to its local database. Use /feedback with logs included before closing Codex, or run `codex++ doctor` for diagnostics.".to_string(),
             });
         }
         let request = app_server
