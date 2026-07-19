@@ -53,7 +53,7 @@ impl SandboxSetupCommand {
         if self.elevated_sandbox_level {
             Ok(SandboxSetupLevel::Elevated)
         } else {
-            anyhow::bail!("`codex sandbox setup` currently requires --elevated");
+            anyhow::bail!("`codex++ sandbox setup` currently requires --elevated");
         }
     }
 }
