@@ -11,8 +11,8 @@ use codex_state::LogWriteFailureReporter;
 
 use crate::outgoing_message::OutgoingMessageSender;
 
-const LOG_WRITE_WARNING_WITH_FEEDBACK: &str = "Codex couldn't save diagnostic logs to its local database. Use /feedback with logs included before closing Codex, or run `codex doctor` for diagnostics.";
-const LOG_WRITE_WARNING_WITHOUT_FEEDBACK: &str = "Codex couldn't save diagnostic logs to its local database. Run `codex doctor` for diagnostics.";
+const LOG_WRITE_WARNING_WITH_FEEDBACK: &str = "Codex couldn't save diagnostic logs to its local database. Use /feedback with logs included before closing Codex, or run `codex++ doctor` for diagnostics.";
+const LOG_WRITE_WARNING_WITHOUT_FEEDBACK: &str = "Codex couldn't save diagnostic logs to its local database. Run `codex++ doctor` for diagnostics.";
 
 pub(crate) struct LogWriteWarningReporter {
     feedback: CodexFeedback,
