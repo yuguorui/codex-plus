@@ -272,7 +272,7 @@ impl ElicitationRequestManager {
         tx_event: Option<Sender<Event>>,
         client_mcp_extensions: &ClientMcpExtensions,
     ) -> SendElicitation {
-        // Event receivers such as codex mcp-server do not necessarily handle verification.
+        // Event receivers such as codex++ mcp-server do not necessarily handle verification.
         // Only wait for a response when trusted host activation enabled this exact route.
         let user_verification_enabled = client_mcp_extensions
             .get(OPENAI_ELICITATION_EXTENSION_ID)
