@@ -18,7 +18,7 @@ Use `/init` to create an `AGENTS.md` with project-specific guidance.
 Use `/mcp` to list configured Model Context Protocol tools.
 Use `/rename <name>` to rename your thread for easy finding later.
 Use `/rename` with no arguments to get a suggested name for the current thread.
-Run `codex mcp add openaiDeveloperDocs --url https://developers.openai.com/mcp` to enable the OpenAI documentation MCP in Codex.
+Run `codex++ mcp add openaiDeveloperDocs --url https://developers.openai.com/mcp` to enable the OpenAI documentation MCP in Codex++.
 Visit the [OpenAI Developer Community](https://community.openai.com/c/codex/37) to share ideas with other Codex users.
 In a local conversation, you can run shell commands by starting your turn with `!` (e.g. `!ls`).
 Start a message with `/` to autocomplete slash commands.
