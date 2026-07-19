@@ -337,10 +337,12 @@ pub enum ConfigShellToolType {
     Disabled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, TS, JsonSchema)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApplyPatchToolType {
     Freeform,
+    Hashline,
+    ClaudeCode,
 }
 
 #[derive(
