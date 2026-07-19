@@ -108,7 +108,7 @@ pub(super) fn with_system_proxy_remediation(
         })
     {
         check.remediation = Some(
-            "A macOS system proxy is configured but unused. If your organization requires it, ask your administrator whether to enable the under-development feature with `codex features enable respect_system_proxy`."
+            "A macOS system proxy is configured but unused. If your organization requires it, ask your administrator whether to enable the under-development feature with `codex++ features enable respect_system_proxy`."
                 .to_string(),
         );
     }
