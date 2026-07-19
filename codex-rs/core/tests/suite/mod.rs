@@ -41,6 +41,7 @@ mod approvals;
 mod auto_review;
 mod catalog_permission_messages;
 mod chat_completions;
+mod claude_file_tools;
 mod cli_stream;
 mod client;
 mod client_websockets;
