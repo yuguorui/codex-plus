@@ -2093,7 +2093,7 @@ async fn sqlite_log_write_warning_is_visible_in_warnings() {
     chat.handle_server_notification(
         ServerNotification::Warning(WarningNotification {
             thread_id: None,
-            message: "Codex couldn't save diagnostic logs to its local database. Use /feedback with logs included before closing Codex, or run `codex doctor` for diagnostics.".to_string(),
+            message: "Codex couldn't save diagnostic logs to its local database. Use /feedback with logs included before closing Codex, or run `codex++ doctor` for diagnostics.".to_string(),
         }),
         /*replay_kind*/ None,
     );

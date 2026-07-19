@@ -10,7 +10,7 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(
     version,
-    override_usage = "codex exec [OPTIONS] [PROMPT]\n       codex exec [OPTIONS] <COMMAND> [ARGS]"
+    override_usage = "codex++ exec [OPTIONS] [PROMPT]\n       codex++ exec [OPTIONS] <COMMAND> [ARGS]"
 )]
 pub struct Cli {
     /// Action to perform. If omitted, runs a new non-interactive session.
@@ -182,7 +182,7 @@ pub struct ForkArgs {
 #[derive(Args, Debug)]
 struct ResumeArgsRaw {
     // Note: This is the direct clap shape. We reinterpret the positional when --last is set
-    // so "codex resume --last <prompt>" treats the positional as a prompt, not a session id.
+    // so "codex++ resume --last <prompt>" treats the positional as a prompt, not a session id.
     /// Conversation/session id (UUID) or thread name. UUIDs take precedence if it parses.
     /// If omitted, use --last to pick the most recent recorded session.
     #[arg(value_name = "SESSION_ID")]

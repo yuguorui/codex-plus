@@ -1,4 +1,4 @@
-//! Shared implementation for `codex archive`, `codex delete`, and `codex unarchive`.
+//! Shared implementation for `codex++ archive`, `codex++ delete`, and `codex++ unarchive`.
 //!
 //! The CLI commands are thin app-server clients: resolve a user-provided UUID or exact session
 //! name, then call the corresponding app-server RPC.
