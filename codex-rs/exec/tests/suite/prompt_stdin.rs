@@ -16,7 +16,7 @@ async fn exec_appends_piped_stdin_to_prompt_argument() -> anyhow::Result<()> {
     ]);
     let response_mock = responses::mount_sse_once(&server, body).await;
 
-    // echo "my output" | codex exec --skip-git-repo-check -C <cwd> -m gpt-5.1 "Summarize this concisely"
+    // echo "my output" | codex++ exec --skip-git-repo-check -C <cwd> -m gpt-5.1 "Summarize this concisely"
     test.cmd_with_server(&server)
         .arg("--skip-git-repo-check")
         .arg("-C")
@@ -50,7 +50,7 @@ async fn exec_ignores_empty_piped_stdin_when_prompt_argument_is_present() -> any
     ]);
     let response_mock = responses::mount_sse_once(&server, body).await;
 
-    // printf "" | codex exec --skip-git-repo-check -C <cwd> -m gpt-5.1 "Summarize this concisely"
+    // printf "" | codex++ exec --skip-git-repo-check -C <cwd> -m gpt-5.1 "Summarize this concisely"
     test.cmd_with_server(&server)
         .arg("--skip-git-repo-check")
         .arg("-C")
@@ -83,7 +83,7 @@ async fn exec_dash_prompt_reads_stdin_as_the_prompt() -> anyhow::Result<()> {
     ]);
     let response_mock = responses::mount_sse_once(&server, body).await;
 
-    // echo "prompt from stdin" | codex exec --skip-git-repo-check -C <cwd> -m gpt-5.1 -
+    // echo "prompt from stdin" | codex++ exec --skip-git-repo-check -C <cwd> -m gpt-5.1 -
     test.cmd_with_server(&server)
         .arg("--skip-git-repo-check")
         .arg("-C")
@@ -117,7 +117,7 @@ async fn exec_without_prompt_argument_reads_piped_stdin_as_the_prompt() -> anyho
     ]);
     let response_mock = responses::mount_sse_once(&server, body).await;
 
-    // echo "prompt from stdin" | codex exec --skip-git-repo-check -C <cwd> -m gpt-5.1
+    // echo "prompt from stdin" | codex++ exec --skip-git-repo-check -C <cwd> -m gpt-5.1
     test.cmd_with_server(&server)
         .arg("--skip-git-repo-check")
         .arg("-C")
@@ -143,7 +143,7 @@ async fn exec_without_prompt_argument_reads_piped_stdin_as_the_prompt() -> anyho
 fn exec_without_prompt_argument_rejects_empty_piped_stdin() {
     let test = test_codex_exec();
 
-    // printf "" | codex exec --skip-git-repo-check -C <cwd>
+    // printf "" | codex++ exec --skip-git-repo-check -C <cwd>
     test.cmd()
         .arg("--skip-git-repo-check")
         .arg("-C")
@@ -158,7 +158,7 @@ fn exec_without_prompt_argument_rejects_empty_piped_stdin() {
 fn exec_dash_prompt_rejects_empty_piped_stdin() {
     let test = test_codex_exec();
 
-    // printf "" | codex exec --skip-git-repo-check -C <cwd> -
+    // printf "" | codex++ exec --skip-git-repo-check -C <cwd> -
     test.cmd()
         .arg("--skip-git-repo-check")
         .arg("-C")
