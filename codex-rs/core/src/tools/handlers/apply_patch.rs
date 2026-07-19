@@ -610,7 +610,7 @@ async fn execute_prepared_patch(
     tracker: Option<&SharedTurnDiffTracker>,
     tool_ctx: ToolCtx,
 ) -> Result<String, FunctionCallError> {
-    let emitter = ToolEmitter::apply_patch_for_environment(
+    let emitter = ToolEmitter::file_change_for_environment(
         request.changes.as_ref().clone(),
         matches!(
             request.exec_approval_requirement,
