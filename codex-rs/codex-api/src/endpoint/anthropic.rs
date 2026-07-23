@@ -438,8 +438,14 @@ fn anthropic_body_from_responses_request(
     session_id: Option<&str>,
 ) -> Result<AnthropicRequestBody, ApiError> {
     let mut tool_names = AnthropicToolNameMap::new();
-    let tools =
-        anthropic_tools_from_responses_tools(request.tools.unwrap_or_default(), &mut tool_names)?;
+    let tools = anthropic_tools_from_responses_tools(
+        request
+            .tools
+            .as_ref()
+            .map(|t| serde_json::from_str(t.as_raw_value().get()).unwrap_or_default())
+            .unwrap_or_default(),
+        &mut tool_names,
+    )?;
     let has_tools = !tools.is_empty();
     let (system, messages) = anthropic_messages_from_items(&request.instructions, request.input)?;
     let extra_body = request.extra_body;
@@ -983,17 +989,21 @@ fn insert_tool_name_mapping(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ResponsesApiTools;
     use crate::common::ResponsesApiRequest;
     use codex_protocol::models::FunctionCallOutputPayload;
     use pretty_assertions::assert_eq;
     use serde_json::json;
+    use serde_json::value::RawValue;
 
     fn request(input: Vec<ResponseItem>, tools: Vec<Value>) -> ResponsesApiRequest {
         ResponsesApiRequest {
             model: "claude-sonnet-4-5".to_string(),
             instructions: "system prompt".to_string(),
             input,
-            tools: Some(tools),
+            tools: Some(ResponsesApiTools::from(Arc::from(
+                RawValue::from_string(serde_json::to_string(&tools).unwrap()).unwrap(),
+            ))),
             tool_choice: "auto".to_string(),
             parallel_tool_calls: false,
             reasoning: None,
