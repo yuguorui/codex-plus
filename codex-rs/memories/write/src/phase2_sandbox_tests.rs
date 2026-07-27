@@ -63,9 +63,13 @@ async fn consolidation_uses_canonical_parent_enforcement() -> anyhow::Result<()>
             managed_worker_profile,
         ),
     ] {
-        let agent_config =
-            agent::get_config(&test.config, parent_permission_profile, provider.as_ref())
-                .expect("agent config should be created");
+        let agent_config = agent::get_config(
+            &test.config,
+            parent_permission_profile,
+            provider.as_ref(),
+            &test.session_configured.model,
+        )
+        .expect("agent config should be created");
 
         assert_eq!(
             (
@@ -101,6 +105,7 @@ async fn consolidation_uses_canonical_parent_enforcement() -> anyhow::Result<()>
             &constrained_config,
             PermissionProfile::workspace_write(),
             provider.as_ref(),
+            &test.session_configured.model,
         )
         .is_none()
     );

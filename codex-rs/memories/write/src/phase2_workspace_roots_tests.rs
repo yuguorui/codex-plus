@@ -49,6 +49,7 @@ async fn consolidation_rebinds_workspace_roots_to_memory_root() -> anyhow::Resul
             &test.config,
             parent_permission_profile.clone(),
             provider.as_ref(),
+            &test.session_configured.model,
         )
         .expect("agent config should be created");
 
