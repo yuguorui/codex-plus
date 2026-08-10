@@ -22,6 +22,7 @@ use crate::tools::handlers::ListMcpResourceTemplatesHandler;
 use crate::tools::handlers::ListMcpResourcesHandler;
 use crate::tools::handlers::NewContextWindowHandler;
 use crate::tools::handlers::PlanHandler;
+use crate::tools::handlers::ReadGuardianApprovalArtifactHandler;
 use crate::tools::handlers::ReadMcpResourceHandler;
 use crate::tools::handlers::RequestPermissionsHandler;
 use crate::tools::handlers::RequestPluginInstallHandler;
@@ -123,6 +124,7 @@ struct CoreToolPlanContext<'a> {
     wait_for_environment_tool_config: Option<&'a Arc<crate::WaitForEnvironmentToolConfig>>,
     default_agent_type_description: &'a str,
     wait_agent_timeouts: WaitAgentTimeoutOptions,
+    guardian_approval_artifact: Option<&'a Arc<crate::guardian::GuardianApprovalArtifact>>,
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -143,6 +145,10 @@ pub(crate) fn build_tool_router(
         .services
         .thread_extension_data
         .get::<crate::WaitForEnvironmentToolConfig>();
+    let guardian_approval_artifact = session
+        .services
+        .thread_extension_data
+        .get::<crate::guardian::GuardianApprovalArtifact>();
     let context = CoreToolPlanContext {
         tool_policy: &session.tool_policy,
         turn_context,
@@ -153,6 +159,7 @@ pub(crate) fn build_tool_router(
         wait_for_environment_tool_config: wait_for_environment_tool_config.as_ref(),
         default_agent_type_description: &default_agent_type_description,
         wait_agent_timeouts: wait_agent_timeout_options(turn_context),
+        guardian_approval_artifact: guardian_approval_artifact.as_ref(),
     };
     let mut registry = ToolRegistry::with_tool_policy(Arc::clone(&session.tool_policy));
     add_core_tool_sources(&context, &mut registry);
@@ -298,6 +305,7 @@ pub(crate) fn build_core_tool_registry(
         wait_for_environment_tool_config,
         default_agent_type_description: &default_agent_type_description,
         wait_agent_timeouts: wait_agent_timeout_options(turn_context),
+        guardian_approval_artifact: None,
     };
     let mut registry = ToolRegistry::default();
     add_core_tool_sources(&context, &mut registry);
@@ -1013,6 +1021,16 @@ fn code_mode_namespace_descriptions(
 
 #[instrument(level = "trace", skip_all)]
 fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistry) {
+    // Preserve the reviewer's existing sandbox requirements. Tool selection is
+    // supplied separately by the extension through AllowedTools.
+    if crate::guardian::is_basic_session_source(&context.turn_context.session_source)
+        && let Some(artifact) = context.guardian_approval_artifact
+    {
+        registry.add(ReadGuardianApprovalArtifactHandler::new(
+            (**artifact).clone(),
+        ));
+    }
+
     // The startup ceiling applies to the thread and every selected environment.
     if context.tool_policy.require_managed_sandbox
         && (!matches!(
@@ -1500,6 +1518,10 @@ fn append_extension_tool_executors(
     let mut standalone_web_search_tool = None;
 
     for executor in executors {
+        let availability = executor.availability();
+        if !availability.is_available(&turn_context.session_source) {
+            continue;
+        }
         let tool_name = executor.tool_name();
         let is_standalone_web_search = tool_name == ToolName::namespaced("web", "run");
         if is_standalone_web_search && (!standalone_web_search_enabled || !web_search_mode_on) {

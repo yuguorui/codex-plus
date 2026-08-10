@@ -108,6 +108,8 @@ pub enum Feature {
     CodexHooks,
     /// Store CLI auth in the encrypted local secrets backend when keyring storage is selected.
     SecretAuthStorage,
+    /// Enable deterministic JavaScript workflows that orchestrate subagents.
+    Workflows,
 
     /// Automatically start the shared local daemon for eligible interactive launches.
     DaemonAutoStart,
@@ -1067,6 +1069,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "code_mode",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::Workflows,
+        key: "workflows",
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::CodeModeBufferedExec,
