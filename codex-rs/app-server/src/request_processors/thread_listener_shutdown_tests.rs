@@ -69,6 +69,10 @@ async fn test_processor(
         Arc::new(GoalService::new()),
         config_manager.clone(),
     );
+    let workflow_service = codex_workflow_extension::WorkflowService::new(
+        Arc::new(codex_extension_api::NoopExtensionEventSink),
+        Arc::downgrade(&test.thread_manager),
+    );
     let processor = ThreadRequestProcessor::new(
         auth,
         test.thread_manager.clone(),
@@ -88,6 +92,7 @@ async fn test_processor(
         /*turn_cost_worker*/ None,
         Vec::new(),
         Arc::new(SampleResponseRegistry::default()),
+        workflow_service,
     );
     Ok((processor, outgoing_rx))
 }

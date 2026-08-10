@@ -42,6 +42,15 @@ pub struct InProcessCodeModeSession {
     runtime: SessionRuntime,
     catalog: Mutex<(u64, runtime::ToolCatalog)>,
     options: CodeModeSessionOptions,
+    string_code_generation: StringCodeGeneration,
+}
+
+/// Controls whether a code-mode session may compile JavaScript supplied as a string.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum StringCodeGeneration {
+    #[default]
+    Allow,
+    Deny,
 }
 
 impl InProcessCodeModeSession {
@@ -50,13 +59,27 @@ impl InProcessCodeModeSession {
     }
 
     pub fn with_limits(cell_execution_limits: CodeModeSessionCellExecutionLimits) -> Self {
-        Self::with_options(
-            CodeModeSessionOptions {
+        Self::with_limits_and_string_code_generation(
+            cell_execution_limits,
+            StringCodeGeneration::Allow,
+        )
+    }
+
+    pub fn with_limits_and_string_code_generation(
+        cell_execution_limits: CodeModeSessionCellExecutionLimits,
+        string_code_generation: StringCodeGeneration,
+    ) -> Self {
+        Self {
+            runtime: SessionRuntime::new_with_task_failure_handler(
+                /*task_failure_handler*/ None,
+            ),
+            catalog: Default::default(),
+            options: CodeModeSessionOptions {
                 cell_execution_limits,
                 ..CodeModeSessionOptions::default()
             },
-            /*task_failure_handler*/ None,
-        )
+            string_code_generation,
+        }
     }
 
     /// Select output handling at creation. A session's mode must remain fixed
@@ -75,6 +98,7 @@ impl InProcessCodeModeSession {
                 },
                 ..options
             },
+            string_code_generation: StringCodeGeneration::Allow,
         }
     }
 
@@ -120,6 +144,8 @@ impl InProcessCodeModeSession {
             tool_call_id: request.tool_call_id,
             enabled_tools: tools,
             source: request.source,
+            string_code_generation: self.string_code_generation,
+            max_heap_size_bytes: self.options.cell_execution_limits.max_heap_size_bytes,
         })
     }
 

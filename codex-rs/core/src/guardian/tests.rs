@@ -924,22 +924,25 @@ fn collect_guardian_transcript_entries(
 ) -> Vec<ConversationTranscriptEntry> {
     let mut profile = codex_guardian_context::ContextProfile::synchronous();
     profile.transcript.entry_limits.node_repl_output_tokens = node_repl_result_token_limit;
-    prompt::collect_guardian_context(codex_guardian_context::SectionInput {
-        target: profile.target,
-        history,
-        transcript: &profile.transcript,
-        is_selected_exec_output: None,
-        root_conversation: &[],
-        root_conversation_candidates: None,
-        trusted_user_answers: &[],
-        planned_action: None,
-        permissions: None,
-        previous_reviews: None,
-        trusted_tool: None,
-        trusted_skill_paths: &[],
-        images: None,
-        node_repl: None,
-    })
+    prompt::collect_guardian_context(
+        codex_guardian_context::SectionInput {
+            target: profile.target,
+            history,
+            transcript: &profile.transcript,
+            is_selected_exec_output: None,
+            root_conversation: &[],
+            root_conversation_candidates: None,
+            trusted_user_answers: &[],
+            planned_action: None,
+            permissions: None,
+            previous_reviews: None,
+            trusted_tool: None,
+            trusted_skill_paths: &[],
+            images: None,
+            node_repl: None,
+        },
+        /*excluded_call_id*/ None,
+    )
     .expect("collect Guardian context")
     .transcript_entries()
     .to_vec()
