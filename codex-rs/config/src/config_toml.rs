@@ -480,6 +480,9 @@ pub struct ConfigToml {
     /// Agent-related settings (thread limits, etc.).
     pub agents: Option<AgentsToml>,
 
+    /// Workflow orchestration settings.
+    pub workflow: Option<WorkflowToml>,
+
     /// Goal-related settings.
     pub goals: Option<GoalsToml>,
 
@@ -568,6 +571,15 @@ pub enum ThreadStoreToml {
     InMemory {
         id: String,
     },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct WorkflowToml {
+    /// Maximum Workflow agents that may run concurrently in one app-server
+    /// process. Valid values are 1 through 256.
+    #[schemars(range(min = 1, max = 256))]
+    pub global_concurrency: Option<NonZeroUsize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]

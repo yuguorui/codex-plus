@@ -570,6 +570,22 @@ async fn run_review_on_session(
             };
             analytics_result.had_prior_review_context =
                 Some(had_prior_review_context(&prompt_mode));
+            match &params.request {
+                GuardianApprovalRequest::ExtensionTool { artifact, .. } => {
+                    review_session
+                        .session
+                        .services
+                        .thread_extension_data
+                        .insert(artifact.clone());
+                }
+                _ => {
+                    review_session
+                        .session
+                        .services
+                        .thread_extension_data
+                        .remove::<crate::guardian::GuardianApprovalArtifact>();
+                }
+            }
             let mut prompt_items = build_guardian_prompt_items_with_parent_turn(
                 params.parent_session.as_ref(),
                 history,
