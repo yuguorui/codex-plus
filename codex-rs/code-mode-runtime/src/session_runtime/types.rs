@@ -7,6 +7,7 @@ use codex_code_mode_protocol::CodeModeToolResult;
 use serde_json::Value as JsonValue;
 use tokio_util::sync::CancellationToken;
 
+use crate::StringCodeGeneration;
 use crate::output::OutputCollector;
 
 /// Identifies one execution cell within a session runtime.
@@ -93,6 +94,8 @@ pub(crate) struct CreateCellRequest {
     pub(crate) enabled_tools: ToolCatalog,
     pub(crate) tool_preloads: &'static [crate::ToolPreload],
     pub(crate) source: String,
+    pub(crate) string_code_generation: StringCodeGeneration,
+    pub(crate) max_heap_size_bytes: Option<usize>,
 }
 
 /// A tool name with an optional namespace.

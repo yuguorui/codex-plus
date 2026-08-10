@@ -546,6 +546,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) prompt_cache_key: PromptCacheKey,
     pub(crate) allow_provider_model_fallback: bool,
     pub(crate) instructions: SessionInstructions,
+    pub(crate) frozen_project_instructions: Option<Arc<crate::LoadedAgentsMd>>,
     pub(crate) installation_id: String,
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) runtime_auth: RuntimeAuthSlot,
@@ -757,6 +758,7 @@ impl Session {
             prompt_cache_key,
             allow_provider_model_fallback,
             instructions,
+            frozen_project_instructions,
             installation_id,
             auth_manager,
             runtime_auth,
@@ -1157,6 +1159,7 @@ impl Session {
             &environment_selections,
             config.clone(),
             instructions,
+            frozen_project_instructions,
             installation_id,
             auth_manager.clone(),
             runtime_auth,
@@ -6684,6 +6687,18 @@ impl Session {
             return;
         };
         turn_state.lock().await.has_memory_citation = true;
+    }
+
+    pub(crate) async fn begin_closing(&self) {
+        self.closing
+            .store(true, std::sync::atomic::Ordering::Release);
+        // Synchronize with task registration so a task that observed the old state either
+        // becomes visible to teardown or observes closing before it can start.
+        let _active_turn = self.active_turn.lock().await;
+    }
+
+    pub(crate) fn is_closing(&self) -> bool {
+        self.closing.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub(crate) fn hooks(&self) -> Arc<Hooks> {
