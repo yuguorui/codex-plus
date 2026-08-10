@@ -50,6 +50,8 @@ pub(crate) struct AgentNavigationState {
     /// Spawned child threads whose instructions are owned by their parent agent.
     parent_owned_threads: HashSet<ThreadId>,
     picker_excluded_threads: HashSet<ThreadId>,
+    /// Subagent threads created by a dynamic Workflow run.
+    workflow_agent_threads: HashSet<ThreadId>,
     /// Coalesces root refreshes while rejecting replies from a previous session.
     pub(super) picker_refresh: Option<AgentPickerRefreshState>,
 }
@@ -134,6 +136,19 @@ impl AgentNavigationState {
 
     pub(crate) fn is_parent_owned(&self, thread_id: ThreadId) -> bool {
         self.parent_owned_threads.contains(&thread_id)
+    }
+
+    pub(crate) fn mark_workflow_agents(
+        &mut self,
+        thread_ids: impl IntoIterator<Item = ThreadId>,
+    ) -> bool {
+        let before = self.workflow_agent_threads.len();
+        self.workflow_agent_threads.extend(thread_ids);
+        before != self.workflow_agent_threads.len()
+    }
+
+    pub(crate) fn is_workflow_agent(&self, thread_id: ThreadId) -> bool {
+        self.workflow_agent_threads.contains(&thread_id)
     }
 
     /// Marks a spawned child thread as view-only for direct user instructions.
@@ -268,6 +283,7 @@ impl AgentNavigationState {
         self.stopped_threads.clear();
         self.parent_owned_threads.clear();
         self.picker_excluded_threads.clear();
+        self.workflow_agent_threads.clear();
         self.picker_refresh = None;
     }
 
@@ -282,6 +298,7 @@ impl AgentNavigationState {
         self.stopped_threads.remove(&thread_id);
         self.parent_owned_threads.remove(&thread_id);
         self.picker_excluded_threads.remove(&thread_id);
+        self.workflow_agent_threads.remove(&thread_id);
     }
 
     /// Returns whether there is at least one tracked thread other than the primary one.
@@ -525,6 +542,21 @@ mod tests {
         state.mark_parent_owned(second_agent_id);
         state.clear();
         assert!(!state.is_parent_owned(second_agent_id));
+    }
+
+    #[test]
+    fn workflow_agent_state_is_independent_of_generic_subagents() {
+        let (mut state, _main_thread_id, first_agent_id, second_agent_id) = populated_state();
+
+        assert!(state.mark_workflow_agents([first_agent_id]));
+        assert!(!state.mark_workflow_agents([first_agent_id]));
+        assert!(state.is_workflow_agent(first_agent_id));
+        assert!(!state.is_workflow_agent(second_agent_id));
+
+        state.remove(second_agent_id);
+        assert!(state.is_workflow_agent(first_agent_id));
+        state.remove(first_agent_id);
+        assert!(!state.is_workflow_agent(first_agent_id));
     }
 
     #[test]

@@ -2069,6 +2069,7 @@ async fn skills_list_only_returns_model_visible_bounded_metadata() -> TestResult
         conversation_history: ConversationHistory::default(),
         turn_item_emitter: Arc::new(NoopTurnItemEmitter),
         environments: Vec::new(),
+        agent_configuration: None,
         payload: payload.clone(),
     };
     let output = list_tool.handle(call.clone()).await?;
@@ -2229,6 +2230,7 @@ async fn skills_list_only_returns_model_visible_bounded_metadata() -> TestResult
             conversation_history: ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
             environments: Vec::new(),
+            agent_configuration: None,
             payload: insufficient_budget_payload,
         })
         .await

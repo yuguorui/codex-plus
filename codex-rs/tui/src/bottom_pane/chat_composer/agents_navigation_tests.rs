@@ -8,6 +8,7 @@ use pretty_assertions::assert_eq;
 #[test]
 fn parent_owned_thread_allows_bare_navigation_commands() {
     for (command, expected) in [
+        ("/agent", SlashCommand::Agent),
         ("/agents", SlashCommand::Agents),
         ("/subagents", SlashCommand::MultiAgents),
         ("/side", SlashCommand::Side),

@@ -83,11 +83,19 @@ pub(crate) async fn build_compaction_replacement_history(
     world_state: &WorldState,
     compacted_history: Vec<ResponseItemEnvelope>,
 ) -> (Vec<ResponseItemEnvelope>, WorldStateSnapshot) {
+    let retained_workflow_child_context = sess.retained_workflow_child_context().await;
     let (updates, snapshot) = sess
         .build_initial_context_with_world_state(step_context, world_state)
         .await;
     let (prefix, context) = split_prefix_updates(updates);
-    let context = merge_world_state_updates(context);
+    let context = merge_world_state_updates(context)
+        .into_iter()
+        .chain(
+            retained_workflow_child_context
+                .into_iter()
+                .map(|envelope| envelope.item),
+        )
+        .collect();
     (
         assemble_compaction_history(compacted_history, prefix, context),
         snapshot,

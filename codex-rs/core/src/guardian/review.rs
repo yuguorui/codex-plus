@@ -35,6 +35,7 @@ use super::ApprovalRequestReasons;
 use super::GUARDIAN_REVIEW_TIMEOUT;
 use super::GUARDIAN_REVIEWER_NAME;
 use super::GuardianApprovalRequest;
+use super::GuardianAssessmentOutcome;
 use super::GuardianReviewContext;
 use super::approval_request::format_guardian_action_pretty;
 use super::approval_request::guardian_assessment_action;

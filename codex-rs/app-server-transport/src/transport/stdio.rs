@@ -9,6 +9,7 @@ use super::TransportEvent;
 use super::forward_incoming_message;
 use super::next_connection_id;
 use super::serialize_outgoing_message;
+use crate::OutgoingWriteResult;
 use crate::outgoing_message::QueuedOutgoingMessage;
 use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::JSONRPCMessage;
@@ -80,17 +81,20 @@ pub async fn start_stdio_connection(
     // Keep stdout's blocking writes off Tokio's pool too. The forwarding future
     // owns writer_rx so cancelling it also releases producers stuck on a full queue.
     let (stdout_tx, mut stdout_rx) =
-        mpsc::channel::<(String, oneshot::Sender<()>)>(/*buffer*/ 1);
+        mpsc::channel::<(String, oneshot::Sender<OutgoingWriteResult>)>(/*buffer*/ 1);
     std::thread::Builder::new()
         .name("app-server-stdout".to_string())
         .spawn(move || {
             let mut stdout = std::io::stdout().lock();
             while let Some((json, written_tx)) = stdout_rx.blocking_recv() {
-                if let Err(err) = stdout.write_all(json.as_bytes()) {
+                if let Err(err) = stdout
+                    .write_all(json.as_bytes())
+                    .and_then(|()| stdout.flush())
+                {
                     error!("Failed to write to stdout: {err}");
                     break;
                 }
-                let _ = written_tx.send(());
+                let _ = written_tx.send(OutgoingWriteResult::Written);
             }
         })?;
 
@@ -140,11 +144,14 @@ pub async fn start_stdio_connection(
             };
             json.push('\n');
             let (written_tx, written_rx) = oneshot::channel();
-            if stdout_tx.send((json, written_tx)).await.is_err() || written_rx.await.is_err() {
+            if stdout_tx.send((json, written_tx)).await.is_err() {
                 break;
             }
+            let Ok(write_result) = written_rx.await else {
+                break;
+            };
             if let Some(write_complete_tx) = queued_message.write_complete_tx {
-                let _ = write_complete_tx.send(());
+                let _ = write_complete_tx.send(write_result);
             }
         }
         info!("stdout writer exited (channel closed)");
