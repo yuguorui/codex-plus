@@ -233,6 +233,7 @@ async fn add_ad_hoc_note_tool_creates_note_file() {
             attachment_store: codex_core::passthrough_image_store(),
             ephemeral: false,
             environments: Vec::new(),
+            agent_configuration: None,
             payload: payload.clone(),
         })
         .await
@@ -281,6 +282,7 @@ async fn add_ad_hoc_note_tool_rejects_paths_as_filenames() {
             attachment_store: codex_core::passthrough_image_store(),
             ephemeral: false,
             environments: Vec::new(),
+            agent_configuration: None,
             payload,
         })
         .await;
@@ -330,6 +332,7 @@ async fn read_tool_reads_memory_file() {
             attachment_store: codex_core::passthrough_image_store(),
             ephemeral: false,
             environments: Vec::new(),
+            agent_configuration: None,
             payload: payload.clone(),
         })
         .await
@@ -449,6 +452,7 @@ async fn search_tool_accepts_multiple_queries() {
             attachment_store: codex_core::passthrough_image_store(),
             ephemeral: false,
             environments: Vec::new(),
+            agent_configuration: None,
             payload: payload.clone(),
         })
         .await
@@ -527,6 +531,7 @@ async fn search_tool_accepts_windowed_all_match_mode() {
             attachment_store: codex_core::passthrough_image_store(),
             ephemeral: false,
             environments: Vec::new(),
+            agent_configuration: None,
             payload: payload.clone(),
         })
         .await
@@ -585,6 +590,7 @@ async fn search_tool_rejects_legacy_single_query() {
             attachment_store: codex_core::passthrough_image_store(),
             ephemeral: false,
             environments: Vec::new(),
+            agent_configuration: None,
             payload,
         })
         .await;
