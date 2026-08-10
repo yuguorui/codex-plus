@@ -210,6 +210,7 @@ async fn cloud_preference_preserves_aliases_reads_and_executor_fallback() -> Tes
                         conversation_history: ConversationHistory::default(),
                         turn_item_emitter: Arc::new(NoopTurnItemEmitter),
                         environments: Vec::new(),
+                        agent_configuration: None,
                         payload: payload.clone(),
                     })
                     .await?;

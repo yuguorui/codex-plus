@@ -6,9 +6,12 @@ mod timers;
 mod value;
 
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc as std_mpsc;
 use std::thread;
 
@@ -21,10 +24,12 @@ use codex_protocol::ToolName;
 use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
 
+use crate::StringCodeGeneration;
 use crate::TaskFailureHandler;
 use crate::v8_init::ensure_v8_initialized;
 
 const EXIT_SENTINEL: &str = "__codex_code_mode_exit__";
+const HEAP_EMERGENCY_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug)]
 pub(crate) enum RuntimeCommand {
@@ -78,6 +83,8 @@ pub(crate) fn spawn_runtime(
     event_tx: mpsc::UnboundedSender<RuntimeEvent>,
     pending_mode: PendingRuntimeMode,
     task_failure_handler: Option<TaskFailureHandler>,
+    string_code_generation: StringCodeGeneration,
+    max_heap_size_bytes: Option<usize>,
 ) -> Result<
     (
         std_mpsc::Sender<RuntimeCommand>,
@@ -102,6 +109,8 @@ pub(crate) fn spawn_runtime(
         enabled_tools,
         source: request.source,
         stored_values,
+        string_code_generation,
+        max_heap_size_bytes,
     };
 
     let runtime_handle = tokio::runtime::Handle::current();
@@ -145,6 +154,8 @@ struct RuntimeConfig {
     enabled_tools: Vec<EnabledToolMetadata>,
     source: String,
     stored_values: HashMap<String, Arc<JsonValue>>,
+    string_code_generation: StringCodeGeneration,
+    max_heap_size_bytes: Option<usize>,
 }
 
 pub(super) struct RuntimeState {
@@ -178,8 +189,24 @@ fn run_runtime(
     isolate_handle_tx: std_mpsc::SyncSender<v8::IsolateHandle>,
     runtime_command_tx: std_mpsc::Sender<RuntimeCommand>,
 ) {
-    let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
+    let mut heap_state: Option<Box<HeapLimitState>>;
+    let create_params = config
+        .max_heap_size_bytes
+        .map_or_else(v8::CreateParams::default, |limit| {
+            v8::CreateParams::default().heap_limits(0, limit)
+        });
+    let isolate = &mut v8::Isolate::new(create_params);
     let isolate_handle = isolate.thread_safe_handle();
+    heap_state = config.max_heap_size_bytes.map(|_| {
+        Box::new(HeapLimitState {
+            emergency_granted: AtomicBool::new(false),
+            isolate_handle: isolate_handle.clone(),
+        })
+    });
+    if let Some(state) = heap_state.as_mut() {
+        let state_ptr = (&mut **state as *mut HeapLimitState).cast::<c_void>();
+        isolate.add_near_heap_limit_callback(near_heap_limit, state_ptr);
+    }
     if isolate_handle_tx.send(isolate_handle).is_err() {
         return;
     }
@@ -187,6 +214,9 @@ fn run_runtime(
 
     v8::scope!(let scope, isolate);
     let context = v8::Context::new(scope, Default::default());
+    if config.string_code_generation == StringCodeGeneration::Deny {
+        context.set_allow_generation_from_strings(false);
+    }
     let scope = &mut v8::ContextScope::new(scope, context);
 
     scope.set_slot(RuntimeState {
@@ -281,6 +311,26 @@ fn run_runtime(
     }
 }
 
+struct HeapLimitState {
+    emergency_granted: AtomicBool,
+    isolate_handle: v8::IsolateHandle,
+}
+
+unsafe extern "C" fn near_heap_limit(
+    data: *mut c_void,
+    current_heap_limit: usize,
+    _initial_heap_limit: usize,
+) -> usize {
+    // SAFETY: the boxed state outlives the isolate that owns this callback.
+    let state = unsafe { &*(data.cast::<HeapLimitState>()) };
+    state.isolate_handle.terminate_execution();
+    if state.emergency_granted.swap(true, Ordering::AcqRel) {
+        current_heap_limit
+    } else {
+        current_heap_limit.saturating_add(HEAP_EMERGENCY_BYTES)
+    }
+}
+
 fn next_runtime_command(
     event_tx: &mpsc::UnboundedSender<RuntimeEvent>,
     command_rx: &std_mpsc::Receiver<RuntimeCommand>,
@@ -347,6 +397,7 @@ mod tests {
     use super::spawn_runtime;
     use super::spawn_supervised_runtime_thread;
     use crate::FunctionCallOutputContentItem;
+    use crate::StringCodeGeneration;
 
     fn execute_request(source: &str) -> ExecuteRequest {
         ExecuteRequest {
@@ -419,6 +470,8 @@ mod tests {
             event_tx,
             PendingRuntimeMode::Continue,
             /*task_failure_handler*/ None,
+            StringCodeGeneration::Allow,
+            /*max_heap_size_bytes*/ None,
         )
         .unwrap();
 
@@ -462,6 +515,8 @@ await new Promise(() => {});
             event_tx,
             PendingRuntimeMode::PauseUntilResumed,
             /*task_failure_handler*/ None,
+            StringCodeGeneration::Allow,
+            /*max_heap_size_bytes*/ None,
         )
         .unwrap();
 
@@ -532,6 +587,8 @@ setTimeout(() => text("late"), 3_600_000);
             event_tx,
             PendingRuntimeMode::Continue,
             /*task_failure_handler*/ None,
+            StringCodeGeneration::Allow,
+            /*max_heap_size_bytes*/ None,
         )
         .unwrap();
 

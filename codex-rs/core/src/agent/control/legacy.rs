@@ -9,22 +9,28 @@ impl LocalAgentControl {
     pub(crate) async fn shutdown_live_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
         let state = self.runtime.upgrade()?;
         let result = if let Ok(thread) = state.get_thread(agent_id).await {
-            thread
-                .session
-                .ensure_rollout_materialized(PersistContext::Standard)
-                .await;
-            thread.session.flush_rollout().await?;
-            let result = if matches!(thread.agent_status().await, AgentStatus::Shutdown) {
+            let result = if thread.session.is_closing() {
+                // Forced teardown owns persistence and has already closed submissions. Retry
+                // flushing or submitting shutdown here races with the terminated session loop.
                 Ok(String::new())
             } else {
-                state
-                    .send_op(
-                        agent_id,
-                        Op::Shutdown {},
-                        /*parent_turn_id*/ None,
-                        /*root_turn_id*/ None,
-                    )
-                    .await
+                thread
+                    .session
+                    .ensure_rollout_materialized(PersistContext::Standard)
+                    .await;
+                thread.session.flush_rollout().await?;
+                if matches!(thread.agent_status().await, AgentStatus::Shutdown) {
+                    Ok(String::new())
+                } else {
+                    state
+                        .send_op(
+                            agent_id,
+                            Op::Shutdown {},
+                            /*parent_turn_id*/ None,
+                            /*root_turn_id*/ None,
+                        )
+                        .await
+                }
             };
             thread.wait_until_terminated().await;
             result
@@ -46,7 +52,17 @@ impl LocalAgentControl {
 
     /// Mark `agent_id` as explicitly closed in persisted spawn-edge state, then shut down the
     /// agent and any live descendants reached from the in-memory tree.
-    pub(crate) async fn close_agent(&self, agent_id: ThreadId) -> CodexResult<AgentInfo> {
+    pub(crate) async fn close_agent(
+        &self,
+        caller_thread_id: ThreadId,
+        agent_id: ThreadId,
+    ) -> CodexResult<AgentInfo> {
+        self.authorize_agent_access(caller_thread_id, agent_id)?;
+        let registration = self
+            .runtime
+            .registry
+            .registration_for_close(agent_id)
+            .ok_or(CodexErr::ThreadNotFound(agent_id))?;
         let state = self.runtime.upgrade()?;
         let metadata = self.get_agent_metadata(agent_id);
         let known_agent = metadata.is_some();
@@ -90,7 +106,7 @@ impl LocalAgentControl {
             }
             Err(err) => return Err(err),
         };
-        match Box::pin(self.shutdown_agent_tree(agent_id)).await {
+        let result = match Box::pin(self.shutdown_agent_tree(agent_id)).await {
             Err(err)
                 if known_agent
                     && matches!(
@@ -98,10 +114,14 @@ impl LocalAgentControl {
                         CodexErrorDetails::ThreadNotFound(_) | CodexErrorDetails::InternalAgentDied
                     ) =>
             {
-                Ok(snapshot)
+                Ok(())
             }
-            result => result.map(|_| snapshot),
+            result => result.map(|_| ()),
+        };
+        if result.is_ok() {
+            self.runtime.registry.remember_closed_agent(registration);
         }
+        result.map(|()| snapshot)
     }
 
     /// Shut down `agent_id` and any live descendants reachable from the in-memory spawn tree.
