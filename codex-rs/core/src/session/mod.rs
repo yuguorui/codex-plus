@@ -427,6 +427,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) config: Config,
     pub(crate) allow_provider_model_fallback: bool,
     pub(crate) instructions: SessionInstructions,
+    pub(crate) frozen_project_instructions: Option<Arc<crate::LoadedAgentsMd>>,
     pub(crate) installation_id: String,
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) models_manager: SharedModelsManager,
@@ -532,6 +533,7 @@ impl Session {
             config,
             allow_provider_model_fallback,
             instructions,
+            frozen_project_instructions,
             installation_id,
             auth_manager,
             models_manager,
@@ -825,6 +827,7 @@ impl Session {
             &environment_selections,
             config.clone(),
             instructions,
+            frozen_project_instructions,
             installation_id,
             auth_manager.clone(),
             models_manager.clone(),
@@ -4428,11 +4431,13 @@ impl Session {
             state.start_new_context_window()
         };
         let (window_number, window_ids) = window;
+        let retained_workflow_child_context = self.retained_workflow_child_context().await;
         let context_items = self
             .build_initial_context_with_world_state(step_context, world_state.as_ref())
             .await
             .into_iter()
             .map(ResponseItemEnvelope::new)
+            .chain(retained_workflow_child_context)
             .chain(retained_client_developer_messages)
             .collect();
         let turn_context_item = step_context.to_turn_context_item();
@@ -4451,6 +4456,16 @@ impl Session {
         .await;
         self.recompute_token_usage(turn_context).await;
         window_number
+    }
+
+    pub(crate) async fn retained_workflow_child_context(&self) -> Vec<ResponseItemEnvelope> {
+        let items = self
+            .state
+            .lock()
+            .await
+            .additional_context
+            .retained_workflow_child_context();
+        items.into_iter().map(ResponseItemEnvelope::new).collect()
     }
 
     pub(crate) async fn reference_context_item(&self) -> Option<TurnContextItem> {
@@ -4828,6 +4843,18 @@ impl Session {
         if !had_active_turn {
             self.cancel_mcp_startup();
         }
+    }
+
+    pub(crate) async fn begin_closing(&self) {
+        self.closing
+            .store(true, std::sync::atomic::Ordering::Release);
+        // Synchronize with task registration so a task that observed the old state either
+        // becomes visible to teardown or observes closing before it can start.
+        let _active_turn = self.active_turn.lock().await;
+    }
+
+    pub(crate) fn is_closing(&self) -> bool {
+        self.closing.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub(crate) fn hooks(&self) -> Arc<Hooks> {

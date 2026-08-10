@@ -22,6 +22,7 @@ use tokio::sync::Semaphore;
 pub(crate) struct AgentsMdManager {
     refresh_lock: Semaphore,
     state: Mutex<AgentsMdState>,
+    frozen: bool,
 }
 
 /// Root runtimes retain providers; subagents inherit only their applied snapshots.
@@ -55,6 +56,31 @@ impl AgentsMdManager {
                 instructions,
                 cache: AgentsMdCache::default(),
             }),
+            frozen: false,
+        }
+    }
+
+    /// Builds a manager whose applied snapshot is supplied by the caller.
+    ///
+    /// Frozen managers never reload instructions; subagents that must observe the exact
+    /// snapshot their parent started with use this instead of [`Self::new`].
+    pub(crate) fn new_frozen(
+        mut instructions: SessionInstructions,
+        loaded: Option<Arc<LoadedAgentsMd>>,
+    ) -> Self {
+        instructions.user = normalize_instructions(instructions.user);
+        instructions.thread = normalize_instructions(instructions.thread);
+        Self {
+            refresh_lock: Semaphore::new(/*permits*/ 1),
+            state: Mutex::new(AgentsMdState {
+                instructions,
+                cache: AgentsMdCache {
+                    selections: None,
+                    active_project_trust_level: None,
+                    loaded,
+                },
+            }),
+            frozen: true,
         }
     }
 
@@ -67,6 +93,9 @@ impl AgentsMdManager {
         config: &Config,
         environments: &TurnEnvironmentSnapshot,
     ) -> (CodexResult<Option<Arc<LoadedAgentsMd>>>, Vec<String>) {
+        if self.frozen {
+            return (Ok(self.get_loaded().await), Vec::new());
+        }
         // Serialize overlapping captures without blocking reads of the applied snapshot.
         let Ok(_refresh_guard) = self.refresh_lock.acquire().await else {
             return (

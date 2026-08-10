@@ -231,6 +231,7 @@ async fn add_ad_hoc_note_tool_creates_note_file() {
             conversation_history: codex_extension_api::ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
             environments: Vec::new(),
+            agent_configuration: None,
             payload: payload.clone(),
         })
         .await
@@ -277,6 +278,7 @@ async fn add_ad_hoc_note_tool_rejects_paths_as_filenames() {
             conversation_history: codex_extension_api::ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
             environments: Vec::new(),
+            agent_configuration: None,
             payload,
         })
         .await;
@@ -324,6 +326,7 @@ async fn read_tool_reads_memory_file() {
             conversation_history: codex_extension_api::ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
             environments: Vec::new(),
+            agent_configuration: None,
             payload: payload.clone(),
         })
         .await
@@ -441,6 +444,7 @@ async fn search_tool_accepts_multiple_queries() {
             conversation_history: codex_extension_api::ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
             environments: Vec::new(),
+            agent_configuration: None,
             payload: payload.clone(),
         })
         .await
@@ -517,6 +521,7 @@ async fn search_tool_accepts_windowed_all_match_mode() {
             conversation_history: codex_extension_api::ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
             environments: Vec::new(),
+            agent_configuration: None,
             payload: payload.clone(),
         })
         .await
@@ -573,6 +578,7 @@ async fn search_tool_rejects_legacy_single_query() {
             conversation_history: codex_extension_api::ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
             environments: Vec::new(),
+            agent_configuration: None,
             payload,
         })
         .await;

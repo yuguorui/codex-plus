@@ -193,6 +193,10 @@ impl ReviewHost for super::super::runtime::ReviewRuntime {
         mut outcome: GuardianReviewOutcome,
         analytics_result: GuardianReviewAnalyticsResult,
     ) -> Option<ReviewDecision> {
+        let artifact_incomplete = matches!(
+            &prepared.request,
+            GuardianApprovalRequest::ExtensionTool { artifact, .. } if !artifact.is_complete()
+        );
         let PreparedApproval {
             request: _,
             turn,
@@ -202,6 +206,19 @@ impl ReviewHost for super::super::runtime::ReviewRuntime {
             review_evidence,
         } = prepared;
         let session = Arc::clone(&self.session);
+        if artifact_incomplete
+            && matches!(&outcome, GuardianReviewOutcome::Completed(assessment)
+                if assessment.outcome == GuardianAssessmentOutcome::Allow)
+        {
+            // Extension actions are content-addressed; an automatic allow is only valid after
+            // the reviewer read the complete artifact.
+            if let GuardianReviewOutcome::Completed(assessment) = &mut outcome {
+                assessment.outcome = GuardianAssessmentOutcome::Deny;
+                assessment.rationale =
+                    "Automatic approval review did not read the complete bound approval artifact."
+                        .to_string();
+            }
+        }
         if session.guardian_context_mode == GuardianContextMode::ThreadOwned
             && matches!(&outcome, GuardianReviewOutcome::Completed(assessment) if assessment.outcome == GuardianAssessmentOutcome::Allow)
             && (root_authorization_version
