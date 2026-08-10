@@ -465,6 +465,7 @@ fn tool_call(tool_name: ToolName, arguments: serde_json::Value) -> ToolCall<'sta
         attachment_store: codex_core::passthrough_image_store(),
         ephemeral: false,
         environments: Vec::new(),
+        agent_configuration: None,
         payload: ToolPayload::Function {
             arguments: arguments.to_string(),
         },
