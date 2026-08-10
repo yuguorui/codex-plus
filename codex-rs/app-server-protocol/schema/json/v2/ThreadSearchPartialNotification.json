@@ -2423,6 +2423,58 @@
           "type": "object"
         },
         {
+          "description": "Display item emitted while a Workflow agent analyzes its injected inputs.",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "workflowInputAnalysis"
+              ],
+              "title": "WorkflowInputAnalysisThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "type"
+          ],
+          "title": "WorkflowInputAnalysisThreadItem",
+          "type": "object"
+        },
+        {
+          "description": "Display item emitted while the owning model reads a Workflow result.",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "runId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "$ref": "#/definitions/WorkflowResultReadStatus"
+            },
+            "type": {
+              "enum": [
+                "workflowResultRead"
+              ],
+              "title": "WorkflowResultReadThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "status",
+            "type"
+          ],
+          "title": "WorkflowResultReadThreadItem",
+          "type": "object"
+        },
+        {
           "anyOf": [
             {
               "properties": {
@@ -3236,6 +3288,15 @@
           "type": "object"
         }
       ]
+    },
+    "WorkflowResultReadStatus": {
+      "description": "Lifecycle state of a Workflow result read displayed by the host.",
+      "enum": [
+        "inProgress",
+        "completed",
+        "failed"
+      ],
+      "type": "string"
     }
   },
   "description": "A best-effort incremental batch for `thread/search/stream`. Match `requestId` to the request on this connection. Only a small subset of verified matches may be emitted; rows are unique and arrive in discovery order, but may be dropped under load or fall outside the final sorted page. Thread fields use stored metadata and the current watched status; live thread settings are enriched in the final response. Replace provisional rows with the authoritative final response. No partials follow it or an error.",

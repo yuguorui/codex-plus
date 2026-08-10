@@ -90,7 +90,9 @@ async fn out_of_turn_user_context_closes_an_abandoned_call_first() {
     let call = ResponseItem::FunctionCall {
         encrypted_content: None,
         status: None,
-        id: Some(codex_protocol::ResponseItemId::new("fc")),
+        id: Some(codex_protocol::ResponseItemId::from_server(
+            "fc".to_string(),
+        )),
         name: "shell".to_string(),
         namespace: None,
         arguments: "{}".to_string(),
@@ -113,7 +115,9 @@ async fn out_of_turn_user_context_closes_an_abandoned_call_first() {
     let user_message = ResponseItem::Message {
         status: None,
         encrypted_content: None,
-        id: Some(codex_protocol::ResponseItemId::new("msg")),
+        id: Some(codex_protocol::ResponseItemId::from_server(
+            "msg".to_string(),
+        )),
         role: "user".to_string(),
         content: vec![codex_protocol::models::ContentItem::InputText {
             text: "injected later".to_string(),
@@ -163,7 +167,9 @@ async fn user_prompt_closes_an_abandoned_call_before_emitting_it() {
     let call = ResponseItem::FunctionCall {
         encrypted_content: None,
         status: None,
-        id: Some(codex_protocol::ResponseItemId::new("fc")),
+        id: Some(codex_protocol::ResponseItemId::from_server(
+            "fc".to_string(),
+        )),
         name: "shell".to_string(),
         namespace: None,
         arguments: "{}".to_string(),
