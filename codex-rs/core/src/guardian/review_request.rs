@@ -194,6 +194,21 @@ impl ReviewHost for super::super::runtime::ReviewRuntime {
         )
         .await;
         if matches!(&outcome, GuardianReviewOutcome::Completed(assessment) if assessment.outcome == GuardianAssessmentOutcome::Allow)
+            && matches!(
+                &prepared.request,
+                GuardianApprovalRequest::ExtensionTool { artifact, .. } if !artifact.is_complete()
+            )
+        {
+            // Extension actions are content-addressed; an automatic allow is only valid after
+            // the reviewer read the complete artifact.
+            if let GuardianReviewOutcome::Completed(assessment) = &mut outcome {
+                assessment.outcome = GuardianAssessmentOutcome::Deny;
+                assessment.rationale =
+                    "Automatic approval review did not read the complete bound approval artifact."
+                        .to_string();
+            }
+        }
+        if matches!(&outcome, GuardianReviewOutcome::Completed(assessment) if assessment.outcome == GuardianAssessmentOutcome::Allow)
         {
             let root_snapshot = session
                 .services
