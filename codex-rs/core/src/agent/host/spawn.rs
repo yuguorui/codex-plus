@@ -168,6 +168,7 @@ pub(super) async fn create_spawn(
             thread_id: child.thread_id,
             metadata: AgentMetadata {
                 agent_id: Some(child.thread_id),
+                owning_root_thread_id: runtime.owning_root_thread_id_for(caller).or(Some(caller)),
                 agent_path: Some(task_name.clone()),
                 agent_nickname: child.thread.session_source.get_nickname(),
                 agent_role: child.thread.session_source.get_agent_role(),

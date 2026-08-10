@@ -2,6 +2,7 @@
 //! Registry identity is allocation identity; cloning this handle preserves ownership checks.
 
 use super::LocalAgentControl;
+use super::RolloutBudgetEnforcement;
 use super::execution::AgentExecutionLimiter;
 use super::residency::V2Residency;
 use crate::agent::api::AgentControl;
@@ -195,6 +196,8 @@ pub(crate) struct LocalAgentRuntime {
     pub(super) agent_execution_limiter: Arc<AgentExecutionLimiter>,
     /// Session-scoped state shared by the root thread and every cloned sub-agent control handle.
     pub(super) rollout_budget: Arc<RolloutBudget>,
+    /// Whether exceeding the shared rollout budget stops the session or is only observed.
+    pub(super) rollout_budget_enforcement: RolloutBudgetEnforcement,
     /// The user-selected root routing tier, shared by the entire agent tree.
     pub(super) root_service_tier: Arc<ArcSwapOption<String>>,
     /// Retains the root's opt-in instruction provider even when the root is unloaded.
@@ -224,6 +227,7 @@ impl LocalAgentRuntime {
             shutdown_state: Arc::default(),
             agent_execution_limiter: Arc::default(),
             rollout_budget: Arc::default(),
+            rollout_budget_enforcement: RolloutBudgetEnforcement::Enforce,
             root_service_tier: Arc::new(ArcSwapOption::from(None)),
             shared_thread_instructions_provider: Arc::default(),
         };
@@ -313,6 +317,13 @@ impl LocalAgentRuntime {
 
     pub(crate) fn generate_thread_id(&self) -> ThreadId {
         (self.thread_id_generator)()
+    }
+
+    /// Returns the root thread that owns `thread_id` in this agent tree.
+    pub(crate) fn owning_root_thread_id_for(&self, thread_id: ThreadId) -> Option<ThreadId> {
+        self.registry
+            .agent_metadata_for_thread(thread_id)
+            .and_then(|metadata| metadata.owning_root_thread_id)
     }
 
     /// Shares the tree's trace with a new or reloaded child runtime.

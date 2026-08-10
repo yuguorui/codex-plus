@@ -6,6 +6,8 @@ use crate::context::AdditionalContextDeveloperFragment;
 use crate::context::AdditionalContextToolOutput;
 use crate::context::AdditionalContextUserFragment;
 use crate::context::ContextualUserFragment;
+use crate::context::WorkflowChildTask;
+use crate::context::is_workflow_child_context_key;
 use codex_context_fragments::MAX_ADDITIONAL_CONTEXT_VALUE_TOKENS;
 use codex_otel::ADDITIONAL_CONTEXT_COUNT_METRIC;
 use codex_otel::ADDITIONAL_CONTEXT_VALUE_BYTES_BUCKETS;
@@ -85,9 +87,16 @@ impl AdditionalContextStore {
             .map(|(key, entry)| match entry {
                 StoredAdditionalContext::ToolOutput(output) => output.clone().into(),
                 StoredAdditionalContext::Message(entry) => match entry.kind {
-                    AdditionalContextKind::Untrusted => ContextualUserFragment::into(
-                        AdditionalContextUserFragment::new(key.clone(), entry.value.clone()),
-                    ),
+                    AdditionalContextKind::Untrusted => workflow_child_task(key, entry)
+                        .map_or_else(
+                            || {
+                                ContextualUserFragment::into(AdditionalContextUserFragment::new(
+                                    key.clone(),
+                                    entry.value.clone(),
+                                ))
+                            },
+                            ContextualUserFragment::into,
+                        ),
                     AdditionalContextKind::Application => ContextualUserFragment::into(
                         AdditionalContextDeveloperFragment::new(key.clone(), entry.value.clone()),
                     ),
@@ -125,4 +134,38 @@ impl AdditionalContextStore {
             );
         }
     }
+
+    /// Rebuilds stable Workflow child context after compaction replaces the thread history.
+    pub(crate) fn retained_workflow_child_context(&self) -> Vec<ResponseItem> {
+        self.values
+            .iter()
+            .filter(|(key, _)| is_workflow_child_context_key(key))
+            .filter_map(|(key, entry)| {
+                let StoredAdditionalContext::Message(entry) = entry else {
+                    return None;
+                };
+                Some(match entry.kind {
+                    AdditionalContextKind::Untrusted => workflow_child_task(key, entry)
+                        .map(ContextualUserFragment::into)
+                        .unwrap_or_else(|| {
+                            ContextualUserFragment::into(AdditionalContextUserFragment::new(
+                                key.clone(),
+                                entry.value.clone(),
+                            ))
+                        }),
+                    AdditionalContextKind::Application => ContextualUserFragment::into(
+                        AdditionalContextDeveloperFragment::new(key.clone(), entry.value.clone()),
+                    ),
+                })
+            })
+            .collect()
+    }
 }
+
+fn workflow_child_task(key: &str, entry: &AdditionalContextEntry) -> Option<WorkflowChildTask> {
+    WorkflowChildTask::from_additional_context(key, &entry.value)
+}
+
+#[cfg(test)]
+#[path = "additional_context_tests.rs"]
+mod tests;

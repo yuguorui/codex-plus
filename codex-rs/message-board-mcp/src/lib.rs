@@ -144,6 +144,7 @@ impl ServerHandler for MessageBoardMcpServer {
             attachment_store: Arc::new(InlineAttachmentStore),
             ephemeral: false,
             environments: Vec::new(),
+            agent_configuration: None,
             payload: payload.clone(),
         };
         let result = match executor.handle(call).await {

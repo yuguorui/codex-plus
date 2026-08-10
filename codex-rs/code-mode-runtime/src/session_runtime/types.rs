@@ -5,6 +5,7 @@ use std::time::Duration;
 use serde_json::Value as JsonValue;
 use tokio_util::sync::CancellationToken;
 
+use crate::StringCodeGeneration;
 use crate::output::OutputCollector;
 
 /// Identifies one execution cell within a session runtime.
@@ -87,6 +88,8 @@ pub(crate) struct CreateCellRequest {
     pub(crate) tool_call_id: String,
     pub(crate) enabled_tools: Vec<ToolDefinition>,
     pub(crate) source: String,
+    pub(crate) string_code_generation: StringCodeGeneration,
+    pub(crate) max_heap_size_bytes: Option<usize>,
 }
 
 /// Tool metadata exposed to code running inside a cell.

@@ -246,7 +246,7 @@ async fn workspace_routed_http_rejects_redirects_without_a_routing_header(
         }
         // Exercise the resolved route's redirect policy against loopback HTTP servers.
         setup.api_provider.base_url = origin.uri();
-        let transport = setup.build_api_transport("/responses").unwrap();
+        let transport = setup.build_api_transport("/responses").await.unwrap();
         let request = setup
             .api_provider
             .build_request(http::Method::POST, "/responses")
