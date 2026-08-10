@@ -927,7 +927,7 @@ impl Session {
     )]
     pub(crate) async fn reserve_pending_work_turn(&self) -> Option<PendingWorkTurnReservation> {
         let mut active_turn = self.active_turn.lock().await;
-        if active_turn.is_some() || self.turn_starts_closed() {
+        if active_turn.is_some() || self.turn_starts_closed() || self.is_closing() {
             return None;
         }
         if !self.input_queue.has_pending_mailbox_items().await {

@@ -97,6 +97,10 @@ async fn interrupt_reply_waits_for_the_requested_turn(queued: bool) -> anyhow::R
         &test.config.codex_home,
         outgoing.clone(),
     );
+    let workflow_service = codex_workflow_extension::WorkflowService::new(
+        Arc::new(NoopExtensionEventSink),
+        Arc::downgrade(&test.thread_manager),
+    );
     let processor = TurnRequestProcessor::new(
         test.thread_manager.clone(),
         test.thread_store.clone(),
@@ -109,6 +113,7 @@ async fn interrupt_reply_waits_for_the_requested_turn(queued: bool) -> anyhow::R
         ThreadWatchManager::new(),
         watcher.clone(),
         /*turn_cost_worker*/ None,
+        workflow_service,
     );
     let request_id = |id| ConnectionRequestId {
         connection_id,

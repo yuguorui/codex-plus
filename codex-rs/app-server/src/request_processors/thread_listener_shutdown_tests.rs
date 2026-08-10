@@ -69,6 +69,10 @@ pub(super) async fn test_processor(
         Arc::new(GoalService::new()),
         config_manager.clone(),
     );
+    let workflow_service = codex_workflow_extension::WorkflowService::new(
+        Arc::new(codex_extension_api::NoopExtensionEventSink),
+        Arc::downgrade(&test.thread_manager),
+    );
     let processor = ThreadRequestProcessor::new(
         auth,
         test.thread_manager.clone(),
@@ -88,6 +92,7 @@ pub(super) async fn test_processor(
         /*turn_cost_worker*/ None,
         Vec::new(),
         Arc::new(SampleResponseRegistry::default()),
+        workflow_service,
     );
     Ok((processor, outgoing_rx))
 }
@@ -742,6 +747,7 @@ async fn revert_settles_interrupts_before_replacing_a_runtime() -> Result<()> {
         processor.thread_watch_manager.clone(),
         processor.skills_watcher.clone(),
         /*turn_cost_worker*/ None,
+        processor.workflow_service.clone(),
     );
     let request_id = |id| ConnectionRequestId {
         connection_id,

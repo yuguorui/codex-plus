@@ -463,6 +463,15 @@ impl ChatWidget {
             ThreadItemPayload::ImageGeneration(item) => {
                 self.on_image_generation_end(&turn_id, item);
             }
+            ThreadItemPayload::WorkflowResultRead(item) => match item.status {
+                codex_app_server_protocol::WorkflowResultReadStatus::InProgress => {
+                    self.on_workflow_result_read_begin(item.id, item.run_id);
+                }
+                codex_app_server_protocol::WorkflowResultReadStatus::Completed
+                | codex_app_server_protocol::WorkflowResultReadStatus::Failed => {
+                    self.on_workflow_result_read_end(item.id, item.run_id, item.status);
+                }
+            },
             ThreadItemPayload::EnteredReviewMode { review, .. } => {
                 if from_replay {
                     self.enter_review_mode_with_hint(review, /*from_replay*/ true);
@@ -524,7 +533,7 @@ impl ChatWidget {
             }),
             item @ ThreadItemPayload::SubAgentActivity { .. } => self.on_sub_agent_activity(item),
             item @ ThreadItemPayload::DynamicToolCall { .. } => self.on_dynamic_tool_item(item),
-            ThreadItemPayload::Sleep(_) => {}
+            ThreadItemPayload::Sleep(_) | ThreadItemPayload::WorkflowInputAnalysis(_) => {}
         }
 
         if matches!(replay_kind, Some(ReplayKind::ThreadSnapshot)) && turn_id.is_empty() {

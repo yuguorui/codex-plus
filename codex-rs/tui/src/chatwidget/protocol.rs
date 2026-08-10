@@ -98,6 +98,15 @@ impl ChatWidget {
             ServerNotification::ThreadGoalCleared(notification) => {
                 self.on_thread_goal_cleared(notification.thread_id.as_str());
             }
+            ServerNotification::WorkflowStarted(notification) => {
+                self.on_workflow_started(notification);
+            }
+            ServerNotification::WorkflowProgress(notification) => {
+                self.on_workflow_progress(notification);
+            }
+            ServerNotification::WorkflowCompleted(notification) => {
+                self.on_workflow_completed(notification);
+            }
             ServerNotification::ThreadSettingsUpdated(notification) => {
                 self.apply_thread_settings(notification, replay_kind);
             }
@@ -704,6 +713,9 @@ impl ChatWidget {
             }
             ThreadItemPayload::ImageGeneration(_) => {
                 self.on_image_generation_begin();
+            }
+            ThreadItemPayload::WorkflowResultRead(item) => {
+                self.on_workflow_result_read_begin(item.id, item.run_id);
             }
             ThreadItemPayload::CollabAgentToolCall {
                 id,

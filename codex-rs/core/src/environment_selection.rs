@@ -4,7 +4,9 @@ use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::PoisonError;
+use std::sync::Weak;
 
 use async_channel::Receiver;
 use async_channel::Sender;
@@ -54,6 +56,39 @@ pub(crate) use attachment::EnvironmentAttachment;
 
 // Reject pathological selected cwd values at the environment-selection boundary.
 const MAX_TURN_ENVIRONMENT_CWD_BYTES: usize = 8 * 1024;
+
+struct ExecutorIdEntry {
+    environment: Weak<Environment>,
+    id: String,
+}
+
+static EXECUTOR_IDS: OnceLock<Mutex<HashMap<usize, ExecutorIdEntry>>> = OnceLock::new();
+
+pub(crate) fn opaque_executor_id(environment: &Arc<Environment>) -> String {
+    let key = Arc::as_ptr(environment) as usize;
+    let mut entries = EXECUTOR_IDS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    entries.retain(|_, entry| entry.environment.strong_count() > 0);
+    if let Some(entry) = entries.get(&key)
+        && entry
+            .environment
+            .upgrade()
+            .is_some_and(|existing| Arc::ptr_eq(&existing, environment))
+    {
+        return entry.id.clone();
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    entries.insert(
+        key,
+        ExecutorIdEntry {
+            environment: Arc::downgrade(environment),
+            id: id.clone(),
+        },
+    );
+    id
+}
 
 /// Records whether a normalized config should follow later thread setting updates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -232,6 +267,7 @@ struct SelectedTurnEnvironment {
     selection: TurnEnvironmentSelection,
     config_origin: EnvironmentConfigOrigin,
     attachment: Arc<EnvironmentAttachment>,
+    pinned_executor: bool,
     // Only selections share this guard. A captured turn must not postpone detach.
     detach_on_drop: Arc<DropGuard>,
     resolution: TurnEnvironmentResolution,
@@ -507,6 +543,7 @@ impl ThreadEnvironments {
                     selection,
                     config_origin,
                     attachment,
+                    pinned_executor: true,
                     detach_on_drop: Arc::new(detach_on_drop),
                     resolution,
                     pending_completion: None,
@@ -707,9 +744,10 @@ impl ThreadEnvironments {
                 continue;
             }
             let current_environment = current.iter().find(|environment| {
-                environment
-                    .selection
-                    .has_same_workspace(selected_environment)
+                environment.pinned_executor
+                    || environment
+                        .selection
+                        .has_same_workspace(selected_environment)
             });
             let previous = current_environment.or_else(|| {
                 bindings.iter().find(|environment| {
@@ -875,6 +913,7 @@ impl ThreadEnvironments {
             selection,
             config_origin,
             attachment,
+            pinned_executor: false,
             detach_on_drop,
             resolution,
             pending_completion,
