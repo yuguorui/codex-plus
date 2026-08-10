@@ -53,6 +53,9 @@ impl Handler {
             .services
             .local_agent_runtime
             .control(session.session_id());
+        local_agent_control
+            .authorize_agent_access(session.thread_id, receiver_thread_id)
+            .map_err(|err| collab_agent_error(receiver_thread_id, err))?;
         let receiver_agent = local_agent_control.get_agent_metadata(receiver_thread_id);
         if receiver_agent.is_some() {
             let resume_config = build_agent_resume_config(turn.as_ref())

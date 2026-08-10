@@ -46,7 +46,17 @@ impl LocalAgentControl {
 
     /// Mark `agent_id` as explicitly closed in persisted spawn-edge state, then shut down the
     /// agent and any live descendants reached from the in-memory tree.
-    pub(crate) async fn close_agent(&self, agent_id: ThreadId) -> CodexResult<AgentInfo> {
+    pub(crate) async fn close_agent(
+        &self,
+        caller_thread_id: ThreadId,
+        agent_id: ThreadId,
+    ) -> CodexResult<AgentInfo> {
+        self.authorize_agent_access(caller_thread_id, agent_id)?;
+        let registration = self
+            .runtime
+            .registry
+            .registration_for_close(agent_id)
+            .ok_or(CodexErr::ThreadNotFound(agent_id))?;
         let state = self.runtime.upgrade()?;
         let metadata = self.get_agent_metadata(agent_id);
         let known_agent = metadata.is_some();
@@ -90,7 +100,7 @@ impl LocalAgentControl {
             }
             Err(err) => return Err(err),
         };
-        match Box::pin(self.shutdown_agent_tree(agent_id)).await {
+        let result = match Box::pin(self.shutdown_agent_tree(agent_id)).await {
             Err(err)
                 if known_agent
                     && matches!(
@@ -98,10 +108,14 @@ impl LocalAgentControl {
                         CodexErrorDetails::ThreadNotFound(_) | CodexErrorDetails::InternalAgentDied
                     ) =>
             {
-                Ok(snapshot)
+                Ok(())
             }
-            result => result.map(|_| snapshot),
+            result => result.map(|_| ()),
+        };
+        if result.is_ok() {
+            self.runtime.registry.remember_closed_agent(registration);
         }
+        result.map(|()| snapshot)
     }
 
     /// Shut down `agent_id` and any live descendants reachable from the in-memory spawn tree.
