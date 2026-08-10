@@ -932,6 +932,10 @@ pub struct Config {
     /// User-configured maximum number of spawned agent threads per session.
     pub agent_max_threads: Option<usize>,
 
+    /// Process-wide Workflow agent concurrency limit. `None` keeps the runtime's
+    /// CPU-derived default.
+    pub workflow_global_concurrency: Option<NonZeroUsize>,
+
     /// Default model for spawned subagents when the spawn call does not select one.
     pub agent_default_subagent_model: Option<String>,
 
@@ -3024,6 +3028,47 @@ fn resolve_terminal_resize_reflow_config(config_toml: &ConfigToml) -> TerminalRe
     }
 }
 
+fn resolve_workflow_global_concurrency(
+    configured: Option<NonZeroUsize>,
+    environment: Option<&str>,
+) -> std::io::Result<Option<NonZeroUsize>> {
+    const MAX_WORKFLOW_GLOBAL_CONCURRENCY: usize = 256;
+    let validate = |value: NonZeroUsize| {
+        if value.get() > MAX_WORKFLOW_GLOBAL_CONCURRENCY {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "workflow.global_concurrency must be between 1 and 256",
+            ))
+        } else {
+            Ok(value)
+        }
+    };
+
+    let configured = configured.map(validate).transpose()?;
+    let resolved = match environment.map(str::trim) {
+        Some("") => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "CODEX_WORKFLOW_GLOBAL_CONCURRENCY cannot be empty",
+            ));
+        }
+        Some(value) => Some(
+            value
+                .parse::<NonZeroUsize>()
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "CODEX_WORKFLOW_GLOBAL_CONCURRENCY must be an integer from 1 through 256",
+                    )
+                })
+                .and_then(validate)?,
+        ),
+        None => configured,
+    };
+
+    Ok(resolved)
+}
+
 fn code_mode_toml_config(features: Option<&FeaturesToml>) -> Option<&CodeModeConfigToml> {
     match features?.code_mode.as_ref()? {
         FeatureToml::Enabled(_) => None,
@@ -4302,6 +4347,14 @@ impl Config {
         )
         .map_err(std::io::Error::from)?;
         let otel = otel::resolve_config(cfg.otel.unwrap_or_default(), &mut startup_warnings);
+        let workflow_global_concurrency = resolve_workflow_global_concurrency(
+            cfg.workflow
+                .as_ref()
+                .and_then(|workflow| workflow.global_concurrency),
+            std::env::var("CODEX_WORKFLOW_GLOBAL_CONCURRENCY")
+                .ok()
+                .as_deref(),
+        )?;
         let config = Self {
             prefer_mxc,
             model,
@@ -4393,6 +4446,7 @@ impl Config {
             tool_output_token_limit: cfg.tool_output_token_limit,
             agents_enabled,
             agent_max_threads,
+            workflow_global_concurrency,
             agent_default_subagent_model,
             agent_default_subagent_reasoning_effort,
             agent_max_depth,

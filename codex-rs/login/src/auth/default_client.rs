@@ -252,9 +252,10 @@ pub fn create_client_without_request_logging() -> HttpClient {
 
 /// Builds the default Codex HTTP client for a concrete outbound route.
 ///
-/// When route-aware proxy handling is disabled, or the client is running inside the Codex
-/// sandbox, this preserves the default client's existing proxy behavior. Otherwise it resolves
-/// the destination through the shared system/PAC-aware routing policy.
+/// Loopback destinations connect directly. For other destinations, when route-aware proxy
+/// handling is disabled, or the client is running inside the Codex sandbox, this preserves the
+/// default client's existing proxy behavior. Otherwise it resolves the destination through the
+/// shared system/PAC-aware routing policy.
 pub fn create_client_for_route(
     http_client_factory: &HttpClientFactory,
     request_url: &str,
@@ -274,6 +275,15 @@ fn create_client_for_route_with_builder(
     route_class: ClientRouteClass,
     builder: HttpClientBuilder,
 ) -> Result<HttpClient, BuildRouteAwareHttpClientError> {
+    if url::Url::parse(request_url).is_ok_and(|url| match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }) {
+        return builder.build_direct().map_err(Into::into);
+    }
+
     if http_client_factory.network_policy().is_managed() {
         let mut pool = codex_http_client::RouteAwareClientPool::with_builder(
             http_client_factory.clone(),
@@ -290,6 +300,7 @@ fn create_client_for_route_with_builder(
         }
         return Ok(pool.into_client());
     }
+
     if matches!(
         http_client_factory.outbound_proxy_policy(),
         OutboundProxyPolicy::ReqwestDefault
