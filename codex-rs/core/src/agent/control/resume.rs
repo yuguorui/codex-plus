@@ -80,7 +80,7 @@ impl LocalAgentControl {
             let config = thread.session.get_config().await;
             // Usually root resume registered the name from the graph. This also handles
             // stores without a graph, using the same identity restoration path.
-            self.restore_agent_identities(&config, &state, vec![id])
+            self.restore_agent_identities(&config, &state, root_id, vec![id])
                 .await;
             let pin = self
                 .ensure_v2_agent_loaded(config.as_ref().clone(), id, Some(thread))

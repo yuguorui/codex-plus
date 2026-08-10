@@ -833,7 +833,7 @@ impl Session {
         &self,
     ) -> Option<(Arc<tokio::sync::Mutex<TurnState>>, TurnStartOptions)> {
         let mut active_turn = self.active_turn.lock().await;
-        if active_turn.is_some() || self.turn_starts_closed() {
+        if active_turn.is_some() || self.turn_starts_closed() || self.is_closing() {
             return None;
         }
         let has_trigger_turn = self.input_queue.has_trigger_turn_mailbox_items().await;

@@ -153,8 +153,8 @@ fn required_context(text: String) -> ComposedContext {
         reason: None,
     };
     let profile = ContextProfile::synchronous();
-    let context =
-        super::super::prompt::collect_guardian_context(codex_guardian_context::SectionInput {
+    let context = super::super::prompt::collect_guardian_context(
+        codex_guardian_context::SectionInput {
             target: profile.target,
             history: &[],
             transcript: &profile.transcript,
@@ -169,8 +169,10 @@ fn required_context(text: String) -> ComposedContext {
             trusted_skill_paths: &[],
             images: None,
             node_repl: None,
-        })
-        .expect("collect required context");
+        },
+        /*excluded_call_id*/ None,
+    )
+    .expect("collect required context");
     codex_guardian_context::prepare_context(
         std::borrow::Cow::Owned(context),
         &profile,

@@ -171,7 +171,7 @@ impl<'a> ParsedExecCommand<'a> {
                 )));
             }
         };
-        let args: ExecCommandArgs = match native_cwd.as_ref() {
+        let mut args: ExecCommandArgs = match native_cwd.as_ref() {
             Some(native_cwd) => {
                 // The base path only resolves paths nested in the permissions config types.
                 parse_arguments_with_base_path(arguments, native_cwd)?
@@ -182,6 +182,31 @@ impl<'a> ParsedExecCommand<'a> {
                 parse_arguments(arguments)?
             }
         };
+        if !session.tool_policy.allows_bash_command(&args.cmd) {
+            return Err(FunctionCallError::RespondToModel(
+                "command is blocked by the active Bash command clamp".to_string(),
+            ));
+        }
+        if session.tool_policy.has_bash_command_clamp() {
+            // A clamp is a command allowlist, not a shell sandbox. Force a
+            // non-login invocation of the session shell to suppress login
+            // startup files and reject model-selected shells. zsh may still
+            // source .zshenv, so the sandbox/permission layer remains the
+            // actual boundary.
+            if args.shell.is_some() {
+                return Err(FunctionCallError::RespondToModel(
+                    "the active Bash command clamp only permits the default shell; omit shell"
+                        .to_string(),
+                ));
+            }
+            if args.tty {
+                return Err(FunctionCallError::RespondToModel(
+                    "the active Bash command clamp does not permit TTY execution; omit tty"
+                        .to_string(),
+                ));
+            }
+            args.login = Some(false);
+        }
         if args.tty && !session.features().enabled(Feature::UnifiedExecTty) {
             return Err(FunctionCallError::RespondToModel(
                 "TTY execution is disabled by config; omit `tty` or set it to false.".to_string(),

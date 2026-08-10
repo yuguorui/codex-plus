@@ -298,6 +298,11 @@ impl Session {
         input: Vec<TurnInput>,
         task: T,
     ) -> TurnInputSubmission {
+        if self.is_closing() {
+            return TurnInputSubmission::NotSubmitted {
+                reason: NotSubmittedReason::ServerDraining,
+            };
+        }
         // Replace the cache; in-flight acquisitions retain their previous Arc.
         self.services
             .thread_extension_data
@@ -358,6 +363,11 @@ impl Session {
         .await;
 
         let mut active = self.active_turn.lock().await;
+        if self.is_closing() {
+            return TurnInputSubmission::NotSubmitted {
+                reason: NotSubmittedReason::ServerDraining,
+            };
+        }
         // Shutdown closes registration before taking this same lock to abort active work.
         if self.turn_starts_closed() {
             return TurnInputSubmission::NotSubmitted {
@@ -553,6 +563,9 @@ impl Session {
         self: &Arc<Self>,
         sub_id: String,
     ) {
+        if self.is_closing() {
+            return;
+        }
         if !self.input_queue.has_pending_mailbox_items().await {
             return;
         }
@@ -1059,6 +1072,24 @@ impl Session {
             .unified_exec_manager
             .terminate_all_processes()
             .await;
+    }
+
+    pub(crate) async fn has_live_tracked_processes(&self) -> bool {
+        !self.list_background_terminals().await.is_empty()
+    }
+
+    pub(crate) async fn model_stream_active(&self) -> bool {
+        let turn_timing_state = {
+            let active_turn = self.active_turn.lock().await;
+            active_turn
+                .as_ref()
+                .and_then(|active_turn| active_turn.task.as_ref())
+                .map(|task| Arc::clone(&task.turn_context.turn_timing_state))
+        };
+        let Some(turn_timing_state) = turn_timing_state else {
+            return false;
+        };
+        turn_timing_state.sampling_active().await
     }
 
     pub(crate) async fn list_background_terminals(&self) -> Vec<BackgroundTerminalInfo> {

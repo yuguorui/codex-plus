@@ -77,6 +77,8 @@ mod remote_control_cmd;
 mod sandbox_setup;
 mod sandbox_uninstall;
 mod state_db_recovery;
+mod update;
+mod workflow_cmd;
 #[cfg(not(windows))]
 mod wsl_paths;
 
@@ -245,6 +247,12 @@ enum Subcommand {
 
     /// [EXPERIMENTAL] Run the standalone exec-server service.
     ExecServer(ExecServerCommand),
+
+    /// Run or validate deterministic JavaScript workflows.
+    #[command(
+        after_help = "Examples:\n  codex++ workflow run my-workflow --args '{\"topic\":\"rust\"}'\n  codex++ workflow run ./.claude/workflows/review.js\n  codex++ workflow run review-changes --resume wf_abc123\n  codex++ workflow validate ./.claude/workflows/review.js --json"
+    )]
+    Workflow(workflow_cmd::WorkflowCli),
 
     /// Inspect feature flags.
     Features(FeaturesCli),
@@ -1206,6 +1214,21 @@ async fn dispatch_cli(
             // Keep the exec future out of the shared dispatcher's stack frame.
             Box::pin(codex_exec::run_main(exec_cli, arg0_paths.clone())).await?;
         }
+        Some(Subcommand::Workflow(workflow_cli)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "workflow",
+            )?;
+            workflow_cmd::run(
+                workflow_cli,
+                &interactive.shared,
+                root_strict_config,
+                root_config_overrides,
+                arg0_paths,
+            )
+            .await?;
+        }
         Some(Subcommand::Review(ReviewCommand {
             strict_config,
             trust,
@@ -2023,6 +2046,7 @@ fn profile_v2_for_subcommand<'a>(
     match subcommand {
         Subcommand::Agents(_)
         | Subcommand::Exec(_)
+        | Subcommand::Workflow(_)
         | Subcommand::Review(_)
         | Subcommand::Resume(_)
         | Subcommand::Queue(_)
@@ -2037,7 +2061,7 @@ fn profile_v2_for_subcommand<'a>(
             subcommand: DebugSubcommand::PromptInput(_),
         }) => Ok(Some(profile_v2)),
         _ => anyhow::bail!(
-            "--profile only applies to runtime commands, `codex++ mcp`, and `codex++ migrate-nfs-db`: `codex++`, `codex++ exec`, `codex++ review`, `codex++ resume`, `codex++ queue`, `codex++ archive`, `codex++ delete`, `codex++ unarchive`, `codex++ fork`, `codex++ mcp`, `codex++ migrate-nfs-db`, `codex++ sandbox`, and `codex++ debug prompt-input`."
+            "--profile only applies to runtime commands, `codex++ mcp`, and `codex++ migrate-nfs-db`: `codex++`, `codex++ exec`, `codex++ workflow`, `codex++ review`, `codex++ resume`, `codex++ queue`, `codex++ archive`, `codex++ delete`, `codex++ unarchive`, `codex++ fork`, `codex++ mcp`, `codex++ migrate-nfs-db`, `codex++ sandbox`, and `codex++ debug prompt-input`."
         ),
     }
 }
@@ -2361,6 +2385,7 @@ fn reject_unsupported_worktree_for_subcommand(
         Some(Subcommand::Fork(_)) => {
             anyhow::bail!("`codex++ fork --worktree` requires an explicit session ID")
         }
+        Some(Subcommand::Workflow(_)) => Ok(()),
         Some(Subcommand::Exec(command)) => match &command.command {
             None | Some(ExecCommand::Fork(_)) => Ok(()),
             Some(ExecCommand::Resume(_)) => anyhow::bail!(
@@ -2413,6 +2438,7 @@ fn unsupported_subcommand_name_for_strict_config(
         None
         | Some(Subcommand::Agents(_))
         | Some(Subcommand::Exec(_))
+        | Some(Subcommand::Workflow(_))
         | Some(Subcommand::Review(_))
         | Some(Subcommand::ExecServer(_))
         | Some(Subcommand::Resume(_))

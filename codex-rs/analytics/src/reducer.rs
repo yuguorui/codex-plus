@@ -573,6 +573,8 @@ impl TurnToolCounts {
             | ThreadItemPayload::Reasoning { .. }
             | ThreadItemPayload::ImageView { .. }
             | ThreadItemPayload::Sleep(_)
+            | ThreadItemPayload::WorkflowInputAnalysis(_)
+            | ThreadItemPayload::WorkflowResultRead(_)
             | ThreadItemPayload::EnteredReviewMode { .. }
             | ThreadItemPayload::ExitedReviewMode { .. }
             | ThreadItemPayload::ContextCompaction { .. } => return,
@@ -2963,6 +2965,8 @@ pub(crate) fn tracked_tool_item_id(item: &ThreadItemPayload) -> Option<&str> {
         | ThreadItemPayload::SubAgentActivity { .. }
         | ThreadItemPayload::ImageView { .. }
         | ThreadItemPayload::Sleep(_)
+        | ThreadItemPayload::WorkflowInputAnalysis(_)
+        | ThreadItemPayload::WorkflowResultRead(_)
         | ThreadItemPayload::EnteredReviewMode { .. }
         | ThreadItemPayload::ExitedReviewMode { .. }
         | ThreadItemPayload::ContextCompaction { .. } => None,
