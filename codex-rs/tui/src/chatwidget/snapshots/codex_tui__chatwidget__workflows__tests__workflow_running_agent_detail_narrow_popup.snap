@@ -1,0 +1,17 @@
+---
+source: tui/src/chatwidget/workflows_tests.rs
+expression: "render_view_with_size(agent_detail_params_for(WorkflowStatus::Running, 1), 52,\n32,)"
+---
+  finder
+  running · analyzing inputs · Phase 2: Verify ·
+  agent 00000000
+
+
+› 1. ↗ Open transcript
+  2. ↻ Retry attempt
+  3. − Skip agent
+     Runtime
+     Usage
+     Timing
+     Prompt
+     Result

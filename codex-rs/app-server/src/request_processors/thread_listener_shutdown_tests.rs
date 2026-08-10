@@ -73,6 +73,10 @@ async fn listener_shutdown_releases_runtime_and_preserves_other_subscribers(
         Arc::new(GoalService::new()),
         config_manager.clone(),
     );
+    let workflow_service = codex_workflow_extension::WorkflowService::new(
+        Arc::new(codex_extension_api::NoopExtensionEventSink),
+        Arc::downgrade(&test.thread_manager),
+    );
     let processor = ThreadRequestProcessor::new(
         auth,
         test.thread_manager.clone(),
@@ -92,6 +96,7 @@ async fn listener_shutdown_releases_runtime_and_preserves_other_subscribers(
         /*turn_cost_worker*/ None,
         Vec::new(),
         Arc::new(SampleResponseRegistry::default()),
+        workflow_service,
     );
     let connection_id = ConnectionId(1);
     let disconnecting_connection_id = ConnectionId(2);
