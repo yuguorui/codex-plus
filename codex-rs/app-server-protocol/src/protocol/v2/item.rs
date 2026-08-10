@@ -22,6 +22,9 @@ pub use codex_extension_items::image_generation::ImageGenerationItem;
 pub use codex_extension_items::sleep::SleepItem;
 pub use codex_extension_items::web_search::WebSearchAction;
 pub use codex_extension_items::web_search::WebSearchItem;
+pub use codex_extension_items::workflow::WorkflowInputAnalysisItem;
+pub use codex_extension_items::workflow::WorkflowResultReadItem;
+pub use codex_extension_items::workflow::WorkflowResultReadStatus;
 use codex_protocol::approvals::ExecApprovalKind as CoreExecApprovalKind;
 use codex_protocol::approvals::GuardianAssessmentAction as CoreGuardianAssessmentAction;
 use codex_protocol::approvals::GuardianAssessmentDecisionSource as CoreGuardianAssessmentDecisionSource;
@@ -475,6 +478,8 @@ pub enum ThreadItemPayload {
         path: LegacyAppPathString,
     },
     Sleep(SleepItem),
+    WorkflowInputAnalysis(WorkflowInputAnalysisItem),
+    WorkflowResultRead(WorkflowResultReadItem),
     ImageGeneration(ImageGenerationItem),
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
@@ -535,6 +540,8 @@ impl ThreadItemPayload {
             | Self::ContextCompaction { id, .. } => id,
             Self::WebSearch(item) => &item.id,
             Self::Sleep(item) => &item.id,
+            Self::WorkflowInputAnalysis(item) => &item.id,
+            Self::WorkflowResultRead(item) => &item.id,
             Self::ImageGeneration(item) => &item.id,
         }
     }
@@ -1066,6 +1073,8 @@ impl From<CoreTurnItem> for ThreadItemPayload {
                 ExtensionItem::ImageGeneration(item) => Self::ImageGeneration(item),
                 ExtensionItem::Sleep(item) => Self::Sleep(item),
                 ExtensionItem::WebSearch(item) => Self::WebSearch(item),
+                ExtensionItem::WorkflowInputAnalysis(item) => Self::WorkflowInputAnalysis(item),
+                ExtensionItem::WorkflowResultRead(item) => Self::WorkflowResultRead(item),
             },
             CoreTurnItem::ImageGeneration(image) => Self::ImageGeneration(ImageGenerationItem {
                 id: image.id,

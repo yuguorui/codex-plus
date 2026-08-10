@@ -45,8 +45,9 @@ async fn handle_close_agent(
         .services
         .local_agent_runtime
         .control(session.session_id());
-    let receiver_agent = local_agent_control.get_agent_metadata(agent_id);
-    let receiver_agent = receiver_agent.unwrap_or_default();
+    let receiver_agent = local_agent_control
+        .authorize_agent_access(session.thread_id, agent_id)
+        .map_err(|err| collab_agent_error(agent_id, err))?;
     session
         .emit_turn_item_started(
             &turn,
@@ -66,7 +67,9 @@ async fn handle_close_agent(
         .await;
     // Shutdown may remove the target before a descendant fails to close.
     let previous_status = local_agent_control.get_status(agent_id).await;
-    let result = local_agent_control.close_agent(agent_id).await;
+    let result = local_agent_control
+        .close_agent(session.thread_id, agent_id)
+        .await;
     let (status, receiver_agent) = match &result {
         Ok(snapshot) => (
             snapshot.status().cloned().unwrap_or(AgentStatus::NotFound),

@@ -131,6 +131,9 @@ fn server_notification_requires_delivery(notification: &ServerNotification) -> b
                 },
                 ..
             })
+            | ServerNotification::WorkflowStarted(_)
+            | ServerNotification::WorkflowProgress(_)
+            | ServerNotification::WorkflowCompleted(_)
     )
 }
 
@@ -621,7 +624,10 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
         let mut pending_request_responses =
             HashMap::<RequestId, oneshot::Sender<PendingClientRequestResponse>>::new();
         let mut shutdown_ack = None;
-        let mut pending_event: Option<(InProcessServerEvent, Option<oneshot::Sender<()>>)> = None;
+        let mut pending_event: Option<(
+            InProcessServerEvent,
+            Option<oneshot::Sender<crate::outgoing_message::OutgoingWriteResult>>,
+        )> = None;
 
         loop {
             tokio::select! {
@@ -703,7 +709,8 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
                     let Some((event, written)) = pending_event.take() else { continue };
                     permit.send(event);
                     if let Some(written) = written {
-                        let _ = written.send(());
+                        let _ = written
+                            .send(crate::outgoing_message::OutgoingWriteResult::Written);
                     }
                 }
                 queued_message = async {
@@ -788,25 +795,19 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
                                 ));
                                 continue;
                             }
-                            if let Err(send_error) =
-                                event_tx.try_send(InProcessServerEvent::ServerNotification(
+                            if event_tx
+                                .try_send(InProcessServerEvent::ServerNotification(
                                     Box::new(notification),
                                 ))
+                                .is_err()
                             {
-                                match send_error {
-                                    mpsc::error::TrySendError::Full(_) => {
-                                        warn!("dropping in-process server notification (queue full)");
-                                        continue;
-                                    }
-                                    mpsc::error::TrySendError::Closed(_) => {
-                                        break;
-                                    }
-                                }
+                                break;
                             }
                         }
                     }
                     if let Some(write_complete_tx) = queued_message.write_complete_tx {
-                        let _ = write_complete_tx.send(());
+                        let _ = write_complete_tx
+                            .send(crate::outgoing_message::OutgoingWriteResult::Written);
                     }
                 }
             }

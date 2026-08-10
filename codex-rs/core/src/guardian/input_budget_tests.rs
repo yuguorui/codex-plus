@@ -150,6 +150,7 @@ fn required_context(text: String) -> ComposedContext {
     let context = super::super::prompt::collect_guardian_context(
         &Vec::<ResponseItem>::new(),
         &ContextProfile::synchronous(),
+        /*excluded_call_id*/ None,
         /*root_conversation_candidates*/ None,
         &[],
         Some(&action),
