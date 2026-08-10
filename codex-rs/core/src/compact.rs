@@ -93,6 +93,7 @@ pub(crate) async fn build_compaction_initial_context(
     sess: &Session,
     initial_context_injection: &InitialContextInjection,
 ) -> (Vec<ResponseItemEnvelope>, Option<WorldStateSnapshot>) {
+    let retained_workflow_child_context = sess.retained_workflow_child_context().await;
     // Return the rendered state with its items so history and its baseline stay identical.
     match initial_context_injection {
         InitialContextInjection::BeforeLastUserMessage {
@@ -102,12 +103,14 @@ pub(crate) async fn build_compaction_initial_context(
             let (items, snapshot) = sess
                 .build_initial_context_with_world_state(step_context, world_state.as_ref())
                 .await;
-            (
-                items.into_iter().map(ResponseItemEnvelope::new).collect(),
-                Some(snapshot),
-            )
+            let mut items = items
+                .into_iter()
+                .map(ResponseItemEnvelope::new)
+                .collect::<Vec<_>>();
+            items.extend(retained_workflow_child_context);
+            (items, Some(snapshot))
         }
-        InitialContextInjection::DoNotInject => (Vec::new(), None),
+        InitialContextInjection::DoNotInject => (retained_workflow_child_context, None),
     }
 }
 
