@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::PoisonError;
+use std::sync::Weak;
 
 use async_channel::Sender;
 use codex_exec_server::Environment;
@@ -47,6 +48,39 @@ use crate::shell_snapshot::SnapshotCredentialBrokerState;
 
 // Reject pathological selected cwd values at the environment-selection boundary.
 const MAX_TURN_ENVIRONMENT_CWD_BYTES: usize = 8 * 1024;
+
+struct ExecutorIdEntry {
+    environment: Weak<Environment>,
+    id: String,
+}
+
+static EXECUTOR_IDS: OnceLock<Mutex<HashMap<usize, ExecutorIdEntry>>> = OnceLock::new();
+
+pub(crate) fn opaque_executor_id(environment: &Arc<Environment>) -> String {
+    let key = Arc::as_ptr(environment) as usize;
+    let mut entries = EXECUTOR_IDS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    entries.retain(|_, entry| entry.environment.strong_count() > 0);
+    if let Some(entry) = entries.get(&key)
+        && entry
+            .environment
+            .upgrade()
+            .is_some_and(|existing| Arc::ptr_eq(&existing, environment))
+    {
+        return entry.id.clone();
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    entries.insert(
+        key,
+        ExecutorIdEntry {
+            environment: Arc::downgrade(environment),
+            id: id.clone(),
+        },
+    );
+    id
+}
 
 /// Records whether a normalized config should follow later thread setting updates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -193,6 +227,7 @@ struct SelectedTurnEnvironment {
     selection: TurnEnvironmentSelection,
     config_origin: EnvironmentConfigOrigin,
     environment: Arc<Environment>,
+    pinned_executor: bool,
     // Selection clones share one listener; the final handle drop aborts it.
     connection_events_task: Option<Arc<AbortOnDropHandle<()>>>,
     resolution: TurnEnvironmentResolution,
@@ -316,6 +351,7 @@ impl ThreadEnvironments {
                     selection,
                     config_origin,
                     environment: selected_environment,
+                    pinned_executor: true,
                     connection_events_task: None,
                     resolution,
                     pending_completion: None,
@@ -388,8 +424,9 @@ impl ThreadEnvironments {
             if let Some(environment) = current.iter().find(|environment| {
                 let previous = &environment.selection;
                 previous.environment_id == selected_environment.environment_id
-                    && previous.cwd == selected_environment.cwd
-                    && previous.workspace_roots == selected_environment.workspace_roots
+                    && (environment.pinned_executor
+                        || (previous.cwd == selected_environment.cwd
+                            && previous.workspace_roots == selected_environment.workspace_roots))
             }) {
                 let failed =
                     matches!(
@@ -474,6 +511,7 @@ impl ThreadEnvironments {
                 selection: selected_environment,
                 config_origin,
                 environment,
+                pinned_executor: false,
                 connection_events_task,
                 resolution,
                 pending_completion,
@@ -1244,6 +1282,74 @@ mod tests {
         turn_environments.update_selections(selections);
         turn_environments.snapshot().await;
         turn_environments
+    }
+
+    #[tokio::test]
+    async fn captured_snapshot_keeps_executor_after_same_id_registry_rebind() {
+        let cwd = tempfile::tempdir().unwrap();
+        let cwd = AbsolutePathBuf::try_from(cwd.path().to_path_buf()).unwrap();
+        let config = test_environment_config();
+        let selection = TurnEnvironmentSelection {
+            environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
+            cwd: PathUri::from_abs_path(&cwd),
+            workspace_roots: vec![PathUri::from_abs_path(&cwd)],
+            config: EnvironmentConfigState::Ready(config.clone()),
+        };
+        let approved_environment =
+            Arc::new(Environment::create_for_tests(Some("ws://127.0.0.1:1".to_string())).unwrap());
+        let captured = TurnEnvironmentSnapshot {
+            environments: vec![TurnEnvironmentState::Ready(TurnEnvironment::new(
+                selection.clone(),
+                EnvironmentConfigOrigin::Thread,
+                Arc::clone(&approved_environment),
+                None,
+            ))],
+        };
+        let rebound_manager = Arc::new(
+            EnvironmentManager::create_for_tests(
+                Some("ws://127.0.0.1:2".to_string()),
+                /*local_runtime_paths*/ None,
+            )
+            .await,
+        );
+        let rebound_environment = rebound_manager
+            .get_environment(REMOTE_ENVIRONMENT_ID)
+            .expect("rebound environment");
+        let approved_executor_id = opaque_executor_id(&approved_environment);
+        assert!(uuid::Uuid::parse_str(&approved_executor_id).is_ok());
+        assert_ne!(
+            approved_executor_id,
+            opaque_executor_id(&rebound_environment)
+        );
+        let child = ThreadEnvironments::new(
+            rebound_manager,
+            crate::shell::default_user_shell(),
+            ThreadEnvironmentDefaults::new(config.clone(), SandboxType::None),
+            ShellSnapshot::disabled(),
+            captured,
+            /*non_blocking_snapshots*/ false,
+        );
+
+        let worktree = cwd.join("workflow-worktree");
+        let worktree_selection = TurnEnvironmentSelection {
+            cwd: PathUri::from_abs_path(&worktree),
+            workspace_roots: vec![PathUri::from_abs_path(&worktree)],
+            config: EnvironmentConfigState::FromThread,
+            ..selection
+        };
+        child.update_selections(std::slice::from_ref(&worktree_selection));
+        let child_snapshot = child.snapshot().await;
+        let launched_environment = child_snapshot
+            .primary_environment()
+            .expect("captured child environment");
+
+        assert!(Arc::ptr_eq(&launched_environment, &approved_environment));
+        assert!(!Arc::ptr_eq(&launched_environment, &rebound_environment));
+        assert_eq!(
+            opaque_executor_id(&launched_environment),
+            approved_executor_id
+        );
+        assert_eq!(child_snapshot.to_selections(), vec![worktree_selection]);
     }
 
     fn test_runtime_paths() -> ExecServerRuntimePaths {

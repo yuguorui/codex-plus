@@ -403,6 +403,7 @@ mod turn_runtime;
 use self::turn_lifecycle::TurnLifecycleState;
 mod usage;
 mod user_messages;
+mod workflows;
 mod working_directory;
 use self::user_messages::PendingSteer;
 #[cfg(test)]
@@ -429,6 +430,7 @@ use self::user_messages::remap_placeholders_for_message;
 use self::user_messages::user_message_display_for_history;
 use self::user_messages::user_message_for_restore;
 use self::user_messages::user_message_preview_text;
+use self::workflows::WorkflowUiState;
 mod warnings;
 use self::warnings::WarningDisplayState;
 pub(crate) use crate::branch_summary::StatusLineGitSummary;
@@ -647,6 +649,8 @@ pub(crate) struct ChatWidget {
     active_hook_cell: Option<HookCell>,
     // Reused for built-in pet CDN requests so redirects remain route-aware.
     pub(crate) pet_http_client: codex_http_client::RouteAwareClientPool,
+    // Dynamic workflows remain visible without replacing streamed answer/tool cells.
+    workflows: WorkflowUiState,
     // Ambient companion rendered over the transcript area, never inside the footer rows.
     ambient_pet: Option<crate::pets::AmbientPet>,
     pet_picker_preview_state: crate::pets::PetPickerPreviewState,
@@ -702,6 +706,9 @@ pub(crate) struct ChatWidget {
     // Runtime metrics accumulated across delta snapshots for the active turn.
     turn_runtime_metrics: RuntimeMetricsSummary,
     last_rendered_width: std::cell::Cell<Option<u16>>,
+    // Current full-terminal height supplied by App before each frame; used to keep
+    // non-flex live workflow details from starving the composer.
+    last_screen_height: std::cell::Cell<Option<u16>>,
     // Feedback sink for /feedback
     feedback: codex_feedback::CodexFeedback,
     // Current session rollout path (if known)
@@ -1161,6 +1168,7 @@ impl ChatWidget {
     pub(crate) fn pre_draw_tick(&mut self) {
         self.update_due_hook_visibility();
         self.schedule_hook_timer_if_needed();
+        self.schedule_workflow_frame_if_needed();
         self.bottom_pane.pre_draw_tick();
         self.flush_realtime_transcript_history();
         self.refresh_realtime_microphone_level();
@@ -1951,6 +1959,8 @@ impl ChatWidget {
     pub(crate) fn active_cell_transcript_key(&self) -> Option<ActiveCellTranscriptKey> {
         let cell = self.transcript.active_cell.as_ref();
         let mut realtime_cells = self.realtime_conversation.live_transcript_cells();
+        let hook_cell = self.active_hook_cell.as_ref();
+        let workflow_cell = self.workflows.has_active_runs().then_some(&self.workflows);
         let rate_limit_reset_hint = self.pending_rate_limit_reset_hint();
         if cell.is_none()
             && self
@@ -1959,6 +1969,8 @@ impl ChatWidget {
                 .next()
                 .is_none()
             && self.realtime_conversation.pending_history_cells.is_empty()
+            && hook_cell.is_none()
+            && workflow_cell.is_none()
             && rate_limit_reset_hint.is_none()
         {
             return None;
@@ -1985,7 +1997,11 @@ impl ChatWidget {
                 .unwrap_or(/*default*/ false),
             animation_tick: cell
                 .and_then(|cell| cell.transcript_animation_tick())
-                .or_else(|| realtime_cells.find_map(|cell| cell.transcript_animation_tick())),
+                .or_else(|| realtime_cells.find_map(|cell| cell.transcript_animation_tick()))
+                .or_else(|| {
+                    hook_cell.and_then(super::history_cell::HistoryCell::transcript_animation_tick)
+                })
+                .or_else(|| workflow_cell.and_then(HistoryCell::transcript_animation_tick)),
         })
     }
 

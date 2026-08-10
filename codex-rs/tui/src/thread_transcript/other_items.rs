@@ -11,6 +11,7 @@ use crate::multi_agents;
 use codex_app_server_protocol::PatchApplyStatus;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::WebSearchAction;
+use codex_app_server_protocol::WorkflowResultReadStatus;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use ratatui::style::Stylize as _;
 use std::sync::Arc;
@@ -130,6 +131,26 @@ pub(super) fn cells(item: ThreadItem, cwd: &AbsolutePathBuf) -> TranscriptCells 
             if let Some(cell) = history_cell::DynamicToolCallCell::from_item(item) {
                 cells.push(Arc::new(cell));
             }
+        }
+        ThreadItem::WorkflowInputAnalysis(_) => {
+            cells.push(Arc::new(PlainHistoryCell::new(vec![
+                "workflow inputs analyzed".dim().into(),
+            ])));
+        }
+        ThreadItem::WorkflowResultRead(item) => {
+            let action = match item.status {
+                WorkflowResultReadStatus::InProgress => "workflow result read in progress",
+                WorkflowResultReadStatus::Completed => "workflow result read",
+                WorkflowResultReadStatus::Failed => "workflow result read failed",
+            };
+            let run_id = item
+                .run_id
+                .as_deref()
+                .map(|run_id| format!(": {run_id}"))
+                .unwrap_or_default();
+            cells.push(Arc::new(PlainHistoryCell::new(vec![
+                format!("{action}{run_id}").dim().into(),
+            ])));
         }
         ThreadItem::UserMessage { .. }
         | ThreadItem::AgentMessage { .. }
