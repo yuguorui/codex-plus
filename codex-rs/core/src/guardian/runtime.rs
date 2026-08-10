@@ -32,6 +32,7 @@ impl From<GuardianApprovalRequest> for ReviewAction {
             | GuardianApprovalRequest::ApplyPatch { .. }
             | GuardianApprovalRequest::NetworkAccess { .. }
             | GuardianApprovalRequest::McpToolCall { .. }
+            | GuardianApprovalRequest::ExtensionTool { .. }
             | GuardianApprovalRequest::RequestPermissions { .. } => {
                 super::approval_request::guardian_request_target_item_id(&request)
                     .map(str::to_owned)
