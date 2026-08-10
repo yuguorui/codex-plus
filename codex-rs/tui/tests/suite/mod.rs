@@ -17,5 +17,6 @@ mod status_indicator;
 mod thread_title;
 mod vt100_history;
 mod vt100_live_commit;
+mod workflow_e2e;
 #[cfg(unix)]
 mod worktree_stack;
