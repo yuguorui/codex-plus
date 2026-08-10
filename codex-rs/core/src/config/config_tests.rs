@@ -214,6 +214,64 @@ async fn derive_legacy_sandbox_policy_for_test(
         })
 }
 
+#[test]
+fn workflow_global_concurrency_resolves_config_and_environment() {
+    let configured = NonZeroUsize::new(16).unwrap();
+    let environment = NonZeroUsize::new(32).unwrap();
+
+    assert_eq!(
+        resolve_workflow_global_concurrency(None, None).unwrap(),
+        None
+    );
+    assert_eq!(
+        resolve_workflow_global_concurrency(Some(configured), None).unwrap(),
+        Some(configured)
+    );
+    assert_eq!(
+        resolve_workflow_global_concurrency(Some(configured), Some("32")).unwrap(),
+        Some(environment)
+    );
+    assert_eq!(
+        resolve_workflow_global_concurrency(None, Some(" 256 ")).unwrap(),
+        Some(NonZeroUsize::new(256).unwrap())
+    );
+    assert_eq!(
+        resolve_workflow_global_concurrency(None, Some("0"))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        resolve_workflow_global_concurrency(None, Some("257"))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        resolve_workflow_global_concurrency(Some(NonZeroUsize::new(257).unwrap()), Some("32"))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+}
+
+#[test]
+fn workflow_global_concurrency_parses_from_toml() {
+    let config: ConfigToml = toml::from_str("[workflow]\nglobal_concurrency = 32\n")
+        .expect("workflow concurrency should parse");
+
+    assert_eq!(
+        config
+            .workflow
+            .and_then(|workflow| workflow.global_concurrency),
+        Some(NonZeroUsize::new(32).unwrap())
+    );
+    assert!(
+        toml::from_str::<ConfigToml>("[workflow]\nglobal_concurrency = 0\n").is_err(),
+        "zero workflow concurrency should be rejected"
+    );
+}
+
 #[tokio::test]
 async fn load_config_normalizes_relative_cwd_override() -> std::io::Result<()> {
     let expected_cwd = AbsolutePathBuf::relative_to_current_dir("nested")?;
