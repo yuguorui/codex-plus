@@ -324,6 +324,7 @@ async fn new_config(
         tool_output_token_limit: None,
         agents_enabled: true,
         agent_max_threads: Some(6),
+        workflow_global_concurrency: None,
         agent_default_subagent_model: None,
         agent_default_subagent_reasoning_effort: None,
         agent_interrupt_message_enabled: false,
