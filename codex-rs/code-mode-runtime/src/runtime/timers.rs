@@ -8,6 +8,7 @@ use super::value::value_to_error_text;
 
 pub(super) struct ScheduledTimeout {
     callback: v8::Global<v8::Function>,
+    continuation_scope: v8::Global<v8::Value>,
     // Clearing the timeout or dropping the isolate also cancels its sleep.
     _task: AbortOnDropHandle<()>,
 }
@@ -30,6 +31,8 @@ pub(super) fn schedule_timeout(
         .unwrap_or(0);
 
     let callback = v8::Global::new(scope, callback);
+    let continuation_scope =
+        v8::Global::new(scope, scope.get_continuation_preserved_embedder_data());
     let state = scope
         .get_slot_mut::<RuntimeState>()
         .ok_or_else(|| "runtime state unavailable".to_string())?;
@@ -45,6 +48,7 @@ pub(super) fn schedule_timeout(
         timeout_id,
         ScheduledTimeout {
             callback,
+            continuation_scope,
             _task: AbortOnDropHandle::new(task),
         },
     );
@@ -83,9 +87,13 @@ pub(super) fn invoke_timeout_callback(
 
     let tc = std::pin::pin!(v8::TryCatch::new(scope));
     let mut tc = tc.init();
+    let previous_scope = tc.get_continuation_preserved_embedder_data();
+    let continuation_scope = v8::Local::new(&tc, &callback.continuation_scope);
+    tc.set_continuation_preserved_embedder_data(continuation_scope);
     let callback = v8::Local::new(&tc, &callback.callback);
     let receiver = v8::undefined(&tc).into();
     let _ = callback.call(&tc, receiver, &[]);
+    tc.set_continuation_preserved_embedder_data(previous_scope);
     if tc.has_caught() {
         return Err(tc
             .exception()
