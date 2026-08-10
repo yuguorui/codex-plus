@@ -1,10 +1,12 @@
 use super::callbacks::audio_callback;
 use super::callbacks::clear_timeout_callback;
+use super::callbacks::continuation_scope_callback;
 use super::callbacks::exit_callback;
 use super::callbacks::generated_image_callback;
 use super::callbacks::image_callback;
 use super::callbacks::load_callback;
 use super::callbacks::notify_callback;
+use super::callbacks::set_continuation_scope_callback;
 use super::callbacks::set_timeout_callback;
 use super::callbacks::store_callback;
 use super::callbacks::text_callback;
@@ -25,7 +27,17 @@ pub(super) fn install_globals(
     let tools = build_tools_object(scope, enabled_tools)?;
     let all_tools = build_all_tools_value(scope, enabled_tools)?;
     let clear_timeout = helper_function(scope, "clearTimeout", clear_timeout_callback)?;
+    let continuation_scope = helper_function(
+        scope,
+        "__codexContinuationScope",
+        continuation_scope_callback,
+    )?;
     let set_timeout = helper_function(scope, "setTimeout", set_timeout_callback)?;
+    let set_continuation_scope = helper_function(
+        scope,
+        "__codexSetContinuationScope",
+        set_continuation_scope_callback,
+    )?;
     let text = helper_function(scope, "text", text_callback)?;
     let image = helper_function(scope, "image", image_callback)?;
     let audio = helper_function(scope, "audio", audio_callback)?;
@@ -39,7 +51,19 @@ pub(super) fn install_globals(
     set_global(scope, global, "tools", tools.into())?;
     set_global(scope, global, "ALL_TOOLS", all_tools)?;
     set_global(scope, global, "clearTimeout", clear_timeout.into())?;
+    set_global(
+        scope,
+        global,
+        "__codexContinuationScope",
+        continuation_scope.into(),
+    )?;
     set_global(scope, global, "setTimeout", set_timeout.into())?;
+    set_global(
+        scope,
+        global,
+        "__codexSetContinuationScope",
+        set_continuation_scope.into(),
+    )?;
     set_global(scope, global, "text", text.into())?;
     set_global(scope, global, "image", image.into())?;
     set_global(scope, global, "audio", audio.into())?;
