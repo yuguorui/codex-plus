@@ -32,7 +32,7 @@ use std::time::Duration;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Stable identifier for a transport connection.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ConnectionId(pub u64);
 
 impl fmt::Display for ConnectionId {

@@ -95,4 +95,7 @@ export type { WebSearchLocation } from "./WebSearchLocation";
 export type { WebSearchMode } from "./WebSearchMode";
 export type { WebSearchProvider } from "./WebSearchProvider";
 export type { WebSearchToolConfig } from "./WebSearchToolConfig";
+export type { WorkflowInputAnalysisItem } from "./WorkflowInputAnalysisItem";
+export type { WorkflowResultReadItem } from "./WorkflowResultReadItem";
+export type { WorkflowResultReadStatus } from "./WorkflowResultReadStatus";
 export * as v2 from "./v2";

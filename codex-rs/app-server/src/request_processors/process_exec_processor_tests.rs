@@ -4,6 +4,7 @@
 use super::*;
 use crate::outgoing_message::OutgoingEnvelope;
 use crate::outgoing_message::OutgoingMessage;
+use crate::outgoing_message::OutgoingWriteResult;
 use codex_analytics::AnalyticsEventsClient;
 use pretty_assertions::assert_eq;
 
@@ -35,7 +36,7 @@ fn start_collector(
 
 async fn read_delta(
     notifications: &mut mpsc::Receiver<OutgoingEnvelope>,
-) -> (Vec<u8>, oneshot::Sender<()>) {
+) -> (Vec<u8>, oneshot::Sender<OutgoingWriteResult>) {
     let Some(OutgoingEnvelope::ToConnection {
         message: OutgoingMessage::AppServerNotification(envelope),
         write_complete_tx: Some(written),
@@ -61,17 +62,17 @@ async fn slow_writes_deliver_the_entire_tail_after_exit() {
     output.send(vec![2]).await.unwrap();
     let slow_write = Duration::from_millis(IO_DRAIN_TIMEOUT_MS * 2);
     tokio::time::advance(slow_write).await;
-    written.send(()).unwrap();
+    written.send(OutgoingWriteResult::Written).unwrap();
 
     let (second, written) = read_delta(&mut notifications).await;
     tokio::time::advance(slow_write).await;
     // A descendant can still produce bytes while the previous write is blocked.
     output.send(vec![3]).await.unwrap();
-    written.send(()).unwrap();
+    written.send(OutgoingWriteResult::Written).unwrap();
 
     let (third, written) = read_delta(&mut notifications).await;
     drop(output);
-    written.send(()).unwrap();
+    written.send(OutgoingWriteResult::Written).unwrap();
     assert_eq!([first, second, third], [vec![1], vec![2], vec![3]]);
     let capture = collector.await.unwrap();
     assert!(!capture.output_incomplete);
@@ -88,7 +89,7 @@ async fn inherited_pipe_does_not_restart_the_grace_period_for_each_chunk() {
     tokio::time::advance(grace / 2).await;
     output.send(vec![1]).await.unwrap();
     let (_, written) = read_delta(&mut notifications).await;
-    written.send(()).unwrap();
+    written.send(OutgoingWriteResult::Written).unwrap();
 
     let capture = tokio::time::timeout(grace / 2 + Duration::from_millis(1), collector)
         .await
@@ -229,6 +230,6 @@ async fn windows_terminal_reports_exit_before_closing_the_console() {
     })
     .await
     .expect("the attached child should still be alive when the client receives process/exited");
-    written.send(()).unwrap();
+    written.send(OutgoingWriteResult::Written).unwrap();
     process.await.unwrap();
 }
