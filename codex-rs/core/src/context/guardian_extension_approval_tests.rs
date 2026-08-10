@@ -1,0 +1,16 @@
+use codex_utils_output_truncation::approx_token_count;
+
+use super::*;
+
+#[test]
+fn descriptor_is_a_separate_bounded_context_fragment() {
+    let fragment = GuardianExtensionApproval::new(
+        &"tool".repeat(1_000),
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        usize::MAX,
+    );
+
+    let rendered = fragment.render().into_text().unwrap_or_default();
+    assert!(approx_token_count(&rendered) < 1_000);
+    assert!(rendered.contains("read_guardian_approval_artifact"));
+}

@@ -1,6 +1,7 @@
 //! Captures synchronous evidence once for the common preparation pass.
 //! Reviewer-history token measurement is needed only for captured images.
 
+use codex_guardian_context::TranscriptSelection;
 use codex_guardian_reviewer::GuardianPromptItems;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ImageReference;
@@ -12,15 +13,20 @@ use codex_tools::normalize_output_image_detail;
 use std::borrow::Cow;
 use tracing::warn;
 
+use super::super::GuardianApprovalRequest;
 use super::super::prompt::GuardianPromptMode;
 use super::super::prompt::GuardianTranscriptHistory;
 use super::super::prompt::collect_guardian_prompt_items_with_parent_turn;
 use super::GuardianReviewSession;
 use super::GuardianReviewSessionParams;
+use crate::context::ContextualUserFragment;
+use crate::context::GuardianExtensionApproval;
 use crate::context_manager::ContextManager;
 use crate::image_preparation::ImagePreparationMode;
 use crate::image_preparation::resize_image;
 use crate::image_preparation::unified_image_budget_enabled;
+
+const GUARDIAN_MAX_APPROVAL_REASON_TOKENS: usize = 512;
 
 pub(super) async fn build_guardian_prompt_items(
     params: &GuardianReviewSessionParams,
@@ -70,7 +76,24 @@ pub(super) async fn build_guardian_prompt_items(
         model_info,
         mode: image_mode,
     };
-    codex_guardian_reviewer::compose_guardian_prompt_with_preparation(
+    let extension_action_intro = match &params.request {
+        GuardianApprovalRequest::ExtensionTool { .. } => {
+            let (selection, _) = mode.select(
+                collected.sections.transcript_entries(),
+                collected.history_version,
+            );
+            Some(match selection {
+                TranscriptSelection::Full(_) => {
+                    "The Codex agent has requested the following action:\n"
+                }
+                TranscriptSelection::Delta { .. } => {
+                    "The Codex agent has requested the following next action:\n"
+                }
+            })
+        }
+        _ => None,
+    };
+    let mut prompt_items = codex_guardian_reviewer::compose_guardian_prompt_with_preparation(
         collected.sections,
         &collected.profile,
         collected.mode,
@@ -86,7 +109,48 @@ pub(super) async fn build_guardian_prompt_items(
             estimate_tokens: crate::context_manager::estimate_item_token_count,
         },
     )
-    .await
+    .await?;
+    if let Some(extension_action_intro) = extension_action_intro
+        && let GuardianApprovalRequest::ExtensionTool {
+            tool_name,
+            artifact,
+            ..
+        } = &params.request
+    {
+        prompt_items
+            .context
+            .push_user_text(extension_action_intro.to_string());
+        prompt_items
+            .context
+            .push_user_text(">>> APPROVAL REQUEST START\n".to_string());
+        if let Some(reason) = params
+            .reasons
+            .retry
+            .as_ref()
+            .or(params.reasons.approval.as_ref())
+        {
+            let reason =
+                codex_guardian_context::truncate_text(reason, GUARDIAN_MAX_APPROVAL_REASON_TOKENS);
+            prompt_items
+                .context
+                .push_user_text("Retry reason:\n".to_string());
+            prompt_items.context.push_user_text(format!("{reason}\n\n"));
+        }
+        prompt_items.context.push_user_text(
+            "Review the complete content-addressed extension action with `read_guardian_approval_artifact`. Continue reading from each returned offset until the artifact is complete, then assess that exact action.\n"
+                .to_string(),
+        );
+        prompt_items.context.push_user_text(
+            GuardianExtensionApproval::new(tool_name, artifact.sha256(), artifact.byte_length())
+                .render()
+                .into_text()
+                .unwrap_or_default(),
+        );
+        prompt_items
+            .context
+            .push_user_text(">>> APPROVAL REQUEST END\n".to_string());
+    }
+    Ok(prompt_items)
 }
 
 struct ReviewImagePreparer<'a> {
