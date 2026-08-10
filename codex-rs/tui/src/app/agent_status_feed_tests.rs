@@ -2,6 +2,8 @@ use super::*;
 use codex_app_server_protocol::CommandExecutionSource;
 use codex_app_server_protocol::CommandExecutionStatus;
 use codex_app_server_protocol::ItemCompletedNotification;
+use codex_app_server_protocol::WorkflowResultReadItem;
+use codex_app_server_protocol::WorkflowResultReadStatus;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
 #[test]
@@ -118,4 +120,31 @@ fn agent_status_uses_reasoning_summaries_only() {
     "###);
     assert!(!rendered.contains("hidden raw reasoning"));
     assert!(!rendered.contains("raw-only reasoning"));
+}
+
+#[test]
+fn agent_status_reports_workflow_result_read_lifecycle() {
+    let summaries = [
+        WorkflowResultReadStatus::InProgress,
+        WorkflowResultReadStatus::Completed,
+        WorkflowResultReadStatus::Failed,
+    ]
+    .map(|status| {
+        activity_summary(&ThreadItemPayload::WorkflowResultRead(
+            WorkflowResultReadItem {
+                id: "read-result".to_string(),
+                run_id: None,
+                status,
+            },
+        ))
+    });
+
+    assert_eq!(
+        summaries,
+        [
+            Some("Reading a Workflow result".to_string()),
+            Some("Read a Workflow result".to_string()),
+            Some("Failed to read a Workflow result".to_string()),
+        ]
+    );
 }
