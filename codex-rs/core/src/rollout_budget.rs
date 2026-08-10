@@ -210,6 +210,17 @@ impl RolloutBudget {
         );
     }
 
+    pub(crate) fn enforce_limit(&self) -> bool {
+        self.lock().is_none_or(|state| state.config.enforce_limit)
+    }
+
+    pub(crate) fn token_snapshot(&self) -> Option<(u64, u64)> {
+        let state = self.lock()?;
+        let total = state.config.limit_budget.max(0.0).floor() as u64;
+        let spent = state.posted.total().max(0.0).floor() as u64;
+        Some((total, spent))
+    }
+
     fn lock(&self) -> Option<MutexGuard<'_, RolloutBudgetState>> {
         self.state.get().map(|state| {
             state

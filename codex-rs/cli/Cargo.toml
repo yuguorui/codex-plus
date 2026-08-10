@@ -83,6 +83,7 @@ codex-utils-path = { workspace = true }
 codex-utils-path-uri = { workspace = true }
 codex-utils-redacted-string = { workspace = true }
 codex-websocket-auth = { workspace = true }
+codex-workflow = { workspace = true }
 crossterm = { workspace = true, features = ["event-stream"] }
 futures = { workspace = true }
 http = { workspace = true }

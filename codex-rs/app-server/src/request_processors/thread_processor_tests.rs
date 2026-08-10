@@ -1289,6 +1289,10 @@ mod thread_processor_behavior_tests {
         );
         let thread_watch_manager = ThreadWatchManager::new();
         let thread_status = thread_watch_manager.subscribe(thread_id).await;
+        let workflow_service = codex_workflow_extension::WorkflowService::new(
+            Arc::new(codex_extension_api::NoopExtensionEventSink),
+            Arc::downgrade(&test.thread_manager),
+        );
         ensure_conversation_listener(
             ListenerTaskContext {
                 thread_manager: test.thread_manager.clone(),
@@ -1299,6 +1303,7 @@ mod thread_processor_behavior_tests {
                 codex_home: test.config.codex_home.to_path_buf(),
                 skills_watcher: skills_watcher.clone(),
                 turn_cost_worker: None,
+                workflow_service,
             },
             thread_id,
             connection_id,
