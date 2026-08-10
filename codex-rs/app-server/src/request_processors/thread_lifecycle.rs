@@ -6,6 +6,7 @@ use codex_extension_api::ThreadIdleCause;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
+use codex_workflow_extension::WorkflowService;
 
 #[derive(Clone)]
 pub(super) struct ListenerTaskContext {
@@ -18,6 +19,7 @@ pub(super) struct ListenerTaskContext {
     pub(super) thread_unload_delay: Duration,
     pub(super) skills_watcher: Arc<SkillsWatcher>,
     pub(super) turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
+    pub(super) workflow_service: WorkflowService,
 }
 
 struct UnloadingState {
@@ -292,6 +294,7 @@ pub(super) async fn ensure_listener_task_running(
         thread_watch_manager,
         codex_home,
         turn_cost_worker,
+        workflow_service,
         ..
     } = listener_task_context;
     let outgoing_for_task = Arc::clone(&outgoing);
@@ -392,12 +395,20 @@ pub(super) async fn ensure_listener_task_running(
                         unloading_state.note_thread_activity_observed();
                         continue;
                     }
+                    if workflow_service.keeps_thread_resident(conversation_id) {
+                        unloading_state.note_thread_activity_observed();
+                        continue;
+                    }
                     {
                         let mut pending_thread_unloads = pending_thread_unloads.lock().await;
                         if pending_thread_unloads.contains_key(&conversation_id) {
                             continue;
                         }
                         if !unloading_state.should_unload_now() {
+                            continue;
+                        }
+                        if workflow_service.keeps_thread_resident(conversation_id) {
+                            unloading_state.note_thread_activity_observed();
                             continue;
                         }
                         pending_thread_unloads.insert(conversation_id, watch::channel(()).0);
