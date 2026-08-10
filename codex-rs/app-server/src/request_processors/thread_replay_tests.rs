@@ -5,6 +5,7 @@ use super::super::thread_processor::ThreadResumeTarget;
 use super::listener_shutdown_tests::test_processor;
 use super::*;
 use crate::outgoing_message::OutgoingMessage;
+use crate::outgoing_message::OutgoingWriteResult;
 use crate::thread_state::ConnectionCapabilities;
 use crate::transport::CHANNEL_CAPACITY;
 use crate::transport::OutboundConnectionState;
@@ -131,7 +132,11 @@ async fn stalled_replay_can_be_replaced_or_unsubscribed() -> Result<()> {
     resume(2, &mut writer_rx).await;
     let stall = Duration::from_millis(50);
     assert!(timeout(stall, next_message(&mut writer_rx)).await.is_err());
-    first.write_complete_tx.unwrap().send(()).unwrap();
+    first
+        .write_complete_tx
+        .unwrap()
+        .send(OutgoingWriteResult::Written)
+        .unwrap();
     for id in &expected {
         let queued = next_message(&mut writer_rx).await;
         let OutgoingMessage::Request(request) = queued.message else {

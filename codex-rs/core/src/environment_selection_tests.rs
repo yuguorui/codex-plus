@@ -1183,3 +1183,73 @@ async fn local_environment_cwd_uses_starting_local_selection() {
 
     assert_eq!(snapshot.local_environment_cwd(), Some(cwd));
 }
+
+#[tokio::test]
+async fn captured_snapshot_keeps_executor_after_same_id_registry_rebind() {
+    let cwd = tempfile::tempdir().unwrap();
+    let cwd = AbsolutePathBuf::try_from(cwd.path().to_path_buf()).unwrap();
+    let config = test_environment_config();
+    let selection = TurnEnvironmentSelection {
+        environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
+        cwd: PathUri::from_abs_path(&cwd),
+        workspace_roots: vec![PathUri::from_abs_path(&cwd)],
+        config: EnvironmentConfigState::Ready(config.clone()),
+        selected_capability_roots: Default::default(),
+    };
+    let approved_environment =
+        Arc::new(Environment::create_for_tests(Some("ws://127.0.0.1:1".to_string())).unwrap());
+    let captured = TurnEnvironmentSnapshot {
+        environments: vec![TurnEnvironmentState::Ready(TurnEnvironment::new(
+            selection.clone(),
+            EnvironmentConfigOrigin::Thread,
+            Arc::clone(&approved_environment),
+            None,
+        ))],
+    };
+    let rebound_manager = Arc::new(
+        EnvironmentManager::create_for_tests(
+            Some("ws://127.0.0.1:2".to_string()),
+            /*local_runtime_paths*/ None,
+        )
+        .await,
+    );
+    let rebound_environment = rebound_manager
+        .get_environment(REMOTE_ENVIRONMENT_ID)
+        .expect("rebound environment");
+    let approved_executor_id = opaque_executor_id(&approved_environment);
+    assert!(uuid::Uuid::parse_str(&approved_executor_id).is_ok());
+    assert_ne!(
+        approved_executor_id,
+        opaque_executor_id(&rebound_environment)
+    );
+    let child = ThreadEnvironments::new(
+        rebound_manager,
+        crate::shell::default_user_shell(),
+        ThreadEnvironmentDefaults::new(config.clone(), SandboxType::None),
+        ShellSnapshot::disabled(),
+        captured,
+        /*non_blocking_snapshots*/ false,
+        /*executor_discovery*/ None,
+    );
+
+    let worktree = cwd.join("workflow-worktree");
+    let worktree_selection = TurnEnvironmentSelection {
+        cwd: PathUri::from_abs_path(&worktree),
+        workspace_roots: vec![PathUri::from_abs_path(&worktree)],
+        config: EnvironmentConfigState::FromThread,
+        ..selection
+    };
+    child.update_selections(std::slice::from_ref(&worktree_selection));
+    let child_snapshot = child.snapshot().await;
+    let launched_environment = child_snapshot
+        .primary_environment()
+        .expect("captured child environment");
+
+    assert!(Arc::ptr_eq(&launched_environment, &approved_environment));
+    assert!(!Arc::ptr_eq(&launched_environment, &rebound_environment));
+    assert_eq!(
+        opaque_executor_id(&launched_environment),
+        approved_executor_id
+    );
+    assert_eq!(child_snapshot.to_selections(), vec![worktree_selection]);
+}

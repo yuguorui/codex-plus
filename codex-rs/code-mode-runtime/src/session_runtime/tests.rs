@@ -148,6 +148,8 @@ async fn termination_rejects_a_waiting_store_commit_before_the_next_cell_can_loa
                 enabled_tools: Default::default(),
                 tool_preloads: &[],
                 source: r#"text(String(load("candidate")));"#.to_string(),
+                string_code_generation: crate::StringCodeGeneration::Allow,
+                max_heap_size_bytes: None,
             },
             ObserveMode::YieldAfter(Duration::from_secs(1)),
             Arc::new(RecordingDelegate),
@@ -174,6 +176,8 @@ fn execute_request(source: &str) -> CreateCellRequest {
         enabled_tools: Default::default(),
         tool_preloads: &[],
         source: source.to_string(),
+        string_code_generation: crate::StringCodeGeneration::Allow,
+        max_heap_size_bytes: None,
     }
 }
 

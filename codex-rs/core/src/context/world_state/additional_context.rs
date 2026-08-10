@@ -6,6 +6,8 @@ use super::WorldStateHash;
 use super::WorldStateSection;
 use super::WorldStateSnapshot;
 use super::WorldStateUpdate;
+use crate::context::ContextualUserFragment;
+use crate::context::WorkflowChildTask;
 use codex_context_fragments::AnnotatedContent;
 use codex_context_fragments::RenderedFragment;
 use codex_history::ResponseItemEnvelope;
@@ -69,11 +71,17 @@ impl AdditionalContextState {
                             internal_chat_message_metadata_passthrough: None,
                         }
                     }
-                    AdditionalContextKind::Untrusted => message(
-                        "user",
-                        key,
-                        format!("<external_{key}>{value}</external_{key}>"),
-                    ),
+                    AdditionalContextKind::Untrusted => workflow_child_task(key, &value)
+                        .map_or_else(
+                            || {
+                                message(
+                                    "user",
+                                    key,
+                                    format!("<external_{key}>{value}</external_{key}>"),
+                                )
+                            },
+                            ContextualUserFragment::into,
+                        ),
                     AdditionalContextKind::Application => {
                         message("developer", key, format!("<{key}>{value}</{key}>"))
                     }
@@ -231,3 +239,11 @@ fn tool_name_from_key(key: &str) -> String {
         derived
     }
 }
+
+fn workflow_child_task(key: &str, body: &str) -> Option<WorkflowChildTask> {
+    WorkflowChildTask::from_additional_context(key, body)
+}
+
+#[cfg(test)]
+#[path = "additional_context_tests.rs"]
+mod tests;

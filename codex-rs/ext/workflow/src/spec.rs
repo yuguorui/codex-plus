@@ -1,0 +1,117 @@
+use codex_tools::JsonSchema;
+use codex_tools::ResponsesApiTool;
+use codex_tools::ToolSpec;
+use serde_json::json;
+use std::collections::BTreeMap;
+
+pub const WORKFLOW_TOOL_NAME: &str = "Workflow";
+
+pub(crate) fn workflow_tool_spec(name: &str) -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "script".to_string(),
+            JsonSchema::string(Some(
+                "Inline JavaScript workflow beginning with `export const meta = {...}`. When multiple source fields are present, scriptPath takes precedence, then script, then name."
+                    .to_string(),
+            )),
+        ),
+        (
+            "name".to_string(),
+            JsonSchema::string(Some(
+                "Built-in workflow, active plugin workflow (`pluginName:workflowName`), or saved workflow discovered from `$CODEX_HOME/workflows`, personal Claude workflows, and project `.codex/workflows`/`.claude/workflows` directories."
+                    .to_string(),
+            )),
+        ),
+        (
+            "args".to_string(),
+            JsonSchema {
+                description: Some(
+                    "JSON value exposed verbatim as the workflow global `args`; pass structured JSON directly. Omit it for a new workflow to make `args` undefined (pass explicit null for null), or with resumeFromRunId to reuse that run's persisted arguments and their presence; explicit resume arguments replace them and disable journal replay."
+                        .into(),
+                ),
+                ..Default::default()
+            },
+        ),
+        (
+            "scriptPath".to_string(),
+            JsonSchema::string(Some(
+                "Path to an existing .js workflow. Takes precedence over script and name when present. In local execution environments, you may first create or edit this file with ordinary file tools, then invoke it here."
+                    .to_string(),
+            )),
+        ),
+        (
+            "title".to_string(),
+            JsonSchema::string(Some(
+                "Optional Claude-compatible workflow title. Accepted for compatibility and ignored when resolving or running the workflow."
+                    .to_string(),
+            )),
+        ),
+        (
+            "description".to_string(),
+            JsonSchema::string(Some(
+                "Optional Claude-compatible workflow description. Accepted for compatibility and ignored when resolving or running the workflow."
+                    .to_string(),
+            )),
+        ),
+        (
+            "resumeFromRunId".to_string(),
+            JsonSchema::string(Some(
+                "Stopped or failed workflow run id matching ^wf_[a-z0-9-]{6,}$ and owned by this thread."
+                    .to_string(),
+            )),
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: name.to_string(),
+        description: include_str!("workflow_tool_prompt.md").to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            /*required*/ Some(Vec::new()),
+            Some(false.into()),
+        ),
+        output_schema: Some(json!({
+            "type": "object",
+            "properties": {
+                "status": { "enum": ["async_launched", "remote_launched"] },
+                "taskId": { "type": "string" },
+                "taskType": { "enum": ["local_workflow", "remote_agent"] },
+                "workflowName": { "type": "string" },
+                "runId": { "type": "string" },
+                "summary": { "type": "string" },
+                "transcriptDir": {
+                    "type": "string",
+                    "description": "App-server host artifact directory; it is not a path in the selected remote execution environment."
+                },
+                "transcriptDirKind": { "const": "appServerHostArtifact" },
+                "scriptPath": {
+                    "type": "string",
+                    "description": "Persisted app-server host copy of the approved workflow script; it is not a workspace path in the selected remote execution environment."
+                },
+                "scriptPathKind": { "const": "appServerHostArtifact" },
+                "sessionUrl": { "type": ["string", "null"] },
+                "warning": { "type": ["string", "null"] },
+                "error": { "type": ["string", "null"] }
+            },
+            "required": [
+                "status",
+                "taskId",
+                "taskType",
+                "workflowName",
+                "runId",
+                "summary",
+                "transcriptDir",
+                "transcriptDirKind",
+                "scriptPath",
+                "scriptPathKind"
+            ],
+            "additionalProperties": false
+        }).into()),
+    })
+}
+
+#[cfg(test)]
+#[path = "spec_tests.rs"]
+mod tests;

@@ -373,6 +373,124 @@ async fn exec_command_rejects_login_when_selected_environment_disallows_it() {
 }
 
 #[tokio::test]
+async fn exec_command_enforces_bash_command_clamp_before_execution() {
+    let (mut session, turn) = make_session_and_context().await;
+    session.tool_policy = Arc::new(codex_extension_api::ToolPolicy {
+        bash_command_clamp: Some(codex_extension_api::BashCommandClamp::from_rules([
+            "Bash(git:*)",
+        ])),
+        ..Default::default()
+    });
+    let turn = Arc::new(turn);
+    let step_context = StepContext::for_test(Arc::clone(&turn));
+    let turn_environment = crate::tools::handlers::selected_executor(
+        &ToolEnvironments::All,
+        &step_context.environments,
+    )
+    .expect("primary environment");
+
+    for (cmd, allowed) in [("git status --short", true), ("rm -rf /", false)] {
+        let arguments = serde_json::json!({ "cmd": cmd }).to_string();
+        let result = preparation::ParsedExecCommand::parse(
+            &arguments,
+            &session,
+            &step_context,
+            turn_environment,
+        );
+        match (allowed, result) {
+            (true, Ok(_)) => {}
+            (true, Err(error)) => panic!("expected `{cmd}` to be allowed, got {error:?}"),
+            (false, Ok(_)) => panic!("expected `{cmd}` to be blocked by the command clamp"),
+            (false, Err(FunctionCallError::RespondToModel(message))) => {
+                assert_eq!(
+                    message,
+                    "command is blocked by the active Bash command clamp"
+                );
+            }
+            (false, Err(error)) => panic!("unexpected rejection for `{cmd}`: {error:?}"),
+        }
+    }
+
+    session.tool_policy = Arc::new(codex_extension_api::ToolPolicy {
+        bash_command_clamp: Some(codex_extension_api::BashCommandClamp::from_rules([
+            "Bash()",
+        ])),
+        ..Default::default()
+    });
+    let arguments = serde_json::json!({ "cmd": "git status" }).to_string();
+    let error = preparation::ParsedExecCommand::parse(
+        &arguments,
+        &session,
+        &step_context,
+        turn_environment,
+    )
+    .err()
+    .expect("malformed clamps must fail closed");
+    assert!(matches!(
+        error,
+        FunctionCallError::RespondToModel(message)
+            if message == "command is blocked by the active Bash command clamp"
+    ));
+}
+
+#[tokio::test]
+async fn exec_command_clamp_forces_a_non_login_default_shell() {
+    let (mut session, turn) = make_session_and_context().await;
+    session.tool_policy = Arc::new(codex_extension_api::ToolPolicy {
+        bash_command_clamp: Some(codex_extension_api::BashCommandClamp::from_rules([
+            "Bash(git:*)",
+        ])),
+        ..Default::default()
+    });
+    let turn = Arc::new(turn);
+    let step_context = StepContext::for_test(Arc::clone(&turn));
+    let turn_environment = crate::tools::handlers::selected_executor(
+        &ToolEnvironments::All,
+        &step_context.environments,
+    )
+    .expect("primary environment");
+
+    let parsed = preparation::ParsedExecCommand::parse(
+        &serde_json::json!({ "cmd": "git status", "login": true }).to_string(),
+        &session,
+        &step_context,
+        turn_environment,
+    )
+    .expect("clamped command should parse");
+    assert_eq!(parsed.args.login, Some(false));
+
+    let error = preparation::ParsedExecCommand::parse(
+        &serde_json::json!({ "cmd": "git status", "shell": "/bin/zsh" }).to_string(),
+        &session,
+        &step_context,
+        turn_environment,
+    )
+    .err()
+    .expect("clamped commands must use the default shell");
+    assert!(error.to_string().contains("default shell"), "{error}");
+
+    let error = preparation::ParsedExecCommand::parse(
+        &serde_json::json!({ "cmd": "git status", "tty": true }).to_string(),
+        &session,
+        &step_context,
+        turn_environment,
+    )
+    .err()
+    .expect("clamped commands must not allocate a TTY");
+    assert!(error.to_string().contains("TTY"), "{error}");
+
+    let error = preparation::ParsedExecCommand::parse(
+        &serde_json::json!({ "cmd": "git status =(date)" }).to_string(),
+        &session,
+        &step_context,
+        turn_environment,
+    )
+    .err()
+    .expect("zsh process substitution must be rejected");
+    assert!(error.to_string().contains("Bash command clamp"), "{error}");
+}
+
+#[tokio::test]
 #[cfg(not(windows))]
 async fn exec_command_reuses_foreign_windows_grant() {
     use crate::environment_selection::EnvironmentAttachment;
