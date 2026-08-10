@@ -10,6 +10,7 @@ use codex_app_server_protocol::CollabAgentTool;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::SubAgentActivityKind;
 use codex_app_server_protocol::ThreadItemPayload;
+use codex_app_server_protocol::WorkflowResultReadStatus;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use std::collections::HashSet;
@@ -194,6 +195,20 @@ fn activity_summary(item: &ThreadItemPayload) -> Option<String> {
             return bounded_summary(&format!("Viewed {path}"));
         }
         ThreadItemPayload::ImageGeneration(_) => return Some("Generated an image".to_string()),
+        ThreadItemPayload::WorkflowInputAnalysis(_) => {
+            return Some("Analyzed Workflow inputs".to_string());
+        }
+        ThreadItemPayload::WorkflowResultRead(item) => match item.status {
+            WorkflowResultReadStatus::InProgress => {
+                return Some("Reading a Workflow result".to_string());
+            }
+            WorkflowResultReadStatus::Completed => {
+                return Some("Read a Workflow result".to_string());
+            }
+            WorkflowResultReadStatus::Failed => {
+                return Some("Failed to read a Workflow result".to_string());
+            }
+        },
         ThreadItemPayload::EnteredReviewMode { .. } => {
             return Some("Entered review mode".to_string());
         }
