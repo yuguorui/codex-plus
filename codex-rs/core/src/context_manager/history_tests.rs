@@ -4326,7 +4326,8 @@ fn prompt_reorders_known_pairs_but_leaves_unknown_outputs_to_orphan_removal() {
 
 #[test]
 fn write_barrier_defers_user_context_until_the_call_output_lands() {
-    let mut h = ContextManager::new();
+    let mut h =
+        ContextManager::new(codex_protocol_test_support::uuid_v7_item_id_generator_for_test());
     let mut call_batch = vec![Some(ResponseItemEnvelope::new(function_call_item(
         "call-1", "shell",
     )))];
@@ -4379,7 +4380,8 @@ fn write_barrier_defers_user_context_until_the_call_output_lands() {
 
 #[test]
 fn write_barrier_force_flush_closes_abandoned_calls_and_flushes_context() {
-    let mut h = ContextManager::new();
+    let mut h =
+        ContextManager::new(codex_protocol_test_support::uuid_v7_item_id_generator_for_test());
     let mut call_batch = vec![Some(ResponseItemEnvelope::new(function_call_item(
         "call-1", "shell",
     )))];
@@ -4442,7 +4444,8 @@ fn write_barrier_force_flush_closes_abandoned_calls_and_flushes_context() {
 
 #[test]
 fn write_barrier_drops_late_output_after_force_flush() {
-    let mut h = ContextManager::new();
+    let mut h =
+        ContextManager::new(codex_protocol_test_support::uuid_v7_item_id_generator_for_test());
     let mut call_batch = vec![Some(ResponseItemEnvelope::new(function_call_item(
         "call-1", "shell",
     )))];
@@ -4471,7 +4474,8 @@ fn write_barrier_drops_late_output_after_force_flush() {
 
 #[test]
 fn write_barrier_waits_for_every_parallel_output_before_flushing_context() {
-    let mut h = ContextManager::new();
+    let mut h =
+        ContextManager::new(codex_protocol_test_support::uuid_v7_item_id_generator_for_test());
     for call_id in ["call-a", "call-b"] {
         let mut batch = vec![Some(ResponseItemEnvelope::new(function_call_item(
             call_id, "shell",
@@ -4518,7 +4522,8 @@ fn write_barrier_waits_for_every_parallel_output_before_flushing_context() {
 
 #[test]
 fn write_barrier_defers_non_user_context_that_would_split_the_pair() {
-    let mut h = ContextManager::new();
+    let mut h =
+        ContextManager::new(codex_protocol_test_support::uuid_v7_item_id_generator_for_test());
     let mut call = vec![Some(ResponseItemEnvelope::new(function_call_item(
         "call-1", "shell",
     )))];
@@ -4605,7 +4610,8 @@ fn write_barrier_defers_non_user_context_that_would_split_the_pair() {
 #[test]
 fn context_only_barrier_keeps_responses_context_in_place() {
     let policy = TruncationPolicy::Tokens(10_000);
-    let mut h = ContextManager::new();
+    let mut h =
+        ContextManager::new(codex_protocol_test_support::uuid_v7_item_id_generator_for_test());
     let mut call = vec![Some(ResponseItemEnvelope::new(function_call_item(
         "call-1", "shell",
     )))];
@@ -4666,7 +4672,8 @@ fn context_only_barrier_keeps_responses_context_in_place() {
 
 #[test]
 fn write_barrier_keeps_assistant_output_in_the_open_call_window() {
-    let mut h = ContextManager::new();
+    let mut h =
+        ContextManager::new(codex_protocol_test_support::uuid_v7_item_id_generator_for_test());
     let mut call = vec![Some(ResponseItemEnvelope::new(function_call_item(
         "call-1", "shell",
     )))];
