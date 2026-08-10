@@ -56,6 +56,7 @@ use codex_skills::SkillError;
 use codex_utils_git_discovery::GitRootDiscovery;
 use codex_utils_path::replace_path_and_deduplicate;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::Semaphore;
 use tokio_util::task::TaskTracker;
 
@@ -121,6 +122,7 @@ pub(crate) struct Session {
     pub(super) fork_persistence: ForkPersistence,
     pub(super) history_initialization: HistoryInitialization,
     pub(super) forked_from_ordinal_exclusive: Option<u64>,
+    pub(super) closing: AtomicBool,
     pub(super) next_internal_sub_id: AtomicU64,
 }
 
@@ -904,6 +906,7 @@ impl Session {
         environment_selections: &[TurnEnvironmentSelection],
         config: Arc<Config>,
         mut instructions: SessionInstructions,
+        frozen_project_instructions: Option<Arc<crate::LoadedAgentsMd>>,
         installation_id: String,
         auth_manager: Arc<AuthManager>,
         runtime_auth: RuntimeAuthSlot,
@@ -1634,7 +1637,10 @@ impl Session {
             let resolved_environments = turn_environments
                 .resolve_snapshot(configured_environments)
                 .await;
-            let agents_md_manager = Arc::new(AgentsMdManager::new(instructions));
+            let agents_md_manager = Arc::new(match frozen_project_instructions {
+                Some(loaded) => AgentsMdManager::new_frozen(instructions, Some(loaded)),
+                None => AgentsMdManager::new(instructions),
+            });
             // Keep discovery's future out of the large embedded startup/resume frame.
             let plugin_skill_warmup = Box::pin(warm_plugins_and_skills_for_session_init(
                 Arc::clone(&config),
@@ -2101,6 +2107,7 @@ impl Session {
                 fork_persistence,
                 history_initialization,
                 forked_from_ordinal_exclusive,
+                closing: AtomicBool::new(false),
                 next_internal_sub_id: AtomicU64::new(0),
             });
             if let Some(startup) = &startup {

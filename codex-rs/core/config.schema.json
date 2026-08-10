@@ -1477,6 +1477,9 @@
             "windows_sandbox_service": {
               "type": "boolean"
             },
+            "workflows": {
+              "type": "boolean"
+            },
             "workspace_dependencies": {
               "type": "boolean"
             },
@@ -7752,6 +7755,19 @@
         }
       ]
     },
+    "WorkflowToml": {
+      "additionalProperties": false,
+      "properties": {
+        "global_concurrency": {
+          "description": "Maximum Workflow agents that may run concurrently in one app-server process. Valid values are 1 through 256.",
+          "format": "uint",
+          "maximum": 256.0,
+          "minimum": 1.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "WorkspaceRootsToml": {
       "type": "object"
     }
@@ -8606,6 +8622,9 @@
         "windows_sandbox_service": {
           "type": "boolean"
         },
+        "workflows": {
+          "type": "boolean"
+        },
         "workspace_dependencies": {
           "type": "boolean"
         },
@@ -9100,6 +9119,14 @@
       ],
       "default": null,
       "description": "Windows-specific configuration."
+    },
+    "workflow": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/WorkflowToml"
+        }
+      ],
+      "description": "Workflow orchestration settings."
     }
   },
   "title": "ConfigToml",
