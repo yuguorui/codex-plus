@@ -64,6 +64,11 @@ pub(crate) enum GuardianApprovalRequest {
         tool_description: Option<String>,
         annotations: Option<GuardianMcpAnnotations>,
     },
+    ExtensionTool {
+        id: String,
+        tool_name: String,
+        artifact: super::GuardianApprovalArtifact,
+    },
     RequestPermissions {
         id: String,
         environment_id: String,
@@ -83,6 +88,7 @@ impl GuardianApprovalRequest {
             | Self::RequestPermissions { environment_id, .. }
             | Self::NetworkAccess { environment_id, .. } => Some(environment_id),
             Self::McpToolCall { .. } => None,
+            Self::ExtensionTool { .. } => None,
         }
     }
 }
@@ -327,6 +333,19 @@ pub(crate) fn guardian_approval_request_to_json(
             tool_description: tool_description.as_ref(),
             annotations: annotations.as_ref(),
         }),
+        GuardianApprovalRequest::ExtensionTool {
+            id: _,
+            tool_name,
+            artifact,
+        } => Ok(serde_json::json!({
+            "tool": "extension_tool",
+            "server": "codex-extension",
+            "toolName": tool_name,
+            "artifact": {
+                "sha256": artifact.sha256(),
+                "byteLength": artifact.byte_length(),
+            },
+        })),
         GuardianApprovalRequest::RequestPermissions {
             id: _,
             environment_id: _,
@@ -402,6 +421,15 @@ pub(crate) fn guardian_assessment_action(
             connector_name: connector_name.clone(),
             tool_title: tool_title.clone(),
         },
+        GuardianApprovalRequest::ExtensionTool { tool_name, .. } => {
+            GuardianAssessmentAction::McpToolCall {
+                server: "codex-extension".to_string(),
+                tool_name: tool_name.clone(),
+                connector_id: None,
+                connector_name: None,
+                tool_title: None,
+            }
+        }
         GuardianApprovalRequest::RequestPermissions {
             reason,
             permissions,
@@ -451,6 +479,15 @@ pub(crate) fn guardian_reviewed_action(
             connector_name: connector_name.clone(),
             tool_title: tool_title.clone(),
         },
+        GuardianApprovalRequest::ExtensionTool { tool_name, .. } => {
+            GuardianReviewedAction::McpToolCall {
+                server: "codex-extension".to_string(),
+                tool_name: tool_name.clone(),
+                connector_id: None,
+                connector_name: None,
+                tool_title: None,
+            }
+        }
         GuardianApprovalRequest::RequestPermissions { .. } => {
             GuardianReviewedAction::RequestPermissions {}
         }
@@ -463,6 +500,7 @@ pub(crate) fn guardian_request_target_item_id(request: &GuardianApprovalRequest)
         | GuardianApprovalRequest::WriteStdin { id, .. }
         | GuardianApprovalRequest::ApplyPatch { id, .. }
         | GuardianApprovalRequest::McpToolCall { id, .. }
+        | GuardianApprovalRequest::ExtensionTool { id, .. }
         | GuardianApprovalRequest::RequestPermissions { id, .. } => Some(id),
         GuardianApprovalRequest::NetworkAccess { .. } => None,
     }
@@ -478,7 +516,8 @@ pub(crate) fn guardian_request_turn_id<'a>(
         GuardianApprovalRequest::ExecCommand { .. }
         | GuardianApprovalRequest::WriteStdin { .. }
         | GuardianApprovalRequest::ApplyPatch { .. }
-        | GuardianApprovalRequest::McpToolCall { .. } => default_turn_id,
+        | GuardianApprovalRequest::McpToolCall { .. }
+        | GuardianApprovalRequest::ExtensionTool { .. } => default_turn_id,
     }
 }
 
