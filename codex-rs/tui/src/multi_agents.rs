@@ -15,6 +15,7 @@ use codex_app_server_protocol::CollabAgentTool;
 use codex_app_server_protocol::CollabAgentToolCallStatus;
 use codex_app_server_protocol::SubAgentActivityKind;
 use codex_app_server_protocol::ThreadItemPayload;
+use codex_app_server_protocol::WorkflowProgressItem;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use crossterm::event::KeyCode;
@@ -289,6 +290,16 @@ pub(crate) fn tool_call_history_cell(
         }
         _ => cell.with_tool_header(/*count*/ 1),
     })
+}
+
+pub(crate) fn workflow_agent_thread_id(item: &WorkflowProgressItem) -> Option<ThreadId> {
+    let WorkflowProgressItem::WorkflowAgent(agent) = item else {
+        return None;
+    };
+    agent
+        .agent_id
+        .as_deref()
+        .and_then(|agent_id| ThreadId::from_string(agent_id).ok())
 }
 
 pub(crate) fn sub_agent_activity_display(

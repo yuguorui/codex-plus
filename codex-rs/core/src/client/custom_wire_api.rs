@@ -3,6 +3,9 @@
 use super::*;
 use tracing::instrument;
 
+const CHAT_COMPLETIONS_ENDPOINT: &str = "/chat/completions";
+const ANTHROPIC_MESSAGES_ENDPOINT: &str = "/messages";
+
 #[allow(clippy::too_many_arguments)]
 #[instrument(
     name = "model_client.stream_chat_api",
@@ -36,9 +39,11 @@ pub(super) async fn stream_chat_api(
     let mut pending_retry = PendingUnauthorizedRetry::default();
     let mut provider_auth_recovery_attempted = false;
     loop {
-        let client_setup = session.client.current_client_setup().await?;
-        let transport =
-            ReqwestTransport::from_http_client(codex_login::default_client::create_client());
+        let client_setup = session
+            .client
+            .current_client_setup(ClientRouting::ConfiguredProvider)
+            .await?;
+        let transport = client_setup.http_transport(CHAT_COMPLETIONS_ENDPOINT)?;
         let request_auth_context = AuthRequestTelemetryContext::new(
             client_setup.auth.as_ref().map(CodexAuth::auth_mode),
             client_setup.api_auth.as_ref(),
@@ -49,7 +54,7 @@ pub(super) async fn stream_chat_api(
         let (request_telemetry, sse_telemetry) = ModelClientSession::build_streaming_telemetry(
             session_telemetry,
             request_auth_context,
-            RequestRouteTelemetry::for_endpoint("/chat/completions"),
+            RequestRouteTelemetry::for_endpoint(CHAT_COMPLETIONS_ENDPOINT),
             session.client.state.auth_env_telemetry.clone(),
             retry_notifier.clone(),
         );
@@ -102,12 +107,13 @@ pub(super) async fn stream_chat_api(
 
         match stream_result {
             Ok(stream) => {
-                let (stream, _) = map_response_stream(
+                let stream = map_response_stream(
                     stream,
                     session_telemetry.clone(),
                     inference_trace_attempt,
-                    session.client.state.provider.clone(),
+                    &session.client.state,
                     interceptors,
+                    /*last_response_tx*/ None,
                 );
                 return Ok(stream);
             }
@@ -181,9 +187,11 @@ pub(super) async fn stream_anthropic_api(
     let mut pending_retry = PendingUnauthorizedRetry::default();
     let mut provider_auth_recovery_attempted = false;
     loop {
-        let client_setup = session.client.current_client_setup().await?;
-        let transport =
-            ReqwestTransport::from_http_client(codex_login::default_client::create_client());
+        let client_setup = session
+            .client
+            .current_client_setup(ClientRouting::ConfiguredProvider)
+            .await?;
+        let transport = client_setup.http_transport(ANTHROPIC_MESSAGES_ENDPOINT)?;
         let request_auth_context = AuthRequestTelemetryContext::new(
             client_setup.auth.as_ref().map(CodexAuth::auth_mode),
             client_setup.api_auth.as_ref(),
@@ -194,7 +202,7 @@ pub(super) async fn stream_anthropic_api(
         let (request_telemetry, sse_telemetry) = ModelClientSession::build_streaming_telemetry(
             session_telemetry,
             request_auth_context,
-            RequestRouteTelemetry::for_endpoint("/messages"),
+            RequestRouteTelemetry::for_endpoint(ANTHROPIC_MESSAGES_ENDPOINT),
             session.client.state.auth_env_telemetry.clone(),
             retry_notifier.clone(),
         );
@@ -247,12 +255,13 @@ pub(super) async fn stream_anthropic_api(
 
         match stream_result {
             Ok(stream) => {
-                let (stream, _) = map_response_stream(
+                let stream = map_response_stream(
                     stream,
                     session_telemetry.clone(),
                     inference_trace_attempt,
-                    session.client.state.provider.clone(),
+                    &session.client.state,
                     interceptors,
+                    /*last_response_tx*/ None,
                 );
                 return Ok(stream);
             }
