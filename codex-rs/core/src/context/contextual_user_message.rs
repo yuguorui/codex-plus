@@ -15,6 +15,8 @@ use super::SubagentNotification;
 use super::TurnAborted;
 use super::UserInstructions;
 use super::UserShellCommand;
+use super::WorkflowChildTask;
+use super::WorkflowNotification;
 use super::world_state::EnvironmentsState;
 
 const CONTEXTUAL_USER_FRAGMENT_MATCHERS: &[fn(&str) -> bool] = &[
@@ -26,6 +28,8 @@ const CONTEXTUAL_USER_FRAGMENT_MATCHERS: &[fn(&str) -> bool] = &[
     UserShellCommand::matches_text,
     TurnAborted::matches_text,
     SubagentNotification::matches_text,
+    WorkflowNotification::matches_text,
+    WorkflowChildTask::matches_text,
     InternalModelContextFragment::matches_text,
     // compatibility for user-role recommendation messages in existing rollouts
     RecommendedPluginsInstructions::matches_text,

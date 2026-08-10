@@ -182,7 +182,7 @@ impl AgentControl for LocalAgentControl {
     fn close(&self, caller: ThreadId, target: AgentTarget) -> BoxFuture<'_, Result<AgentInfo>> {
         Box::pin(async move {
             let target = self.resolve_target(caller, &target)?;
-            self.close_agent(target).await
+            self.close_agent(caller, target).await
         })
     }
 
