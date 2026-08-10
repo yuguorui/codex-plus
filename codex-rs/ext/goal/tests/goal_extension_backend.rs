@@ -1971,6 +1971,7 @@ fn tool_call(tool_name: &str, call_id: &str, arguments: serde_json::Value) -> To
         attachment_store: codex_core::passthrough_image_store(),
         ephemeral: false,
         environments: Vec::new(),
+        agent_configuration: None,
         payload: ToolPayload::Function {
             arguments: arguments.to_string(),
         },
