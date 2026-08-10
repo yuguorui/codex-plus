@@ -19,6 +19,7 @@ use codex_login::AuthEnvTelemetry;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::collect_auth_env_telemetry;
+use codex_login::default_client::ClientRedirectPolicy;
 use codex_login::default_client::create_client_for_route_async;
 use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
 use codex_model_provider_info::ModelProviderInfo;
@@ -208,9 +209,14 @@ impl ModelsTransportBuilder for RouteAwareModelsTransportBuilder {
         request_url: String,
     ) -> ModelsTransportFuture<'_> {
         Box::pin(async move {
-            create_client_for_route_async(http_client_factory, request_url, ClientRouteClass::Api)
-                .await
-                .map(ReqwestTransport::from_http_client)
+            create_client_for_route_async(
+                http_client_factory,
+                request_url,
+                ClientRouteClass::Api,
+                ClientRedirectPolicy::Default,
+            )
+            .await
+            .map(ReqwestTransport::from_http_client)
         })
     }
 }
