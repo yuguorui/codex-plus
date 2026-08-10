@@ -338,3 +338,7 @@ fn item_to_cells(
     }
     cells
 }
+
+#[cfg(test)]
+#[path = "thread_transcript_tests.rs"]
+mod tests;

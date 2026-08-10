@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::app_backtrack::SIDE_EDIT_PREVIOUS_UNAVAILABLE_MESSAGE;
+use crate::app_backtrack::WORKFLOW_EDIT_PREVIOUS_UNAVAILABLE_MESSAGE;
 use crate::keymap::bindings_for_action;
 use crate::keymap::keymap_action_ids;
 
@@ -553,6 +554,8 @@ impl App {
                 }
             } else if self.should_reject_side_backtrack_esc(key_event) {
                 self.reject_side_backtrack_esc();
+            } else if self.should_reject_workflow_backtrack_esc(key_event) {
+                self.reject_workflow_backtrack_esc();
             } else {
                 self.chat_widget.handle_key_event(key_event);
             }
@@ -682,6 +685,7 @@ impl App {
     pub(crate) fn should_handle_backtrack_esc(&self, key_event: KeyEvent) -> bool {
         !self.chat_widget.side_conversation_active()
             && !self.chat_widget.shortcut_overlay_visible()
+            && !self.viewing_workflow_agent_thread()
             && self.chat_widget.is_normal_backtrack_mode()
             && self.chat_widget.composer_is_empty()
             && !self.chat_widget.should_handle_vim_insert_escape(key_event)
@@ -699,6 +703,19 @@ impl App {
         self.reset_backtrack_state();
         self.chat_widget
             .add_error_message(SIDE_EDIT_PREVIOUS_UNAVAILABLE_MESSAGE.to_string());
+    }
+
+    pub(super) fn should_reject_workflow_backtrack_esc(&self, key_event: KeyEvent) -> bool {
+        self.viewing_workflow_agent_thread()
+            && self.chat_widget.is_normal_backtrack_mode()
+            && self.chat_widget.composer_is_empty()
+            && !self.chat_widget.should_handle_vim_insert_escape(key_event)
+    }
+
+    pub(super) fn reject_workflow_backtrack_esc(&mut self) {
+        self.reset_backtrack_state();
+        self.chat_widget
+            .add_error_message(WORKFLOW_EDIT_PREVIOUS_UNAVAILABLE_MESSAGE.to_string());
     }
 
     fn app_keymap_shortcuts_available(&self) -> bool {

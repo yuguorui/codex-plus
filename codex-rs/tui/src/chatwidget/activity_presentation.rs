@@ -26,6 +26,20 @@ impl ChatWidget {
             }
             lines.extend(realtime_lines);
         }
+        if self.workflows.has_active_runs() {
+            let workflow_lines = render(&self.workflows, width);
+            if !workflow_lines.is_empty() && !lines.is_empty() {
+                lines.push(HyperlinkLine::from(""));
+            }
+            lines.extend(workflow_lines);
+        }
+        if let Some(hook_cell) = self.active_hook_cell.as_ref() {
+            let hook_lines = render(hook_cell, width);
+            if !hook_lines.is_empty() && !lines.is_empty() {
+                lines.push(HyperlinkLine::from(""));
+            }
+            lines.extend(hook_lines);
+        }
         if let Some(rate_limit_reset_hint) = self.pending_rate_limit_reset_hint() {
             let hint_lines = render(rate_limit_reset_hint, width);
             if !hint_lines.is_empty() && !lines.is_empty() {
