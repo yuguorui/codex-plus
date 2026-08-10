@@ -70,6 +70,7 @@ mod deprecation_notice;
 mod direct_tool_metadata;
 mod exec;
 mod exec_policy;
+mod extension_approval;
 #[cfg(not(target_os = "windows"))]
 mod extension_sandbox;
 mod external_auth;
