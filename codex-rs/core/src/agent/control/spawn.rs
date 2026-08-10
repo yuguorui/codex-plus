@@ -201,7 +201,7 @@ impl LocalAgentControl {
         {
             Ok(descendant_ids) => descendant_ids,
             Err(err) => {
-                warn!("failed to restore persisted V2 agent metadata for {root_thread_id}: {err}");
+                warn!("failed to restore persisted agent metadata for {root_thread_id}: {err}");
                 return;
             }
         };
@@ -226,7 +226,9 @@ impl LocalAgentControl {
                     .map_err(|err| {
                         CodexErr::InvalidRequest(format!("invalid stored agent path: {err}"))
                     })?;
-                let mut reservation = self.state.reserve_spawn_slot(/*max_threads*/ None)?;
+                let mut reservation = self
+                    .state
+                    .reserve_counted_spawn_slot(/*max_threads*/ None)?;
                 let mut metadata = self.prepare_agent_metadata(
                     &mut reservation,
                     config,
@@ -239,12 +241,13 @@ impl LocalAgentControl {
                         .or_else(|| stored_thread.source.get_nickname()),
                 )?;
                 metadata.agent_id = Some(thread_id);
+                metadata.owning_root_thread_id = Some(root_thread_id);
                 reservation.commit(metadata);
                 Ok::<(), CodexErr>(())
             }
             .await;
             if let Err(err) = restore_result {
-                warn!("failed to restore V2 agent metadata for {thread_id}: {err}");
+                warn!("failed to restore agent metadata for {thread_id}: {err}");
             }
         }
     }
@@ -667,7 +670,9 @@ impl LocalAgentControl {
         } else {
             agent_max_threads
         };
-        let mut reservation = self.state.reserve_spawn_slot(reservation_max_threads)?;
+        let mut reservation = self
+            .state
+            .reserve_counted_spawn_slot(reservation_max_threads)?;
         let inheritance = SpawnAgentThreadInheritance {
             environments: self
                 .inherited_environments_for_source(&state, session_source.as_ref())
@@ -1275,7 +1280,18 @@ impl LocalAgentControl {
             )
             .await;
         let agent_max_threads = config.effective_agent_max_threads(multi_agent_version);
-        let mut reservation = self.state.reserve_spawn_slot(agent_max_threads)?;
+        let mut reservation =
+            if self
+                .state
+                .registration_for_close(thread_id)
+                .is_some_and(|registration| {
+                    registration.quota == crate::agent::registry::AgentQuota::Unmetered
+                })
+            {
+                self.state.reserve_unmetered_spawn_slot()
+            } else {
+                self.state.reserve_counted_spawn_slot(agent_max_threads)?
+            };
         let (session_source, agent_metadata) = match session_source {
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,

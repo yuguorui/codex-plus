@@ -111,6 +111,13 @@ impl RolloutBudget {
         );
     }
 
+    pub(crate) fn token_snapshot(&self) -> Option<(u64, u64)> {
+        let state = self.lock()?;
+        let total = u64::try_from(state.config.limit_tokens).ok()?;
+        let spent = state.weighted_tokens_used.max(0.0).floor() as u64;
+        Some((total, spent))
+    }
+
     fn lock(&self) -> Option<MutexGuard<'_, RolloutBudgetState>> {
         self.state.get().map(|state| {
             state

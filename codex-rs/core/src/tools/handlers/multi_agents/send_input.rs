@@ -47,6 +47,11 @@ impl Handler {
         let receiver_thread_id = parse_agent_id_target(&args.target)?;
         let input_items = parse_collab_input(args.message, args.items)?;
         let prompt = render_input_preview(&input_items);
+        session
+            .services
+            .agent_control
+            .authorize_agent_access(session.thread_id, receiver_thread_id)
+            .map_err(|err| collab_agent_error(receiver_thread_id, err))?;
         let receiver_agent = session
             .services
             .agent_control
