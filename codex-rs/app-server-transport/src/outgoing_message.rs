@@ -8,6 +8,15 @@ use tokio::sync::oneshot;
 
 pub use codex_app_server_remote_client::ConnectionId;
 
+/// Terminal result reported by the transport writer for a tracked message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutgoingWriteResult {
+    /// The complete message reached the transport's terminal delivery boundary.
+    Written,
+    /// Connection capabilities or notification preferences excluded this message.
+    NotTarget,
+}
+
 /// Outgoing message from the server to the client.
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
@@ -36,7 +45,7 @@ pub struct OutgoingError {
 #[derive(Debug)]
 pub struct QueuedOutgoingMessage {
     pub message: OutgoingMessage,
-    pub write_complete_tx: Option<oneshot::Sender<()>>,
+    pub write_complete_tx: Option<oneshot::Sender<OutgoingWriteResult>>,
 }
 
 impl QueuedOutgoingMessage {

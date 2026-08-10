@@ -476,6 +476,11 @@ pub(crate) struct ConnectionCapabilities {
     pub(crate) request_attestation: bool,
 }
 
+pub(crate) struct SubscribedConnectionPage {
+    pub(crate) connection_ids: Vec<ConnectionId>,
+    pub(crate) next_after: Option<ConnectionId>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct ThreadStateManager {
     state: Arc<Mutex<ThreadStateManagerInner>>,
@@ -575,6 +580,29 @@ impl ThreadStateManager {
         }
     }
 
+    pub(crate) async fn wait_for_new_thread_subscriber(&self, thread_id: ThreadId) {
+        let mut has_connections = {
+            let mut state = self.state.lock().await;
+            state
+                .threads
+                .entry(thread_id)
+                .or_default()
+                .has_connections_watcher
+                .subscribe()
+        };
+        let mut observed_without_connections = !*has_connections.borrow_and_update();
+        loop {
+            if has_connections.changed().await.is_err() {
+                return;
+            }
+            if !*has_connections.borrow_and_update() {
+                observed_without_connections = true;
+            } else if observed_without_connections {
+                return;
+            }
+        }
+    }
+
     pub(crate) async fn subscribed_connection_ids(&self, thread_id: ThreadId) -> Vec<ConnectionId> {
         let state = self.state.lock().await;
         state
@@ -582,6 +610,54 @@ impl ThreadStateManager {
             .get(&thread_id)
             .map(|thread_entry| thread_entry.subscriptions.keys().copied().collect())
             .unwrap_or_default()
+    }
+
+    pub(crate) async fn subscribed_connection_page(
+        &self,
+        thread_id: ThreadId,
+        after: Option<ConnectionId>,
+        limit: usize,
+    ) -> SubscribedConnectionPage {
+        let state = self.state.lock().await;
+        let Some(thread_entry) = state.threads.get(&thread_id) else {
+            return SubscribedConnectionPage {
+                connection_ids: Vec::new(),
+                next_after: None,
+            };
+        };
+        let mut connection_ids = thread_entry
+            .subscriptions
+            .keys()
+            .copied()
+            .filter(|connection_id| after.map_or(true, |after| *connection_id > after))
+            .collect::<Vec<_>>();
+        connection_ids.sort_unstable();
+        connection_ids.truncate(limit.saturating_add(1));
+        let has_more = connection_ids.len() > limit;
+        if has_more {
+            connection_ids.pop();
+        }
+        let next_after = has_more.then(|| connection_ids.last().copied()).flatten();
+        SubscribedConnectionPage {
+            connection_ids,
+            next_after,
+        }
+    }
+
+    pub(crate) async fn retain_subscribed_connections(
+        &self,
+        thread_id: ThreadId,
+        connection_ids: &[ConnectionId],
+    ) -> Vec<ConnectionId> {
+        let state = self.state.lock().await;
+        let Some(thread_entry) = state.threads.get(&thread_id) else {
+            return Vec::new();
+        };
+        connection_ids
+            .iter()
+            .copied()
+            .filter(|connection_id| thread_entry.subscriptions.contains_key(connection_id))
+            .collect()
     }
 
     pub(crate) async fn thread_state(&self, thread_id: ThreadId) -> Arc<Mutex<ThreadState>> {
