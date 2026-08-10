@@ -538,6 +538,8 @@ WHERE thread_id = ?
             | ThreadItemPayload::WebSearch(_)
             | ThreadItemPayload::ImageView { .. }
             | ThreadItemPayload::Sleep(_)
+            | ThreadItemPayload::WorkflowInputAnalysis(_)
+            | ThreadItemPayload::WorkflowResultRead(_)
             | ThreadItemPayload::ImageGeneration(_)
             | ThreadItemPayload::EnteredReviewMode { .. }
             | ThreadItemPayload::ExitedReviewMode { .. }
