@@ -2,6 +2,7 @@
 //! of the host session runtime.
 //! The host supplies review attempts and enforces the resulting decision on the bound action.
 
+mod approval_artifact;
 mod approval_request;
 mod approval_request_json;
 mod assessment;
@@ -29,6 +30,9 @@ mod routing;
 mod session;
 mod settings;
 
+pub use approval_artifact::GUARDIAN_APPROVAL_ARTIFACT_PAGE_BYTES;
+pub use approval_artifact::GuardianApprovalArtifact;
+pub use approval_artifact::GuardianApprovalArtifactPage;
 pub use approval_request::GuardianApprovalRequest;
 pub use approval_request::GuardianMcpAnnotations;
 pub use approval_request::GuardianNetworkAccessTrigger;

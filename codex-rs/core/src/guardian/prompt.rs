@@ -14,10 +14,13 @@ use codex_guardian_context::SectionInput;
 #[cfg(test)]
 pub(crate) use codex_guardian_context::TranscriptCursor as GuardianTranscriptCursor;
 pub(crate) use codex_guardian_context::TranscriptMode as GuardianPromptMode;
+use codex_guardian_context::TranscriptSelection;
 use codex_guardian_context::default_registry;
 use codex_guardian_reviewer::GuardianPromptItems;
 use codex_protocol::models::ResponseItem;
 
+use crate::context::ContextualUserFragment;
+use crate::context::GuardianExtensionApproval;
 use crate::context::GuardianPermissionContext;
 use crate::context::NodeReplReviewEvidence;
 use crate::context::NodeReplReviewEvidenceMode;
@@ -34,6 +37,7 @@ use super::GuardianReviewContext;
 
 // Bound both JSON and permission evidence without restricting manual approvals.
 const MAX_GUARDIAN_ENVIRONMENT_ID_BYTES: usize = 256;
+const GUARDIAN_MAX_APPROVAL_REASON_TOKENS: usize = 512;
 pub(super) const GUARDIAN_TRANSCRIPT_START: &str = ">>> TRANSCRIPT START\n";
 
 /// Selects transcript evidence using the checkpoint already loaded by the reviewer.
@@ -111,9 +115,15 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
         .retained_context()
         .map(codex_guardian_context::collect_verified_answer_candidates)
         .unwrap_or_default();
+    let excluded_call_id = match &request {
+        GuardianApprovalRequest::ExtensionTool { id, .. } => Some(id.as_str()),
+        _ => None,
+    };
+    let is_extension_tool_approval =
+        matches!(&request, GuardianApprovalRequest::ExtensionTool { .. });
     let planned_action = codex_guardian_reviewer::build_guardian_planned_action(
         &request,
-        reasons.retry.or(reasons.approval),
+        reasons.retry.clone().or_else(|| reasons.approval.clone()),
     )?;
     let permissions = parent_context
         .map(|context| {
@@ -165,24 +175,73 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
             use_parent_checkpoint,
         },
         &profile,
+        excluded_call_id,
         root_authorization.as_ref(),
         &trusted_user_inputs,
-        Some(&planned_action),
+        (!is_extension_tool_approval).then_some(&planned_action),
         permissions.as_ref(),
         node_repl_context.as_ref(),
     )?;
-    codex_guardian_reviewer::compose_guardian_prompt(
+    let history_version = if use_parent_checkpoint {
+        history.history_version()
+    } else {
+        history.review_history_version()
+    };
+    let extension_action_intro = if is_extension_tool_approval {
+        let (selection, _) = mode.select(sections.transcript_entries(), history_version);
+        Some(match selection {
+            TranscriptSelection::Full(_) => "The Codex agent has requested the following action:\n",
+            TranscriptSelection::Delta { .. } => {
+                "The Codex agent has requested the following next action:\n"
+            }
+        })
+    } else {
+        None
+    };
+    let mut prompt_items = codex_guardian_reviewer::compose_guardian_prompt(
         sections,
         &profile,
         mode,
-        if use_parent_checkpoint {
-            history.history_version()
-        } else {
-            history.review_history_version()
-        },
+        history_version,
         &session.thread_id.to_string(),
         node_repl_evidence_sequence,
-    )
+    )?;
+    if let Some(extension_action_intro) = extension_action_intro
+        && let GuardianApprovalRequest::ExtensionTool {
+            tool_name,
+            artifact,
+            ..
+        } = &request
+    {
+        prompt_items
+            .context
+            .push_user_text(extension_action_intro.to_string());
+        prompt_items
+            .context
+            .push_user_text(">>> APPROVAL REQUEST START\n".to_string());
+        if let Some(reason) = reasons.retry.as_ref().or(reasons.approval.as_ref()) {
+            let reason =
+                codex_guardian_context::truncate_text(reason, GUARDIAN_MAX_APPROVAL_REASON_TOKENS);
+            prompt_items
+                .context
+                .push_user_text("Retry reason:\n".to_string());
+            prompt_items.context.push_user_text(format!("{reason}\n\n"));
+        }
+        prompt_items.context.push_user_text(
+            "Review the complete content-addressed extension action with `read_guardian_approval_artifact`. Continue reading from each returned offset until the artifact is complete, then assess that exact action.\n"
+                .to_string(),
+        );
+        prompt_items.context.push_user_text(
+            GuardianExtensionApproval::new(tool_name, artifact.sha256(), artifact.byte_length())
+                .render()
+                .into_text()
+                .unwrap_or_default(),
+        );
+        prompt_items
+            .context
+            .push_user_text(">>> APPROVAL REQUEST END\n".to_string());
+    }
+    Ok(prompt_items)
 }
 
 /// Exercises the sync profile through the host's existing transcript tests.
@@ -231,6 +290,7 @@ pub(crate) fn render_guardian_transcript_entries(
 pub(super) fn collect_guardian_context(
     history: &dyn SectionHistory,
     profile: &ContextProfile,
+    excluded_call_id: Option<&str>,
     root_conversation_candidates: Option<&codex_guardian_context::RootConversationInput>,
     trusted_user_answers: &[codex_guardian_context::TrustedUserAnswer],
     planned_action: Option<&PlannedAction>,
@@ -239,7 +299,10 @@ pub(super) fn collect_guardian_context(
 ) -> Result<CollectedContext, SectionError> {
     default_registry().prepare(&SectionInput {
         target: profile.target,
-        history: &FilteredGuardianHistory(history),
+        history: &FilteredGuardianHistory {
+            history,
+            excluded_call_id,
+        },
         transcript: &profile.transcript,
         root_conversation: &[],
         root_conversation_candidates,
@@ -298,22 +361,24 @@ impl SectionHistory for GuardianReviewHistory<'_> {
     }
 }
 
-struct FilteredGuardianHistory<'a>(&'a dyn SectionHistory);
+struct FilteredGuardianHistory<'a> {
+    history: &'a dyn SectionHistory,
+    excluded_call_id: Option<&'a str>,
+}
 
 impl SectionHistory for FilteredGuardianHistory<'_> {
     fn items_with_sources(
         &self,
     ) -> Box<dyn Iterator<Item = (&ResponseItem, Option<&codex_history::RetainedSource>)> + Send + '_>
     {
-        Box::new(
-            self.0
-                .items_with_sources()
-                .filter(|(item, _)| !is_guardian_context_message(item)),
-        )
+        Box::new(self.history.items_with_sources().filter(move |(item, _)| {
+            !is_guardian_context_message(item)
+                && !is_excluded_tool_exchange(item, self.excluded_call_id)
+        }))
     }
 
     fn retained_context(&self) -> Option<&codex_history::RetainedContext> {
-        self.0.retained_context()
+        self.history.retained_context()
     }
 
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
@@ -324,14 +389,30 @@ impl SectionHistory for FilteredGuardianHistory<'_> {
         &self,
         message: &codex_history::RetainedUserMessage,
     ) -> Option<GuardianRootMessage> {
-        self.0.render_original_assistant(message)
+        self.history.render_original_assistant(message)
     }
 
     fn render_retained_assistant(
         &self,
         message: &codex_history::RetainedUserMessage,
     ) -> Option<GuardianRootMessage> {
-        self.0.render_retained_assistant(message)
+        self.history.render_retained_assistant(message)
+    }
+}
+
+fn is_excluded_tool_exchange(item: &ResponseItem, excluded_call_id: Option<&str>) -> bool {
+    let Some(excluded_call_id) = excluded_call_id else {
+        return false;
+    };
+    match item {
+        ResponseItem::FunctionCall { call_id, .. }
+        | ResponseItem::CustomToolCall { call_id, .. }
+        | ResponseItem::FunctionCallOutput {
+            call_id: Some(call_id),
+            ..
+        }
+        | ResponseItem::CustomToolCallOutput { call_id, .. } => call_id == excluded_call_id,
+        _ => false,
     }
 }
 

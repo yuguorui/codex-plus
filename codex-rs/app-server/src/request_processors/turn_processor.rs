@@ -17,6 +17,7 @@ use codex_protocol::protocol::TurnSettingsUpdateOutcome;
 use codex_protocol::turn_input::AnnotatedResponseItem;
 use codex_protocol::turn_input::ResponseItemAnnotations;
 use codex_skills::system_cache_root_dir;
+use codex_workflow_extension::WorkflowService;
 
 use crate::image_url::REMOTE_IMAGE_URL_ERROR;
 use crate::image_url::is_remote_image_url;
@@ -93,6 +94,7 @@ pub(crate) struct TurnRequestProcessor {
     thread_watch_manager: ThreadWatchManager,
     skills_watcher: Arc<SkillsWatcher>,
     turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
+    workflow_service: WorkflowService,
 }
 
 fn map_additional_context(
@@ -152,6 +154,7 @@ impl TurnRequestProcessor {
         thread_watch_manager: ThreadWatchManager,
         skills_watcher: Arc<SkillsWatcher>,
         turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
+        workflow_service: WorkflowService,
     ) -> Self {
         let agent_runner = AgentRunner::new(Arc::downgrade(&thread_manager));
         Self {
@@ -167,6 +170,7 @@ impl TurnRequestProcessor {
             thread_watch_manager,
             skills_watcher,
             turn_cost_worker,
+            workflow_service,
         }
     }
 
@@ -1509,6 +1513,7 @@ impl TurnRequestProcessor {
             thread_id,
             thread: review_thread,
             turn_id,
+            ..
         } = self
             .agent_runner
             .start(
@@ -1516,6 +1521,7 @@ impl TurnRequestProcessor {
                 AgentInvocation {
                     config,
                     prompt: prompt.to_string(),
+                    additional_context: Default::default(),
                     parent_trace: self.request_trace_context(request_id).await,
                 },
             )
@@ -1703,6 +1709,7 @@ impl TurnRequestProcessor {
             codex_home: self.config.codex_home.to_path_buf(),
             skills_watcher: Arc::clone(&self.skills_watcher),
             turn_cost_worker: self.turn_cost_worker.clone(),
+            workflow_service: self.workflow_service.clone(),
         }
     }
 

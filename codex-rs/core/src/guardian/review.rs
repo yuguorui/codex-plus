@@ -34,6 +34,7 @@ use super::ApprovalRequestReasons;
 #[cfg(test)]
 use super::GUARDIAN_REVIEW_TIMEOUT;
 use super::GuardianApprovalRequest;
+use super::GuardianAssessmentOutcome;
 use super::GuardianReviewContext;
 use super::approval_request::format_guardian_action_pretty;
 use super::approval_request::guardian_assessment_action;

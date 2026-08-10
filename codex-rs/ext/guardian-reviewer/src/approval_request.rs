@@ -1,6 +1,7 @@
 //! Owns Guardian approval-request data, classification, and assessment/reporting mappings.
 //! Request debug output excludes action arguments, which may contain credentials.
 
+use crate::approval_artifact::GuardianApprovalArtifact;
 use codex_analytics::GuardianReviewedAction;
 use codex_protocol::approvals::GuardianAssessmentAction;
 use codex_protocol::approvals::GuardianCommandSource;
@@ -73,6 +74,11 @@ pub enum GuardianApprovalRequest {
         tool_description: Option<String>,
         annotations: Option<GuardianMcpAnnotations>,
     },
+    ExtensionTool {
+        id: String,
+        tool_name: String,
+        artifact: GuardianApprovalArtifact,
+    },
     RequestPermissions {
         id: String,
         environment_id: String,
@@ -101,7 +107,9 @@ impl GuardianApprovalRequest {
             | Self::ApplyPatch { environment_id, .. }
             | Self::RequestPermissions { environment_id, .. }
             | Self::NetworkAccess { environment_id, .. } => Some(environment_id),
-            Self::McpToolCall { .. } | Self::NativeToolCall { .. } => None,
+            Self::McpToolCall { .. } | Self::NativeToolCall { .. } | Self::ExtensionTool { .. } => {
+                None
+            }
         }
     }
 }
@@ -138,6 +146,9 @@ impl GuardianApprovalRequest {
             Self::ExecCommand { .. } | Self::WriteStdin { .. } => GuardianScope::Shell,
             Self::ApplyPatch { .. } => GuardianScope::FileChanges,
             Self::McpToolCall { server, .. } => GuardianScope::for_mcp_server(server),
+            // Extension tools have no dedicated policy scope; treat them like the
+            // other third-party tool approvals the host reviews on the user's behalf.
+            Self::ExtensionTool { .. } => GuardianScope::Mcp,
             Self::NetworkAccess { .. } => GuardianScope::Network,
             Self::RequestPermissions { .. } => GuardianScope::Permissions,
             Self::NativeToolCall { .. } => GuardianScope::NativeTool,
@@ -214,6 +225,15 @@ pub fn guardian_assessment_action(
             connector_name: connector_name.clone(),
             tool_title: tool_title.clone(),
         },
+        GuardianApprovalRequest::ExtensionTool { tool_name, .. } => {
+            GuardianAssessmentAction::McpToolCall {
+                server: "codex-extension".to_string(),
+                tool_name: tool_name.clone(),
+                connector_id: None,
+                connector_name: None,
+                tool_title: None,
+            }
+        }
         GuardianApprovalRequest::RequestPermissions {
             reason,
             permissions,
@@ -262,6 +282,15 @@ pub fn guardian_reviewed_action(request: &GuardianApprovalRequest) -> GuardianRe
             connector_name: connector_name.clone(),
             tool_title: tool_title.clone(),
         },
+        GuardianApprovalRequest::ExtensionTool { tool_name, .. } => {
+            GuardianReviewedAction::McpToolCall {
+                server: "codex-extension".to_string(),
+                tool_name: tool_name.clone(),
+                connector_id: None,
+                connector_name: None,
+                tool_title: None,
+            }
+        }
         GuardianApprovalRequest::RequestPermissions { .. } => {
             GuardianReviewedAction::RequestPermissions {}
         }
@@ -274,6 +303,7 @@ pub fn guardian_request_target_item_id(request: &GuardianApprovalRequest) -> Opt
         | GuardianApprovalRequest::WriteStdin { id, .. }
         | GuardianApprovalRequest::ApplyPatch { id, .. }
         | GuardianApprovalRequest::McpToolCall { id, .. }
+        | GuardianApprovalRequest::ExtensionTool { id, .. }
         | GuardianApprovalRequest::RequestPermissions { id, .. }
         | GuardianApprovalRequest::NativeToolCall { id, .. } => Some(id),
         GuardianApprovalRequest::NetworkAccess { .. } => None,
@@ -291,6 +321,7 @@ pub fn guardian_request_turn_id<'a>(
         | GuardianApprovalRequest::WriteStdin { .. }
         | GuardianApprovalRequest::ApplyPatch { .. }
         | GuardianApprovalRequest::McpToolCall { .. }
+        | GuardianApprovalRequest::ExtensionTool { .. }
         | GuardianApprovalRequest::NativeToolCall { .. } => default_turn_id,
     }
 }

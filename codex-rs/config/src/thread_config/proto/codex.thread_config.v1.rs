@@ -95,7 +95,7 @@ pub struct ModelProvider {
     pub env_key_auth: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(uint64, optional, tag = "27")]
     pub request_max_retry_delay_ms: ::core::option::Option<u64>,
-    #[prost(string, optional, tag = "27")]
+    #[prost(string, optional, tag = "28")]
     pub env_base_url: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]

@@ -79,7 +79,7 @@ async fn selected_runtime_transport_stays_revoked(mode: RuntimeAuthMode) {
         .current_client_setup(ClientRouting::Workspace)
         .await
         .unwrap();
-    let transport = setup.build_api_transport("/responses").unwrap();
+    let transport = setup.build_api_transport("/responses").await.unwrap();
     let request = setup
         .api_provider
         .build_request(http::Method::POST, "/responses");

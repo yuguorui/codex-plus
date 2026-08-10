@@ -33,6 +33,15 @@ const MIN_YIELD_TIME_FOR_GRACE: Duration = Duration::from_secs(10);
 pub struct InProcessCodeModeSession {
     runtime: SessionRuntime,
     cell_execution_limits: CodeModeSessionCellExecutionLimits,
+    string_code_generation: StringCodeGeneration,
+}
+
+/// Controls whether a code-mode session may compile JavaScript supplied as a string.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum StringCodeGeneration {
+    #[default]
+    Allow,
+    Deny,
 }
 
 impl InProcessCodeModeSession {
@@ -41,12 +50,20 @@ impl InProcessCodeModeSession {
     }
 
     pub fn with_limits(cell_execution_limits: CodeModeSessionCellExecutionLimits) -> Self {
+        Self::with_limits_and_string_code_generation(
+            cell_execution_limits,
+            StringCodeGeneration::Allow,
+        )
+    }
+
+    pub fn with_limits_and_string_code_generation(
+        cell_execution_limits: CodeModeSessionCellExecutionLimits,
+        string_code_generation: StringCodeGeneration,
+    ) -> Self {
         Self {
             runtime: SessionRuntime::new(),
-            cell_execution_limits: CodeModeSessionCellExecutionLimits {
-                max_heap_size_bytes: None,
-                ..cell_execution_limits
-            },
+            cell_execution_limits,
+            string_code_generation,
         }
     }
 
@@ -56,10 +73,8 @@ impl InProcessCodeModeSession {
     ) -> Self {
         Self {
             runtime: SessionRuntime::new_with_task_failure_handler(Some(task_failure_handler)),
-            cell_execution_limits: CodeModeSessionCellExecutionLimits {
-                max_heap_size_bytes: None,
-                ..cell_execution_limits
-            },
+            cell_execution_limits,
+            string_code_generation: StringCodeGeneration::Allow,
         }
     }
 
@@ -73,7 +88,11 @@ impl InProcessCodeModeSession {
         let started = self
             .runtime
             .execute(
-                runtime_request(request),
+                runtime_request(
+                    request,
+                    self.string_code_generation,
+                    self.cell_execution_limits.max_heap_size_bytes,
+                ),
                 runtime::ObserveMode::YieldAfter(self.resolve_yield_timeout(yield_time_ms))
                     .with_yield_signal(preempt.unwrap_or_default()),
                 Arc::new(ProtocolDelegate { delegate }),
@@ -102,7 +121,11 @@ impl InProcessCodeModeSession {
         let started = self
             .runtime
             .execute(
-                runtime_request(request),
+                runtime_request(
+                    request,
+                    self.string_code_generation,
+                    self.cell_execution_limits.max_heap_size_bytes,
+                ),
                 runtime::ObserveMode::PendingFrontier,
                 Arc::new(ProtocolDelegate { delegate }),
             )
@@ -317,7 +340,11 @@ impl runtime::SessionRuntimeDelegate for ProtocolDelegate {
     }
 }
 
-fn runtime_request(request: ExecuteRequest) -> runtime::CreateCellRequest {
+fn runtime_request(
+    request: ExecuteRequest,
+    string_code_generation: StringCodeGeneration,
+    max_heap_size_bytes: Option<usize>,
+) -> runtime::CreateCellRequest {
     runtime::CreateCellRequest {
         tool_call_id: request.tool_call_id,
         enabled_tools: request
@@ -337,6 +364,8 @@ fn runtime_request(request: ExecuteRequest) -> runtime::CreateCellRequest {
             })
             .collect(),
         source: request.source,
+        string_code_generation,
+        max_heap_size_bytes,
     }
 }
 
