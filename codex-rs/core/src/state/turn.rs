@@ -91,6 +91,7 @@ pub(crate) struct TurnState {
     pending_elicitations: HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>,
     pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
     pub(crate) pending_input: TurnInputQueue,
+    user_input_activity_observed: bool,
     mailbox_delivery_phase: MailboxDeliveryPhase,
     pub(crate) tool_calls: u64,
     pub(crate) has_memory_citation: bool,
@@ -117,6 +118,18 @@ pub(crate) struct PendingRequestPermissions {
 }
 
 impl TurnState {
+    pub(crate) fn mark_user_input_activity_observed(&mut self) {
+        self.user_input_activity_observed = true;
+    }
+
+    pub(crate) fn user_input_activity_observed(&self) -> bool {
+        self.user_input_activity_observed
+    }
+
+    pub(crate) fn clear_user_input_activity_observed(&mut self) {
+        self.user_input_activity_observed = false;
+    }
+
     pub(crate) fn insert_pending_approval(
         &mut self,
         key: String,
