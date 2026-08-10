@@ -1024,6 +1024,10 @@ async fn execute_inner(
                                         "id": item.id, "turnId": turn.id, "type": "webSearch",
                                         "name": "webSearch", "status": null
                                     })),
+                                    ThreadItemPayload::WorkflowResultRead(item) => Some(json!({
+                                        "id": item.id, "turnId": turn.id, "type": "workflowResultRead",
+                                        "name": "ReadWorkflowResult", "status": item.status
+                                    })),
                                     ThreadItemPayload::UserMessage { .. }
                                     | ThreadItemPayload::FunctionCallOutput { .. }
                                     | ThreadItemPayload::HookPrompt { .. }
@@ -1032,6 +1036,7 @@ async fn execute_inner(
                                     | ThreadItemPayload::Reasoning { .. }
                                     | ThreadItemPayload::SubAgentActivity { .. }
                                     | ThreadItemPayload::ImageView { .. }
+                                    | ThreadItemPayload::WorkflowInputAnalysis(_)
                                     | ThreadItemPayload::EnteredReviewMode { .. }
                                     | ThreadItemPayload::ExitedReviewMode { .. }
                                     | ThreadItemPayload::ContextCompaction { .. } => None,
@@ -1543,6 +1548,13 @@ fn turn_summary(turn: &Turn, include_outputs: bool, output_chars: usize) -> Valu
             }),
             ThreadItemPayload::Sleep(item) => json!({
                 "type": "sleep", "id": item.id, "durationMs": item.duration_ms
+            }),
+            ThreadItemPayload::WorkflowInputAnalysis(item) => json!({
+                "type": "workflowInputAnalysis", "id": item.id
+            }),
+            ThreadItemPayload::WorkflowResultRead(item) => json!({
+                "type": "workflowResultRead", "id": item.id,
+                "runId": item.run_id, "status": item.status
             }),
             ThreadItemPayload::ImageGeneration(item) => {
                 let mut image = json!({

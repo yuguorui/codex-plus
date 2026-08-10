@@ -86,7 +86,7 @@ use codex_login::RefreshTokenError;
 use codex_login::UnauthorizedRecovery;
 use codex_login::default_client::ClientRedirectPolicy;
 use codex_login::default_client::add_originator_header;
-use codex_login::default_client::create_client_for_route;
+use codex_login::default_client::create_client_for_route_async;
 use codex_otel::SessionTelemetry;
 use codex_otel::WEBSOCKET_CONTINUATION_COUNT_METRIC;
 use codex_otel::current_span_w3c_trace_context;
@@ -257,7 +257,7 @@ struct CurrentClientSetup {
 }
 
 impl CurrentClientSetup {
-    fn build_api_transport(&self, endpoint: &str) -> Result<ReqwestTransport> {
+    async fn build_api_transport(&self, endpoint: &str) -> Result<ReqwestTransport> {
         let api_provider = &self.api_provider;
         let redirect_policy = if api_provider
             .headers
@@ -267,13 +267,13 @@ impl CurrentClientSetup {
         } else {
             self.redirect_policy
         };
-        let client = create_client_for_route(
-            &self.http_client_factory,
-            &api_provider.url_for_path(endpoint),
+        let client = create_client_for_route_async(
+            self.http_client_factory.clone(),
+            api_provider.url_for_path(endpoint),
             ClientRouteClass::Api,
             redirect_policy,
         )
-        .map_err(std::io::Error::from)?;
+        .await?;
         Ok(ReqwestTransport::from_http_client(client))
     }
 }
@@ -859,7 +859,9 @@ impl ModelClient {
         if let Some(api_provider) = api_provider_override {
             client_setup.api_provider = api_provider;
         }
-        let transport = client_setup.build_api_transport(REALTIME_CALLS_ENDPOINT)?;
+        let transport = client_setup
+            .build_api_transport(REALTIME_CALLS_ENDPOINT)
+            .await?;
         let response =
             ApiRealtimeCallClient::new(transport, client_setup.api_provider, client_setup.api_auth)
                 .create_with_session_and_headers(sdp, session_config, extra_headers)
@@ -907,7 +909,9 @@ impl ModelClient {
         let client_setup = self
             .current_client_setup(ClientRouting::ConfiguredProvider)
             .await?;
-        let transport = client_setup.build_api_transport(MEMORIES_SUMMARIZE_ENDPOINT)?;
+        let transport = client_setup
+            .build_api_transport(MEMORIES_SUMMARIZE_ENDPOINT)
+            .await?;
         let request_telemetry = Self::build_request_telemetry(
             session_telemetry,
             AuthRequestTelemetryContext::new(
@@ -1989,7 +1993,7 @@ impl ResponsesHttpExecutor<'_> {
                 .client
                 .responses_headers(client_setup.auth.as_ref(), &model_info.slug);
             tracing::Span::current().record("api.path", "/responses");
-            let transport = client_setup.build_api_transport("/responses")?;
+            let transport = client_setup.build_api_transport("/responses").await?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),

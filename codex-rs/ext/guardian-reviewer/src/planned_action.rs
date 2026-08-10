@@ -39,6 +39,7 @@ pub fn build_guardian_planned_action(
             GuardianApprovalRequest::ExecCommand { .. }
             | GuardianApprovalRequest::ApplyPatch { .. }
             | GuardianApprovalRequest::McpToolCall { .. }
+            | GuardianApprovalRequest::ExtensionTool { .. }
             | GuardianApprovalRequest::RequestPermissions { .. } => PlannedActionKind::Command {
                 json: format_guardian_action_pretty(request)?,
             },

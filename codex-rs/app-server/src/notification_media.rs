@@ -138,7 +138,10 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
         | ServerNotification::WindowsWorldWritableWarning(_)
         | ServerNotification::WindowsSandboxSetupCompleted(_)
         | ServerNotification::AccountLoginCompleted(_)
-        | ServerNotification::GatewayOAuthChanged(_) => notification,
+        | ServerNotification::GatewayOAuthChanged(_)
+        | ServerNotification::WorkflowStarted(_)
+        | ServerNotification::WorkflowProgress(_)
+        | ServerNotification::WorkflowCompleted(_) => notification,
     }
 }
 
@@ -216,6 +219,8 @@ fn without_thread_item_media(mut item: ThreadItemPayload) -> ThreadItemPayload {
         | ThreadItemPayload::WebSearch(_)
         | ThreadItemPayload::ImageView { .. }
         | ThreadItemPayload::Sleep(_)
+        | ThreadItemPayload::WorkflowInputAnalysis(_)
+        | ThreadItemPayload::WorkflowResultRead(_)
         | ThreadItemPayload::EnteredReviewMode { .. }
         | ThreadItemPayload::ExitedReviewMode { .. }
         | ThreadItemPayload::ContextCompaction { .. } => {}
