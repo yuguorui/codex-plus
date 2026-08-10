@@ -570,7 +570,9 @@ pub async fn process_chat_sse(
         tool_names,
         ..Default::default()
     };
-    let _ = tx_event.send(Ok(ResponseEvent::Created {})).await;
+    let _ = tx_event
+        .send(Ok(ResponseEvent::Created { response_id: None }))
+        .await;
 
     loop {
         let start = Instant::now();
@@ -729,7 +731,7 @@ mod tests {
         ])
         .await;
 
-        assert_matches!(events[0], ResponseEvent::Created);
+        assert_matches!(events[0], ResponseEvent::Created { .. });
         assert_matches!(
             events[1],
             ResponseEvent::OutputItemAdded(ResponseItem::Message { .. })
