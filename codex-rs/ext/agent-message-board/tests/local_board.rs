@@ -643,6 +643,7 @@ fn board_tool_call(name: &str, args: serde_json::Value) -> codex_tools::ToolCall
         conversation_history: codex_tools::ConversationHistory::default(),
         turn_item_emitter: Arc::new(codex_tools::NoopTurnItemEmitter),
         environments: vec![],
+        agent_configuration: None,
         payload: codex_tools::ToolPayload::Function {
             arguments: args.to_string(),
         },

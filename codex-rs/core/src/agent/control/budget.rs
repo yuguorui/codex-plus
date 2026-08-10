@@ -10,7 +10,7 @@ use codex_protocol::protocol::TokenUsage;
 
 impl LocalAgentControl {
     pub(crate) fn record_rollout_budget_usage(&self, usage: &TokenUsage) -> CodexResult<()> {
-        if self.rollout_budget.record_usage(usage)? {
+        if self.rollout_budget.record_usage(usage)? && self.enforces_rollout_budget() {
             return Err(CodexErr::SessionBudgetExceeded);
         }
         Ok(())
