@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::config::RolloutBudgetConfig;
 use crate::context::SubagentNotification;
 use crate::environment_selection::TurnEnvironmentSnapshot;
+use crate::rollout_budget::RolloutBudget;
 use crate::session::emit_subagent_session_started;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::session_prefix::format_subagent_context_line;
@@ -85,6 +86,14 @@ mod watch;
 const MAX_ENVIRONMENT_SUBAGENTS: usize = 8;
 const MAX_ENVIRONMENT_SUBAGENT_BYTES: usize = 1_024;
 
+/// Whether exceeding the shared rollout budget stops the session or is only observed.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum RolloutBudgetEnforcement {
+    #[default]
+    Enforce,
+    Observe,
+}
+
 /// Per-session controller handle for a local agent tree.
 /// Handles retain a session identity and share their tree's `LocalAgentRuntime`.
 /// Local startup preserves that state when creating or resuming children.
@@ -112,10 +121,70 @@ impl LocalAgentControl {
         thread_id_generator: ThreadIdGenerator,
         rollout_budget: Option<RolloutBudgetConfig>,
     ) -> Self {
+        Self::new_with_rollout_budget_enforcement(
+            manager,
+            thread_id_generator,
+            rollout_budget,
+            RolloutBudgetEnforcement::Enforce,
+        )
+    }
+
+    pub(crate) fn new_with_rollout_budget_enforcement(
+        manager: Weak<ThreadManagerState>,
+        thread_id_generator: ThreadIdGenerator,
+        rollout_budget: Option<RolloutBudgetConfig>,
+        rollout_budget_enforcement: RolloutBudgetEnforcement,
+    ) -> Self {
+        let mut runtime = LocalAgentRuntime::new(manager, thread_id_generator, rollout_budget);
+        runtime.rollout_budget_enforcement = rollout_budget_enforcement;
         Self {
             session_id: SessionId::default(),
-            runtime: LocalAgentRuntime::new(manager, thread_id_generator, rollout_budget),
+            runtime,
         }
+    }
+
+    /// Builds a sibling handle that shares the source tree's rollout budget and routing tier.
+    pub(crate) fn new_with_shared_rollout_budget(
+        manager: Weak<ThreadManagerState>,
+        source: &Self,
+        rollout_budget_enforcement: RolloutBudgetEnforcement,
+    ) -> Self {
+        Self {
+            session_id: SessionId::default(),
+            runtime: LocalAgentRuntime {
+                manager,
+                thread_id_generator: Arc::clone(&source.runtime.thread_id_generator),
+                agent_execution_limiter: Arc::default(),
+                rollout_budget: Arc::clone(&source.runtime.rollout_budget),
+                rollout_budget_enforcement,
+                root_service_tier: Arc::clone(&source.runtime.root_service_tier),
+                shared_thread_instructions_provider: Arc::default(),
+                registry: Arc::default(),
+                residency: Arc::default(),
+            },
+        }
+    }
+
+    /// Shares this tree's registry while dropping budget enforcement for fresh subagents.
+    pub(crate) fn with_shared_registry_without_rollout_budget(&self) -> Self {
+        Self {
+            runtime: LocalAgentRuntime {
+                agent_execution_limiter: Arc::default(),
+                rollout_budget: Arc::default(),
+                rollout_budget_enforcement: RolloutBudgetEnforcement::Observe,
+                residency: Arc::default(),
+                ..self.runtime.clone()
+            },
+            ..self.clone()
+        }
+    }
+
+    pub(crate) fn rollout_budget(&self) -> &RolloutBudget {
+        self.runtime.rollout_budget.as_ref()
+    }
+
+    pub(crate) fn enforces_rollout_budget(&self) -> bool {
+        self.runtime.rollout_budget_enforcement == RolloutBudgetEnforcement::Enforce
     }
 
     pub(crate) fn with_session_id(mut self, session_id: SessionId, max_threads: usize) -> Self {
@@ -359,11 +428,18 @@ impl LocalAgentControl {
     /// Fetch the last known status for `agent_id`, returning `NotFound` when unavailable.
     pub(crate) async fn get_status(&self, agent_id: ThreadId) -> AgentStatus {
         let Ok(state) = self.upgrade() else {
-            // No agent available if upgrade fails.
-            return AgentStatus::NotFound;
+            return self
+                .runtime
+                .registry
+                .closed_agent_status(agent_id)
+                .unwrap_or(AgentStatus::NotFound);
         };
         let Ok(thread) = state.get_thread(agent_id).await else {
-            return AgentStatus::NotFound;
+            return self
+                .runtime
+                .registry
+                .closed_agent_status(agent_id)
+                .unwrap_or(AgentStatus::NotFound);
         };
         thread.agent_status().await
     }
@@ -382,6 +458,48 @@ impl LocalAgentControl {
 
     pub(crate) fn get_agent_metadata(&self, agent_id: ThreadId) -> Option<AgentMetadata> {
         self.runtime.registry.agent_metadata_for_thread(agent_id)
+    }
+
+    /// Registers a freshly spawned subagent in this tree without metering its spawn slot.
+    pub(crate) fn register_fresh_subagent(
+        &self,
+        parent_thread_id: ThreadId,
+        thread_id: ThreadId,
+        agent_nickname: Option<String>,
+        agent_role: Option<String>,
+    ) -> CodexResult<()> {
+        let registry = &self.runtime.registry;
+        registry.register_root_thread(parent_thread_id);
+        let reservation = registry.reserve_unmetered_spawn_slot();
+        reservation.commit(AgentMetadata {
+            agent_id: Some(thread_id),
+            owning_root_thread_id: registry
+                .agent_metadata_for_thread(parent_thread_id)
+                .and_then(|metadata| metadata.owning_root_thread_id)
+                .or(Some(parent_thread_id)),
+            agent_path: None,
+            agent_nickname,
+            agent_role,
+        });
+        Ok(())
+    }
+
+    /// Resolves the target metadata when `caller_thread_id` owns `target_thread_id`.
+    pub(crate) fn authorize_agent_access(
+        &self,
+        caller_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+    ) -> CodexResult<AgentMetadata> {
+        self.runtime
+            .registry
+            .authorize_agent_access(caller_thread_id, target_thread_id)
+            .ok_or(CodexErr::ThreadNotFound(target_thread_id))
+    }
+
+    pub(crate) fn remember_closed_agent_status(&self, agent_id: ThreadId, status: AgentStatus) {
+        self.runtime
+            .registry
+            .remember_closed_agent_status(agent_id, status);
     }
 
     pub(crate) fn ensure_agent_known(&self, agent_id: ThreadId) -> CodexResult<AgentMetadata> {
@@ -663,6 +781,7 @@ impl LocalAgentControl {
         )?);
         Ok(AgentMetadata {
             agent_id: None,
+            owning_root_thread_id: None,
             agent_path,
             agent_nickname,
             agent_role,
@@ -683,13 +802,19 @@ impl LocalAgentControl {
         if depth == 1 {
             self.runtime.registry.register_root_thread(parent_thread_id);
         }
-        let agent_metadata = self.prepare_agent_metadata(
+        let mut agent_metadata = self.prepare_agent_metadata(
             reservation,
             config,
             agent_path,
             agent_role,
             preferred_agent_nickname,
         )?;
+        agent_metadata.owning_root_thread_id = self
+            .runtime
+            .registry
+            .agent_metadata_for_thread(parent_thread_id)
+            .and_then(|metadata| metadata.owning_root_thread_id)
+            .or(Some(parent_thread_id));
         let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             depth,
@@ -779,6 +904,12 @@ impl LocalAgentControl {
                         .agent_metadata_for_thread(child_thread_id)
                         .unwrap_or(AgentMetadata {
                             agent_id: Some(child_thread_id),
+                            owning_root_thread_id: self
+                                .runtime
+                                .registry
+                                .agent_metadata_for_thread(parent_thread_id)
+                                .and_then(|metadata| metadata.owning_root_thread_id)
+                                .or(Some(parent_thread_id)),
                             ..Default::default()
                         }),
                 ));
@@ -798,7 +929,7 @@ impl LocalAgentControl {
         Ok(children_by_parent)
     }
 
-    async fn persist_thread_spawn_edge_for_source(
+    pub(crate) async fn persist_thread_spawn_edge_for_source(
         &self,
         child_thread: &crate::CodexThread,
         child_thread_id: ThreadId,

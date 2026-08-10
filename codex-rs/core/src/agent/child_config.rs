@@ -9,6 +9,7 @@ use crate::config::Config;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
+use codex_features::Feature;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::models::BaseInstructions;
@@ -111,6 +112,10 @@ pub(crate) fn build_agent_spawn_config(
     step_context: &StepContext,
 ) -> Result<Config, String> {
     let mut config = build_agent_shared_config(step_context.turn.as_ref())?;
+    config
+        .features
+        .disable(Feature::Workflows)
+        .map_err(|error| format!("managed policy prevents subagent workflow isolation: {error}"))?;
     let settings = &step_context.settings;
     config.model = Some(settings.model_info.slug.clone());
     config.model_reasoning_effort = settings.effective_reasoning_effort();
