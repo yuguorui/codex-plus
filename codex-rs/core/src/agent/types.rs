@@ -10,9 +10,11 @@ use codex_protocol::turn_input::CyberAccessProgram;
 
 /// Registry identity shared by loaded and unloaded agents.
 /// Registered agents have an `agent_id`; a reserved spawn can still be awaiting its ID.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AgentMetadata {
     pub agent_id: Option<ThreadId>,
+    /// Root thread that owns this agent; used to authorize cross-agent access.
+    pub owning_root_thread_id: Option<ThreadId>,
     pub agent_path: Option<AgentPath>,
     pub agent_nickname: Option<String>,
     pub agent_role: Option<String>,
