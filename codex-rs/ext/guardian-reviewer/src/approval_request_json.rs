@@ -218,6 +218,19 @@ pub fn guardian_approval_request_to_json(
             tool_description: tool_description.as_ref(),
             annotations: annotations.as_ref(),
         }),
+        GuardianApprovalRequest::ExtensionTool {
+            id: _,
+            tool_name,
+            artifact,
+        } => Ok(serde_json::json!({
+            "tool": "extension_tool",
+            "server": "codex-extension",
+            "toolName": tool_name,
+            "artifact": {
+                "sha256": artifact.sha256(),
+                "byteLength": artifact.byte_length(),
+            },
+        })),
         GuardianApprovalRequest::RequestPermissions {
             id: _,
             environment_id: _,

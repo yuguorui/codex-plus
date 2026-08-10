@@ -468,6 +468,22 @@ async fn run_review_on_session(
             };
             analytics_result.had_prior_review_context =
                 Some(had_prior_review_context(&prompt_mode));
+            match &params.request {
+                GuardianApprovalRequest::ExtensionTool { artifact, .. } => {
+                    review_session
+                        .session
+                        .services
+                        .thread_extension_data
+                        .insert(artifact.clone());
+                }
+                _ => {
+                    review_session
+                        .session
+                        .services
+                        .thread_extension_data
+                        .remove::<crate::guardian::GuardianApprovalArtifact>();
+                }
+            }
             let prompt_items = prompt_builder::build_guardian_prompt_items(
                 params,
                 review_session,

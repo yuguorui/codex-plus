@@ -129,9 +129,15 @@ pub(super) async fn collect_guardian_prompt_items_with_parent_turn(
         .retained_context()
         .map(codex_guardian_context::collect_verified_answer_candidates)
         .unwrap_or_default();
+    let excluded_call_id = match &request {
+        GuardianApprovalRequest::ExtensionTool { id, .. } => Some(id.as_str()),
+        _ => None,
+    };
+    let is_extension_tool_approval =
+        matches!(&request, GuardianApprovalRequest::ExtensionTool { .. });
     let planned_action = codex_guardian_reviewer::build_guardian_planned_action(
         &request,
-        reasons.retry.or(reasons.approval),
+        reasons.retry.clone().or_else(|| reasons.approval.clone()),
     )?;
     let permissions = parent_context
         .map(|context| {
@@ -183,9 +189,10 @@ pub(super) async fn collect_guardian_prompt_items_with_parent_turn(
             use_parent_checkpoint,
         },
         &profile,
+        excluded_call_id,
         root_authorization.as_ref(),
         &trusted_user_inputs,
-        Some(&planned_action),
+        (!is_extension_tool_approval).then_some(&planned_action),
         permissions.as_ref(),
         node_repl_context.as_ref(),
     )?;
@@ -249,6 +256,7 @@ pub(crate) fn render_guardian_transcript_entries(
 pub(super) fn collect_guardian_context(
     history: &dyn SectionHistory,
     profile: &ContextProfile,
+    excluded_call_id: Option<&str>,
     root_conversation_candidates: Option<&codex_guardian_context::RootConversationInput>,
     trusted_user_answers: &[codex_guardian_context::TrustedUserAnswer],
     planned_action: Option<&PlannedAction>,
@@ -257,7 +265,10 @@ pub(super) fn collect_guardian_context(
 ) -> Result<CollectedContext, SectionError> {
     default_registry().prepare(&SectionInput {
         target: profile.target,
-        history: &FilteredGuardianHistory(history),
+        history: &FilteredGuardianHistory {
+            history,
+            excluded_call_id,
+        },
         transcript: &profile.transcript,
         root_conversation: &[],
         root_conversation_candidates,
@@ -316,22 +327,24 @@ impl SectionHistory for GuardianReviewHistory<'_> {
     }
 }
 
-struct FilteredGuardianHistory<'a>(&'a dyn SectionHistory);
+struct FilteredGuardianHistory<'a> {
+    history: &'a dyn SectionHistory,
+    excluded_call_id: Option<&'a str>,
+}
 
 impl SectionHistory for FilteredGuardianHistory<'_> {
     fn items_with_sources(
         &self,
     ) -> Box<dyn Iterator<Item = (&ResponseItem, Option<&codex_history::RetainedSource>)> + Send + '_>
     {
-        Box::new(
-            self.0
-                .items_with_sources()
-                .filter(|(item, _)| !is_guardian_context_message(item)),
-        )
+        Box::new(self.history.items_with_sources().filter(move |(item, _)| {
+            !is_guardian_context_message(item)
+                && !is_excluded_tool_exchange(item, self.excluded_call_id)
+        }))
     }
 
     fn retained_context(&self) -> Option<&codex_history::RetainedContext> {
-        self.0.retained_context()
+        self.history.retained_context()
     }
 
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
@@ -342,13 +355,29 @@ impl SectionHistory for FilteredGuardianHistory<'_> {
         &self,
         message: &codex_history::RetainedUserMessage,
     ) -> Option<GuardianRootMessage> {
-        self.0.render_original_assistant(message)
+        self.history.render_original_assistant(message)
     }
 
     fn render_retained_assistant(
         &self,
         message: &codex_history::RetainedUserMessage,
     ) -> Option<GuardianRootMessage> {
-        self.0.render_retained_assistant(message)
+        self.history.render_retained_assistant(message)
+    }
+}
+
+fn is_excluded_tool_exchange(item: &ResponseItem, excluded_call_id: Option<&str>) -> bool {
+    let Some(excluded_call_id) = excluded_call_id else {
+        return false;
+    };
+    match item {
+        ResponseItem::FunctionCall { call_id, .. }
+        | ResponseItem::CustomToolCall { call_id, .. }
+        | ResponseItem::FunctionCallOutput {
+            call_id: Some(call_id),
+            ..
+        }
+        | ResponseItem::CustomToolCallOutput { call_id, .. } => call_id == excluded_call_id,
+        _ => false,
     }
 }
