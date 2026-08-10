@@ -138,10 +138,14 @@ fn spawn_cell_actor_harness_with_host_and_failure_handler<H: CellHost>(
             tool_preloads: &[],
             source: "await new Promise(() => {});".to_string(),
             output_truncation: CodeModeOutputTruncation::Client,
+            string_code_generation: crate::StringCodeGeneration::Allow,
+            max_heap_size_bytes: None,
         },
         runtime_event_tx,
         PendingRuntimeMode::PauseUntilResumed,
         /*task_failure_handler*/ None,
+        crate::StringCodeGeneration::Allow,
+        /*max_heap_size_bytes*/ None,
     )
     .unwrap();
     let (runtime_control_tx, runtime_control_rx) = std_mpsc::channel();
