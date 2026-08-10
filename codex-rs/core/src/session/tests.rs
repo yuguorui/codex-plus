@@ -25,7 +25,6 @@ use crate::config::RuntimeConfigRefresh;
 use crate::context::ContextualUserFragment;
 use crate::context::DeveloperInstructions;
 use crate::context::TurnAborted;
-use crate::environment_selection::EnvironmentAttachment;
 use crate::environment_selection::EnvironmentConfigOrigin;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentState;
@@ -2522,6 +2521,63 @@ async fn record_conversation_items_stamps_missing_turn_id_and_preserves_existing
     expected_fresh_item.set_create_time_if_missing(fresh_create_time);
     let expected_items = vec![expected_fresh_item, existing_item];
     assert_eq!(recorded_items, expected_items);
+}
+
+#[tokio::test]
+async fn identified_idle_injection_is_durable_and_idempotent() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let mut item = user_message("workflow completed");
+    item.set_id(Some(ResponseItemId::with_suffix(
+        "msg",
+        "workflow-completed",
+    )));
+
+    assert!(session.inject_no_new_turn_once(item.clone()).await);
+    assert!(session.inject_no_new_turn_once(item).await);
+
+    let history = session.clone_history().await;
+    assert_eq!(
+        history
+            .raw_items()
+            .filter(|item| {
+                item.id() == Some(&ResponseItemId::with_suffix("msg", "workflow-completed"))
+            })
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn identified_injection_reserves_id_while_drained_input_is_in_flight() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let item_id = ResponseItemId::with_suffix("msg", "workflow-in-flight");
+    let mut item = user_message("workflow completed");
+    item.set_id(Some(item_id.clone()));
+    let turn_state = {
+        let mut active = session.active_turn.lock().await;
+        Arc::clone(&active.get_or_insert_with(ActiveTurn::default).turn_state)
+    };
+
+    assert!(!session.inject_no_new_turn_once(item.clone()).await);
+    let drained = session
+        .input_queue
+        .take_pending_input_for_turn_state(turn_state.as_ref())
+        .await;
+    assert_eq!(
+        drained,
+        vec![TurnInput::ResponseItem(ResponseItemEnvelope::new(
+            item.clone()
+        ))]
+    );
+
+    assert!(!session.inject_no_new_turn_once(item).await);
+    assert_eq!(
+        session
+            .input_queue
+            .take_pending_input_for_turn_state(turn_state.as_ref())
+            .await,
+        Vec::new()
+    );
 }
 
 #[tokio::test]
@@ -7117,6 +7173,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         fork_persistence: ForkPersistence::Copied,
         history_initialization: HistoryInitialization::New,
         forked_from_ordinal_exclusive: None,
+        closing: std::sync::atomic::AtomicBool::new(false),
         next_internal_sub_id: AtomicU64::new(0),
     };
     let per_turn_config = session.build_per_turn_config(
@@ -7284,6 +7341,7 @@ async fn make_session_with_config_and_rx(
         &default_environments,
         Arc::clone(&config),
         SessionInstructions::default(),
+        /*frozen_project_instructions*/ None,
         "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
         /*runtime_auth*/ Default::default(),
@@ -7424,6 +7482,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         &default_environments,
         Arc::clone(&config),
         SessionInstructions::default(),
+        /*frozen_project_instructions*/ None,
         "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
         /*runtime_auth*/ Default::default(),
@@ -9462,6 +9521,7 @@ where
         fork_persistence: ForkPersistence::Copied,
         history_initialization: HistoryInitialization::New,
         forked_from_ordinal_exclusive: None,
+        closing: std::sync::atomic::AtomicBool::new(false),
         next_internal_sub_id: AtomicU64::new(0),
     });
     let per_turn_config = session.build_per_turn_config(
