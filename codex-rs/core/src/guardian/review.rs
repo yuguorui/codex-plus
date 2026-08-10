@@ -48,6 +48,7 @@ use super::approval_request::guardian_reviewed_action;
 use super::review_session::GuardianReviewSessionParams;
 use super::review_session::build_guardian_review_session_config;
 use codex_guardian_reviewer::guardian_output_schema;
+use codex_protocol::protocol::GuardianAssessmentOutcome;
 
 const GUARDIAN_PLUGIN_ATTRIBUTION_TIMEOUT: Duration = Duration::from_secs(5);
 
