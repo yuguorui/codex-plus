@@ -152,19 +152,13 @@ async fn handle_file_edit(
         &args.file_path,
     )?;
     let path_summary = summarize_tool_argument(&path.inferred_native_path_string());
-    let native_cwd = turn_environment.cwd().to_abs_path().map_err(|error| {
-        FunctionCallError::RespondToModel(format!(
-            "Edit could not resolve the environment working directory: {error}"
-        ))
-    })?;
     let effective_permissions = apply_granted_turn_permissions(
-        session.as_ref(),
-        &turn_environment.selection.environment_id,
-        native_cwd.as_path(),
+        step_context.as_ref(),
+        turn_environment,
+        turn_environment.cwd(),
         SandboxPermissions::UseDefault,
         /*additional_permissions*/ None,
-    )
-    .await;
+    );
     let sandbox = turn_environment.sandbox_context(effective_permissions.additional_permissions);
     let fs = turn_environment.environment.get_filesystem();
 
