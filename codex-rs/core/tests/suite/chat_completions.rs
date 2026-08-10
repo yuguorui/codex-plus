@@ -221,8 +221,8 @@ async fn chat_wire_api_tool_call_round_trip_sends_tool_message() -> Result<()> {
                         "index": 0,
                         "id": "call-1",
                         "function": {
-                            "name": "shell_command",
-                            "arguments": "{\"command\":\"echo chat-tool\"}"
+                            "name": "exec_command",
+                            "arguments": "{\"cmd\":\"echo chat-tool\"}"
                         }
                     }]
                 },
@@ -409,16 +409,16 @@ async fn chat_wire_api_parallel_tool_calls_round_trip_in_one_assistant_message()
                             "index": 0,
                             "id": "call-alpha",
                             "function": {
-                                "name": "shell_command",
-                                "arguments": "{\"command\":\"echo alpha\"}"
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"echo alpha\"}"
                             }
                         },
                         {
                             "index": 1,
                             "id": "call-beta",
                             "function": {
-                                "name": "shell_command",
-                                "arguments": "{\"command\":\"echo beta\"}"
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"echo beta\"}"
                             }
                         }
                     ]
@@ -456,16 +456,16 @@ async fn chat_wire_api_parallel_tool_calls_round_trip_in_one_assistant_message()
                 "id": "call-alpha",
                 "type": "function",
                 "function": {
-                    "name": "shell_command",
-                    "arguments": "{\"command\":\"echo alpha\"}"
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"echo alpha\"}"
                 }
             },
             {
                 "id": "call-beta",
                 "type": "function",
                 "function": {
-                    "name": "shell_command",
-                    "arguments": "{\"command\":\"echo beta\"}"
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"echo beta\"}"
                 }
             }
         ])
@@ -571,8 +571,8 @@ async fn chat_wire_api_token_usage_drives_auto_compaction() -> Result<()> {
                         "index": 0,
                         "id": "call-compact",
                         "function": {
-                            "name": "shell_command",
-                            "arguments": "{\"command\":\"echo compact-trigger\"}"
+                            "name": "exec_command",
+                            "arguments": "{\"cmd\":\"echo compact-trigger\"}"
                         }
                     }]
                 },

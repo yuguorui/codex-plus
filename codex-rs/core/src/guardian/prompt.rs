@@ -115,9 +115,15 @@ pub(super) async fn collect_guardian_prompt_items_with_parent_turn(
         .retained_context()
         .map(codex_guardian_context::collect_verified_answer_candidates)
         .unwrap_or_default();
+    let excluded_call_id = match &request {
+        GuardianApprovalRequest::ExtensionTool { id, .. } => Some(id.clone()),
+        _ => None,
+    };
+    let is_extension_tool_approval =
+        matches!(&request, GuardianApprovalRequest::ExtensionTool { .. });
     let planned_action = codex_guardian_reviewer::build_guardian_planned_action(
         &request,
-        reasons.retry.or(reasons.approval),
+        reasons.retry.clone().or_else(|| reasons.approval.clone()),
     )?;
     let permissions = super::permissions::for_request(&request, parent_context)?;
     let node_repl_snapshot = if node_repl_transcripts_enabled {
@@ -157,25 +163,28 @@ pub(super) async fn collect_guardian_prompt_items_with_parent_turn(
         Some(context) => context.turn().config.guardian_transcript_mode,
         None => config.guardian_transcript_mode,
     };
-    let sections = collect_guardian_context(SectionInput {
-        target: profile.target,
-        history: &GuardianReviewHistory {
-            history,
-            use_parent_checkpoint,
+    let sections = collect_guardian_context(
+        SectionInput {
+            target: profile.target,
+            history: &GuardianReviewHistory {
+                history,
+                use_parent_checkpoint,
+            },
+            transcript: &profile.transcript,
+            is_selected_exec_output,
+            root_conversation: &[],
+            root_conversation_candidates: root_authorization.as_ref(),
+            trusted_user_answers: &trusted_user_inputs,
+            planned_action: (!is_extension_tool_approval).then_some(&planned_action),
+            permissions: permissions.as_ref(),
+            previous_reviews: None,
+            trusted_tool: None,
+            trusted_skill_paths: &[],
+            images: None,
+            node_repl: node_repl_context.as_ref(),
         },
-        transcript: &profile.transcript,
-        is_selected_exec_output,
-        root_conversation: &[],
-        root_conversation_candidates: root_authorization.as_ref(),
-        trusted_user_answers: &trusted_user_inputs,
-        planned_action: Some(&planned_action),
-        permissions: permissions.as_ref(),
-        previous_reviews: None,
-        trusted_tool: None,
-        trusted_skill_paths: &[],
-        images: None,
-        node_repl: node_repl_context.as_ref(),
-    })?;
+        excluded_call_id.as_deref(),
+    )?;
     Ok(CollectedGuardianPrompt {
         sections,
         profile,
@@ -201,9 +210,13 @@ pub(super) async fn collect_guardian_prompt_items_with_parent_turn(
 /// The cursor counts every non-empty evidence entry.
 pub(super) fn collect_guardian_context(
     input: SectionInput<'_>,
+    excluded_call_id: Option<&str>,
 ) -> Result<CollectedContext, SectionError> {
     default_registry().prepare(&SectionInput {
-        history: &FilteredGuardianHistory(input.history),
+        history: &FilteredGuardianHistory {
+            history: input.history,
+            excluded_call_id,
+        },
         ..input
     })
 }
@@ -252,22 +265,24 @@ impl SectionHistory for GuardianReviewHistory<'_> {
     }
 }
 
-struct FilteredGuardianHistory<'a>(&'a dyn SectionHistory);
+struct FilteredGuardianHistory<'a> {
+    history: &'a dyn SectionHistory,
+    excluded_call_id: Option<&'a str>,
+}
 
 impl SectionHistory for FilteredGuardianHistory<'_> {
     fn items_with_sources(
         &self,
     ) -> Box<dyn Iterator<Item = (&ResponseItem, Option<&codex_history::RetainedSource>)> + Send + '_>
     {
-        Box::new(
-            self.0
-                .items_with_sources()
-                .filter(|(item, _)| !is_guardian_context_message(item)),
-        )
+        Box::new(self.history.items_with_sources().filter(move |(item, _)| {
+            !is_guardian_context_message(item)
+                && !is_excluded_tool_exchange(item, self.excluded_call_id)
+        }))
     }
 
     fn retained_context(&self) -> Option<&codex_history::RetainedContext> {
-        self.0.retained_context()
+        self.history.retained_context()
     }
 
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
@@ -278,13 +293,29 @@ impl SectionHistory for FilteredGuardianHistory<'_> {
         &self,
         message: &codex_history::RetainedUserMessage,
     ) -> Option<GuardianRootMessage> {
-        self.0.render_original_assistant(message)
+        self.history.render_original_assistant(message)
     }
 
     fn render_retained_assistant(
         &self,
         message: &codex_history::RetainedUserMessage,
     ) -> Option<GuardianRootMessage> {
-        self.0.render_retained_assistant(message)
+        self.history.render_retained_assistant(message)
+    }
+}
+
+fn is_excluded_tool_exchange(item: &ResponseItem, excluded_call_id: Option<&str>) -> bool {
+    let Some(excluded_call_id) = excluded_call_id else {
+        return false;
+    };
+    match item {
+        ResponseItem::FunctionCall { call_id, .. }
+        | ResponseItem::CustomToolCall { call_id, .. }
+        | ResponseItem::FunctionCallOutput {
+            call_id: Some(call_id),
+            ..
+        }
+        | ResponseItem::CustomToolCallOutput { call_id, .. } => call_id == excluded_call_id,
+        _ => false,
     }
 }

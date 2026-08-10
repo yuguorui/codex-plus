@@ -253,7 +253,7 @@ impl HashlineHandler {
                         Some(&tracker),
                     );
                     emitter.begin(event_ctx).await;
-                    let fs = turn_environment.environment.get_filesystem();
+                    let fs = turn_environment.environment().get_filesystem();
                     if let Err(error) = write_file_verified(VerifiedFileWrite {
                         fs: fs.as_ref(),
                         path: &path,
@@ -357,7 +357,7 @@ async fn read_document(
     path: &PathUri,
     sandbox: Option<&FileSystemSandboxContext>,
 ) -> Result<LoadedDocument, FunctionCallError> {
-    let fs = turn_environment.environment.get_filesystem();
+    let fs = turn_environment.environment().get_filesystem();
     let bytes = fs
         .read_file(path, ReadFileOptions::default(), sandbox)
         .await
