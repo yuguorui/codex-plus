@@ -231,6 +231,7 @@ async fn cloud_preference_preserves_aliases_reads_and_executor_fallback() -> Tes
                             PathUri::parse("file:///skills")?,
                             &access,
                         )],
+                        agent_configuration: None,
                         payload: payload.clone(),
                     })
                     .await?;
