@@ -250,6 +250,17 @@ fn text_content(items: Vec<String>) -> SectionDelivery {
 }
 
 impl ComposedContext {
+    /// Appends host-supplied user text after every standard section, so the host
+    /// can add bounded approval context (such as a content-addressed extension
+    /// action) that is not part of the conversation history. Each call becomes
+    /// its own required text item within a dedicated section.
+    pub fn push_user_text(&mut self, text: String) {
+        self.sections.push(SectionOutput {
+            id: "host_user_text",
+            delivery: text_content(vec![text]),
+        });
+    }
+
     /// Converts sync content without silently dropping unsupported messages or media.
     pub fn into_user_inputs(self) -> Result<Vec<UserInput>, SectionError> {
         let mut inputs = Vec::new();
