@@ -79,7 +79,7 @@ use codex_login::RefreshTokenError;
 use codex_login::UnauthorizedRecovery;
 use codex_login::default_client::ClientRedirectPolicy;
 use codex_login::default_client::add_originator_header;
-use codex_login::default_client::create_client_for_route;
+use codex_login::default_client::create_client_for_route_async;
 use codex_otel::SessionTelemetry;
 use codex_otel::current_span_w3c_trace_context;
 use codex_protocol::ResponseItemId;
@@ -656,11 +656,13 @@ impl ModelClient {
             client_setup.api_auth.as_ref(),
         ));
         let api_provider = api_provider_override.unwrap_or(client_setup.api_provider);
-        let transport = self.build_api_transport(
-            &api_provider,
-            REALTIME_CALLS_ENDPOINT,
-            client_setup.redirect_policy,
-        )?;
+        let transport = self
+            .build_api_transport(
+                &api_provider,
+                REALTIME_CALLS_ENDPOINT,
+                client_setup.redirect_policy,
+            )
+            .await?;
         let response = ApiRealtimeCallClient::new(transport, api_provider, client_setup.api_auth)
             .create_with_session_and_headers(sdp, session_config, extra_headers)
             .await
@@ -708,11 +710,13 @@ impl ModelClient {
         let client_setup = self
             .current_client_setup(ClientRouting::ConfiguredProvider)
             .await?;
-        let transport = self.build_api_transport(
-            &client_setup.api_provider,
-            MEMORIES_SUMMARIZE_ENDPOINT,
-            client_setup.redirect_policy,
-        )?;
+        let transport = self
+            .build_api_transport(
+                &client_setup.api_provider,
+                MEMORIES_SUMMARIZE_ENDPOINT,
+                client_setup.redirect_policy,
+            )
+            .await?;
         let request_telemetry = Self::build_request_telemetry(
             session_telemetry,
             AuthRequestTelemetryContext::new(
@@ -1147,7 +1151,7 @@ impl ModelClient {
         HeaderValue::from_str(&routing_hint).ok()
     }
 
-    fn build_api_transport(
+    async fn build_api_transport(
         &self,
         api_provider: &ApiProvider,
         endpoint: &str,
@@ -1161,13 +1165,13 @@ impl ModelClient {
         } else {
             redirect_policy
         };
-        let client = create_client_for_route(
-            &self.http_client_factory,
-            &api_provider.url_for_path(endpoint),
+        let client = create_client_for_route_async(
+            self.http_client_factory.clone(),
+            api_provider.url_for_path(endpoint),
             ClientRouteClass::Api,
             redirect_policy,
         )
-        .map_err(std::io::Error::from)?;
+        .await?;
         Ok(ReqwestTransport::from_http_client(client))
     }
 
@@ -1637,11 +1641,14 @@ impl ModelClientSession {
                 .client
                 .responses_headers(client_setup.auth.as_ref(), &model_info.slug);
             tracing::Span::current().record("api.path", "/responses");
-            let transport = self.client.build_api_transport(
-                &client_setup.api_provider,
-                "/responses",
-                client_setup.redirect_policy,
-            )?;
+            let transport = self
+                .client
+                .build_api_transport(
+                    &client_setup.api_provider,
+                    "/responses",
+                    client_setup.redirect_policy,
+                )
+                .await?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
