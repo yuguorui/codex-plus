@@ -37,6 +37,15 @@ const MIN_YIELD_TIME_FOR_GRACE: Duration = Duration::from_secs(10);
 pub struct InProcessCodeModeSession {
     runtime: SessionRuntime,
     options: CodeModeSessionOptions,
+    string_code_generation: StringCodeGeneration,
+}
+
+/// Controls whether a code-mode session may compile JavaScript supplied as a string.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum StringCodeGeneration {
+    #[default]
+    Allow,
+    Deny,
 }
 
 impl InProcessCodeModeSession {
@@ -45,13 +54,26 @@ impl InProcessCodeModeSession {
     }
 
     pub fn with_limits(cell_execution_limits: CodeModeSessionCellExecutionLimits) -> Self {
-        Self::with_options(
-            CodeModeSessionOptions {
+        Self::with_limits_and_string_code_generation(
+            cell_execution_limits,
+            StringCodeGeneration::Allow,
+        )
+    }
+
+    pub fn with_limits_and_string_code_generation(
+        cell_execution_limits: CodeModeSessionCellExecutionLimits,
+        string_code_generation: StringCodeGeneration,
+    ) -> Self {
+        Self {
+            runtime: SessionRuntime::new_with_task_failure_handler(
+                /*task_failure_handler*/ None,
+            ),
+            options: CodeModeSessionOptions {
                 cell_execution_limits,
                 ..CodeModeSessionOptions::default()
             },
-            /*task_failure_handler*/ None,
-        )
+            string_code_generation,
+        }
     }
 
     /// Select output handling at creation. A session's mode must remain fixed
@@ -69,6 +91,7 @@ impl InProcessCodeModeSession {
                 },
                 ..options
             },
+            string_code_generation: StringCodeGeneration::Allow,
         }
     }
 
@@ -84,7 +107,12 @@ impl InProcessCodeModeSession {
         let started = self
             .runtime
             .execute(
-                runtime_request(request, self.options.output_truncation),
+                runtime_request(
+                    request,
+                    self.options.output_truncation,
+                    self.string_code_generation,
+                    self.options.cell_execution_limits.max_heap_size_bytes,
+                ),
                 runtime::ObserveMode::YieldAfter(self.resolve_yield_timeout(yield_time_ms))
                     .with_yield_signal(preempt.unwrap_or_default()),
                 Arc::new(ProtocolDelegate { delegate }),
@@ -121,7 +149,12 @@ impl InProcessCodeModeSession {
         let started = self
             .runtime
             .execute(
-                runtime_request(request, self.options.output_truncation),
+                runtime_request(
+                    request,
+                    self.options.output_truncation,
+                    self.string_code_generation,
+                    self.options.cell_execution_limits.max_heap_size_bytes,
+                ),
                 runtime::ObserveMode::PendingFrontier,
                 Arc::new(ProtocolDelegate { delegate }),
             )
@@ -378,6 +411,8 @@ impl runtime::SessionRuntimeDelegate for ProtocolDelegate {
 fn runtime_request(
     request: ExecuteRequest,
     output_truncation: CodeModeOutputTruncation,
+    string_code_generation: StringCodeGeneration,
+    max_heap_size_bytes: Option<usize>,
 ) -> runtime::CreateCellRequest {
     runtime::CreateCellRequest {
         output_truncation,
@@ -399,6 +434,8 @@ fn runtime_request(
             })
             .collect(),
         source: request.source,
+        string_code_generation,
+        max_heap_size_bytes,
     }
 }
 
