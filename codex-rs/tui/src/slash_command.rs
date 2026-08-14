@@ -63,7 +63,7 @@ pub enum SlashCommand {
     Title,
     Statusline,
     Theme,
-    #[strum(to_string = "pets", serialize = "pet")]
+    Pet,
     Pets,
     Mcp,
     Apps,
@@ -125,7 +125,7 @@ impl SlashCommand {
             SlashCommand::Title => "configure which items appear in the terminal title",
             SlashCommand::Statusline => "configure which items appear in the status line",
             SlashCommand::Theme => "choose a syntax highlighting theme",
-            SlashCommand::Pets => "choose or hide the terminal pet",
+            SlashCommand::Pet | SlashCommand::Pets => "choose or hide the terminal pet",
             SlashCommand::Ps => "list background terminals",
             SlashCommand::Stop => "stop all background terminals",
             SlashCommand::MemoryDrop => "DO NOT USE",
@@ -185,6 +185,7 @@ impl SlashCommand {
                 | SlashCommand::Cd
                 | SlashCommand::Pwd
                 | SlashCommand::Usage
+                | SlashCommand::Pet
                 | SlashCommand::Pets
                 | SlashCommand::Side
                 | SlashCommand::Btw
@@ -301,7 +302,7 @@ impl SlashCommand {
             SlashCommand::Rollout => true,
             SlashCommand::TestApproval => true,
             SlashCommand::Agent | SlashCommand::Agents | SlashCommand::MultiAgents => true,
-            SlashCommand::Theme | SlashCommand::Pets => false,
+            SlashCommand::Theme | SlashCommand::Pet | SlashCommand::Pets => false,
         }
     }
 
@@ -310,6 +311,7 @@ impl SlashCommand {
             SlashCommand::Copy => !cfg!(target_os = "android"),
             SlashCommand::App => cfg!(any(target_os = "macos", target_os = "windows")),
             SlashCommand::Voice => true,
+            SlashCommand::Pet => false,
             SlashCommand::Rollout | SlashCommand::TestApproval => cfg!(debug_assertions),
             _ => true,
         }
@@ -342,9 +344,21 @@ mod tests {
     }
 
     #[test]
-    fn pet_alias_parses_to_pets_command() {
+    fn pet_is_a_hidden_compatibility_alias_for_pets() {
+        assert_eq!(SlashCommand::Pet.command(), "pet");
         assert_eq!(SlashCommand::Pets.command(), "pets");
-        assert_eq!(SlashCommand::from_str("pet"), Ok(SlashCommand::Pets));
+        assert_eq!(SlashCommand::from_str("pet"), Ok(SlashCommand::Pet));
+        assert_eq!(SlashCommand::from_str("pets"), Ok(SlashCommand::Pets));
+        assert!(
+            super::built_in_slash_commands()
+                .iter()
+                .any(|(name, _)| *name == "pets")
+        );
+        assert!(
+            super::built_in_slash_commands()
+                .iter()
+                .all(|(name, _)| *name != "pet")
+        );
     }
 
     #[test]
