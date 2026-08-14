@@ -209,3 +209,63 @@ async fn inline_startup_still_renders_with_pending_history() -> Result<()> {
     assert!(frame_text(&tui).contains("inline startup draft"));
     Ok(())
 }
+
+#[tokio::test]
+async fn owned_startup_renders_ascii_bongo_after_fullscreen_handoff() -> Result<()> {
+    let (mut app, _events, _ops) = make_test_app_with_channels().await;
+    app.chat_widget
+        .set_pet_image_support_for_tests(crate::pets::PetImageSupport::Unsupported(
+            crate::pets::PetImageUnsupportedReason::Tmux,
+        ));
+    app.chat_widget
+        .set_tui_pet(Some(crate::pets::BONGO_CAT_PET_ID.to_string()));
+    app.transcript_cells = vec![Arc::new(crate::history_cell::PlainHistoryCell::new(vec![
+        "x".repeat(/*n*/ 3_000).into(),
+    ]))];
+
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    tui.set_owned_screen(/*owned*/ true)?;
+    let size = Size::new(/*width*/ 100, /*height*/ 30);
+    tui.screen_size_for_event(&TuiEvent::Resize(size))?;
+    let bottom_area = app.render_owned_transcript(&mut tui, size)?;
+    let buffer = last_rendered_buffer(&tui.terminal);
+
+    assert!(
+        frame_text(&tui)
+            .chars()
+            .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch)),
+        "ASCII Bongo Cat must follow the owned-transcript composition path"
+    );
+    assert!(frame_text(&tui).contains(&"x".repeat(/*n*/ 60)));
+    let mut pet_rectangle = None;
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            if matches!(
+                buffer[(x, y)].symbol().chars().next(),
+                Some('\u{2800}'..='\u{28ff}')
+            ) {
+                let rectangle = pet_rectangle.get_or_insert((x, y, x, y));
+                rectangle.0 = rectangle.0.min(x);
+                rectangle.1 = rectangle.1.min(y);
+                rectangle.2 = rectangle.2.max(x);
+                rectangle.3 = rectangle.3.max(y);
+                assert!(
+                    y >= bottom_area.y,
+                    "ASCII Bongo Cat must stay inside the reserved bottom pane at row {y}"
+                );
+            }
+        }
+    }
+    let (left, top, right, bottom) =
+        pet_rectangle.expect("ASCII Bongo Cat rectangle should contain Braille cells");
+    assert_eq!((right - left + 1, bottom - top + 1), (32, 10));
+    let transcript_guard_row = bottom_area.y.saturating_sub(/*rhs*/ 1);
+    for x in left..=right {
+        assert_eq!(
+            buffer[(x, transcript_guard_row)].symbol(),
+            "x",
+            "the final transcript row must survive directly above the ASCII Bongo Cat"
+        );
+    }
+    Ok(())
+}
