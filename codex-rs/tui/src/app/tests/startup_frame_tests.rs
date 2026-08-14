@@ -209,3 +209,28 @@ async fn inline_startup_still_renders_with_pending_history() -> Result<()> {
     assert!(frame_text(&tui).contains("inline startup draft"));
     Ok(())
 }
+
+#[tokio::test]
+async fn owned_startup_renders_ascii_bongo_after_fullscreen_handoff() -> Result<()> {
+    let (mut app, _events, _ops) = make_test_app_with_channels().await;
+    app.chat_widget
+        .set_pet_image_support_for_tests(crate::pets::PetImageSupport::Unsupported(
+            crate::pets::PetImageUnsupportedReason::Tmux,
+        ));
+    app.chat_widget
+        .set_tui_pet(Some(crate::pets::BONGO_CAT_PET_ID.to_string()));
+
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    tui.set_owned_screen(/*owned*/ true)?;
+    let size = Size::new(/*width*/ 100, /*height*/ 30);
+    tui.screen_size_for_event(&TuiEvent::Resize(size))?;
+    app.render_owned_transcript(&mut tui, size)?;
+
+    assert!(
+        frame_text(&tui)
+            .chars()
+            .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch)),
+        "ASCII Bongo Cat must follow the owned-transcript composition path"
+    );
+    Ok(())
+}
