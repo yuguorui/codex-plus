@@ -232,6 +232,16 @@ impl App {
                     MotionMode::from_animations_enabled(self.local_settings.tui.animations),
                 );
             bottom.render(bottom_area, frame.buffer);
+            chat_widget.render_ambient_text_pet(
+                Rect::new(
+                    /*x*/ 0,
+                    /*y*/ 0,
+                    screen_size.width,
+                    screen_size.height,
+                ),
+                bottom_area.bottom(),
+                frame.buffer,
+            );
             if let (Some(tip), Some(area)) = (completion_tip, completion_tip_area) {
                 tip.render(area, frame.buffer);
             }
