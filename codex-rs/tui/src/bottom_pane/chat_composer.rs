@@ -559,6 +559,7 @@ fn parent_owned_command_is_allowed(command: SlashCommand, args: &str) -> bool {
                 | SlashCommand::Ide
                 | SlashCommand::DebugConfig
                 | SlashCommand::Theme
+                | SlashCommand::Pet
                 | SlashCommand::Pets
                 | SlashCommand::Ps
                 | SlashCommand::Stop
@@ -4677,6 +4678,7 @@ impl ChatComposer {
         mask_char: Option<char>,
         options: ComposerRenderOptions<'_>,
     ) {
+        let textarea_right_reserve = options.textarea_right_reserve;
         let ComposerLayout {
             status,
             composer: composer_rect,
@@ -4686,6 +4688,8 @@ impl ChatComposer {
             popup: popup_rect,
             footer: footer_rect,
         } = self.layout_with_options(area, options);
+        let mut status = status;
+        status.width = status.width.saturating_sub(textarea_right_reserve);
         self.render_status_surface(status, buf, options);
         if self.popups.active.is_above_composer()
             && options.command_popup_placement != CommandPopupPlacement::Hidden
@@ -4730,7 +4734,10 @@ impl ChatComposer {
                 }
             }
         }
-        let transcript_hint_area = inset_footer_hint_area(footer_rect);
+        let mut transcript_hint_area = inset_footer_hint_area(footer_rect);
+        transcript_hint_area.width = transcript_hint_area
+            .width
+            .saturating_sub(textarea_right_reserve);
         let passive = self.passive_hints(options);
         let warning_notice = if !options.unfocused && passive.is_none() {
             self.warning_notice_layout(transcript_hint_area, options)
@@ -4755,7 +4762,10 @@ impl ChatComposer {
                     .render(transcript_hint_area, buf);
             }
             (None, None) => {
-                let hint_rect = warning_notice::before_warning(footer_rect, warning_area);
+                let mut hint_rect = warning_notice::before_warning(footer_rect, warning_area);
+                if warning_area.is_none() {
+                    hint_rect.width = transcript_hint_area.width;
+                }
                 if let Some(input) = self.draft.textarea.vim_query() {
                     input.render(inset_footer_hint_area(hint_rect), buf);
                 } else if let Some(line) = self.history_search_footer_line() {
