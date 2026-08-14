@@ -25,6 +25,7 @@ use sha2::Digest as _;
 use sha2::Sha256;
 
 use super::catalog;
+use super::catalog::BuiltinPetBehavior;
 
 const MAX_PET_FRAMES: usize = 256;
 const MAX_ANIMATION_FPS: f64 = 60.0;
@@ -173,12 +174,15 @@ fn load_builtin_pet(pet: catalog::BuiltinPet, codex_home: Option<&Path>) -> Resu
         display_name: pet.display_name.to_string(),
         description: pet.description.to_string(),
         spritesheet_path,
-        frame_width: catalog::DEFAULT_FRAME_WIDTH,
-        frame_height: catalog::DEFAULT_FRAME_HEIGHT,
-        columns: catalog::DEFAULT_FRAME_COLUMNS,
-        rows: catalog::DEFAULT_FRAME_ROWS,
-        frame_count: default_frame_count(),
-        animations: with_default_animations(HashMap::new()),
+        frame_width: pet.frame_width,
+        frame_height: pet.frame_height,
+        columns: pet.columns,
+        rows: pet.rows,
+        frame_count: pet.frame_count(),
+        animations: match pet.behavior {
+            BuiltinPetBehavior::Standard => with_default_animations(HashMap::new()),
+            BuiltinPetBehavior::Typing => typing_animations(),
+        },
     })
 }
 
@@ -470,6 +474,7 @@ fn validate_animation_indices(
     Ok(())
 }
 
+#[cfg(test)]
 fn default_frame_count() -> usize {
     (catalog::DEFAULT_FRAME_COLUMNS * catalog::DEFAULT_FRAME_ROWS) as usize
 }
@@ -583,6 +588,36 @@ pub(super) fn with_default_animations(
     }
     animations.insert("idle".to_string(), idle);
     animations
+}
+
+fn typing_animations() -> HashMap<String, Animation> {
+    HashMap::from([
+        (
+            "idle".to_string(),
+            Animation {
+                frames: vec![AnimationFrame {
+                    sprite_index: 0,
+                    duration: Duration::from_millis(/*millis*/ 100),
+                }],
+                loop_start: None,
+                fallback: "idle".to_string(),
+            },
+        ),
+        (
+            "typing".to_string(),
+            Animation {
+                frames: [1, 0, 2, 0]
+                    .into_iter()
+                    .map(|sprite_index| AnimationFrame {
+                        sprite_index,
+                        duration: Duration::from_millis(/*millis*/ 80),
+                    })
+                    .collect(),
+                loop_start: Some(/*loop_start*/ 0),
+                fallback: "idle".to_string(),
+            },
+        ),
+    ])
 }
 
 fn idle_animation() -> Animation {
