@@ -76,6 +76,11 @@ impl App {
         screen_size: Size,
     ) -> Result<Rect> {
         self.chat_widget.sync_warnings(&self.transcript_cells);
+        self.chat_widget.note_rendered_width(screen_size.width);
+        self.chat_widget.note_screen_height(screen_size.height);
+        let text_pet_exclusion_height = self
+            .chat_widget
+            .ambient_text_pet_exclusion_height(screen_size.width, screen_size.height);
         let motion = MotionMode::from_animations_enabled(
             self.local_settings.tui.animations && self.local_settings.tui.effects.shimmer,
         );
@@ -145,6 +150,7 @@ impl App {
             bottom
                 .desired_height(screen_size.width)
                 .min(screen_size.height)
+                .max(text_pet_exclusion_height)
         };
         drop(bottom);
         let available = screen_size.height.saturating_sub(bottom_height);
@@ -212,12 +218,14 @@ impl App {
                 && bottom
                     .desired_height(screen_size.width)
                     .min(screen_size.height)
+                    .max(text_pet_exclusion_height)
                     != bottom_height;
             if footer_height_changed && composer_gap.as_ref().is_some_and(|gap| gap.needs_separator)
             {
                 bottom_area.height = bottom
                     .desired_height(screen_size.width)
-                    .min(screen_size.height);
+                    .min(screen_size.height)
+                    .max(text_pet_exclusion_height);
                 bottom_area.y = screen_size.height.saturating_sub(bottom_area.height);
                 // Resolve controls with the compact viewport first, then make room for
                 // their separator. Resizing must not preserve a stale return control.
@@ -249,6 +257,16 @@ impl App {
                     MotionMode::from_animations_enabled(self.local_settings.tui.animations),
                 );
             bottom.render(bottom_area, frame.buffer);
+            chat_widget.render_ambient_text_pet(
+                Rect::new(
+                    /*x*/ 0,
+                    /*y*/ 0,
+                    screen_size.width,
+                    screen_size.height,
+                ),
+                bottom_area.bottom(),
+                frame.buffer,
+            );
             if let (Some(tip), Some(area)) = (completion_tip, completion_tip_area) {
                 tip.render(area, frame.buffer);
             }
@@ -270,7 +288,6 @@ impl App {
             .filter(|_| chat_widget.no_modal_or_popup_active());
             feedback_tick =
                 view.render_composer_gap(follow_area, composer_hint.as_ref(), frame.buffer, now);
-            chat_widget.note_rendered_width(screen_size.width);
             rendered_cursor = bottom.cursor_pos(bottom_area);
             if let Some(position) = rendered_cursor {
                 frame.set_cursor_style(bottom.cursor_style(bottom_area));

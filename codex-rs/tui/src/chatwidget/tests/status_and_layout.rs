@@ -619,6 +619,59 @@ async fn configured_pet_load_is_deferred_until_after_construction() {
 }
 
 #[tokio::test]
+async fn configured_ascii_bongo_pet_is_available_for_first_layout() {
+    let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+    let tx = AppEventSender::new(tx_raw);
+    let (_codex_home, mut cfg) = test_config().await;
+    cfg.tui_pet = Some(crate::pets::BONGO_CAT_PET_ID.to_string());
+    let resolved_model = get_model_offline_for_tests(cfg.model.as_deref());
+    let session_telemetry = test_session_telemetry(&cfg, resolved_model.as_str());
+    let init = ChatWidgetInit {
+        requires_openai_auth: true,
+        local_settings: crate::local_settings::LocalSettings::from(&cfg),
+        config: cfg.clone(),
+        frame_requester: FrameRequester::test_dummy(),
+        app_event_tx: tx,
+        workspace_command_runner: None,
+        initial_user_message: None,
+        enhanced_keys_supported: false,
+        has_chatgpt_account: false,
+        has_codex_backend_auth: false,
+        model_catalog: test_model_catalog(&cfg),
+        feedback: codex_feedback::CodexFeedback::new(),
+        is_first_run: true,
+        status_account_display: None,
+        initial_plan_type: None,
+        model: Some(resolved_model),
+        startup_tooltip_override: None,
+        status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
+        terminal_title_invalid_items_warned: Arc::new(AtomicBool::new(false)),
+        session_telemetry,
+    };
+
+    let chat = ChatWidget::new_with_app_event(init);
+
+    assert!(
+        chat.ambient_pet
+            .as_ref()
+            .is_some_and(crate::pets::AmbientPet::is_ascii_bongo),
+        "the no-I/O ASCII Bongo Cat must be installed before the first frame"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "the synchronously installed ASCII Bongo Cat must not enqueue a redundant load"
+    );
+
+    let width = 80;
+    let height = chat.desired_height(width);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("create terminal");
+    terminal
+        .draw(|frame| chat.render(frame.area(), frame.buffer_mut()))
+        .expect("draw first Bongo Cat frame");
+    assert!(count_visible_braille_cells(terminal.backend().buffer()) > 0);
+}
+
+#[tokio::test]
 async fn prefetch_rate_limits_is_gated_on_chatgpt_auth_provider() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
@@ -2632,8 +2685,88 @@ async fn ambient_pet_reserves_history_wrap_width() {
 }
 
 #[tokio::test]
+async fn unsupported_image_pet_does_not_reserve_history_wrap_width() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.install_test_ambient_pet_for_tests(/*animations_enabled*/ false);
+    chat.set_pet_image_support_for_tests(crate::pets::PetImageSupport::Unsupported(
+        crate::pets::PetImageUnsupportedReason::Terminal,
+    ));
+
+    assert_eq!(chat.history_wrap_width(/*width*/ 80), 80);
+}
+
+#[tokio::test]
+async fn ascii_bongo_pet_does_not_reserve_history_wrap_width() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_pet_image_support_for_tests(crate::pets::PetImageSupport::Unsupported(
+        crate::pets::PetImageUnsupportedReason::Terminal,
+    ));
+    chat.set_tui_pet(Some(crate::pets::BONGO_CAT_PET_ID.to_string()));
+
+    assert!(
+        chat.ambient_pet
+            .as_ref()
+            .is_some_and(crate::pets::AmbientPet::is_ascii_bongo),
+        "the ASCII Bongo Cat should be installed when image protocols are unavailable"
+    );
+    assert_eq!(chat.history_wrap_width(/*width*/ 80), 80);
+    assert_eq!(chat.history_wrap_width(/*width*/ 120), 120);
+}
+
+#[tokio::test]
 #[serial]
-async fn ambient_pet_reduces_stream_width_and_composer_text_width() {
+async fn ascii_bongo_pet_reserves_composer_text_width() {
+    use ratatui::Terminal;
+
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_pet_image_support_for_tests(crate::pets::PetImageSupport::Unsupported(
+        crate::pets::PetImageUnsupportedReason::Terminal,
+    ));
+    chat.set_tui_pet(Some(crate::pets::BONGO_CAT_PET_ID.to_string()));
+    chat.last_rendered_width.set(Some(80));
+
+    // Longer than the composer's 46-column wrap edge but short enough to fit
+    // on a single full-width line, so the wrap proves the reserve is applied.
+    let draft = "Minim commodo esse elit Lorem exercitation elit ipsum proident.".to_string();
+    chat.bottom_pane
+        .set_composer_text(draft, Vec::new(), Vec::new());
+
+    let mut terminal =
+        Terminal::new(TestBackend::new(/*width*/ 80, /*height*/ 6)).expect("create terminal");
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("draw bongo-enabled chat");
+
+    let composer_row = buffer_row_containing(terminal.backend().buffer(), "Minim")
+        .expect("composer row should render draft");
+    // The Bongo Cat reserves its 32-column overlay plus the 2-column gap from
+    // the composer width, so the draft must wrap before column 46.
+    assert!(row_tail_is_blank(&composer_row, /*start_col*/ 46));
+}
+
+#[tokio::test]
+#[serial]
+async fn ascii_bongo_pet_renders_visible_braille_cells_in_chat_area() {
+    use ratatui::Terminal;
+
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_pet_image_support_for_tests(crate::pets::PetImageSupport::Unsupported(
+        crate::pets::PetImageUnsupportedReason::Terminal,
+    ));
+    chat.set_tui_pet(Some(crate::pets::BONGO_CAT_PET_ID.to_string()));
+
+    let mut terminal =
+        Terminal::new(TestBackend::new(/*width*/ 80, /*height*/ 24)).expect("create terminal");
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("draw bongo-enabled chat");
+
+    assert!(count_visible_braille_cells(terminal.backend().buffer()) > 0);
+}
+
+#[tokio::test]
+#[serial]
+async fn ambient_pet_reduces_stream_width_but_not_composer_text_width() {
     use ratatui::Terminal;
 
     let (mut with_pet, _with_pet_rx, _with_pet_op_rx) =
@@ -2684,8 +2817,24 @@ async fn ambient_pet_reduces_stream_width_and_composer_text_width() {
     let disabled_row = buffer_row_containing(disabled_terminal.backend().buffer(), "Minim")
         .expect("disabled-pet composer row should render draft");
 
-    assert!(row_tail_is_blank(&pet_row, /*start_col*/ 69));
+    // The sprite floats above the composer, so the input box keeps its full
+    // width: both drafts extend past column 69 instead of wrapping early.
+    assert!(!row_tail_is_blank(&pet_row, /*start_col*/ 69));
     assert!(!row_tail_is_blank(&disabled_row, /*start_col*/ 69));
+}
+
+fn count_visible_braille_cells(buffer: &ratatui::buffer::Buffer) -> usize {
+    (0..buffer.area.height)
+        .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            buffer
+                .cell((x, y))
+                .expect("cell should exist")
+                .symbol()
+                .chars()
+                .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch))
+        })
+        .count()
 }
 
 fn buffer_row_containing(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<String> {

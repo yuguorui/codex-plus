@@ -522,6 +522,7 @@ fn parent_owned_command_is_allowed(command: SlashCommand, args: &str) -> bool {
                 | SlashCommand::Title
                 | SlashCommand::Statusline
                 | SlashCommand::Theme
+                | SlashCommand::Pet
                 | SlashCommand::Pets
                 | SlashCommand::Ps
                 | SlashCommand::Stop
@@ -4488,6 +4489,7 @@ impl ChatComposer {
         mask_char: Option<char>,
         options: ComposerRenderOptions<'_>,
     ) {
+        let textarea_right_reserve = options.textarea_right_reserve;
         let ComposerLayout {
             status,
             composer: composer_rect,
@@ -4496,6 +4498,8 @@ impl ChatComposer {
             popup: popup_rect,
             footer: footer_rect,
         } = self.layout_with_options(area, options);
+        let mut status = status;
+        status.width = status.width.saturating_sub(textarea_right_reserve);
         self.render_status_surface(status, buf, options);
         if self.popups.active.is_above_composer()
             && options.command_popup_placement != CommandPopupPlacement::Hidden
@@ -4537,7 +4541,10 @@ impl ChatComposer {
                 }
             }
         }
-        let transcript_hint_area = inset_footer_hint_area(footer_rect);
+        let mut transcript_hint_area = inset_footer_hint_area(footer_rect);
+        transcript_hint_area.width = transcript_hint_area
+            .width
+            .saturating_sub(textarea_right_reserve);
         let warning_notice = self.warning_notice_layout(transcript_hint_area, options);
         let warning_area = warning_notice.as_ref().map(|(area, _)| *area);
         match options.footer {
@@ -4580,7 +4587,10 @@ impl ChatComposer {
                         ..footer_rect
                     }
                 } else {
-                    footer_rect
+                    Rect {
+                        width: transcript_hint_area.width,
+                        ..footer_rect
+                    }
                 };
                 if let Some(input) = self.draft.textarea.vim_query() {
                     input.render(inset_footer_hint_area(hint_rect), buf);
@@ -9473,7 +9483,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_popup_pets_for_pet_ui() {
+    fn slash_popup_pet_ui() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -9499,7 +9509,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_popup_pets_for_pet_logic() {
+    fn slash_popup_pet_logic() {
         use super::super::command_popup::CommandItem;
         let (tx, _rx) = unbounded_channel::<AppEvent>();
         let sender = AppEventSender::new(tx);
@@ -9520,7 +9530,7 @@ mod tests {
                 Some(CommandItem::ServiceTier(command)) => {
                     panic!("expected pets command, got service tier {command:?}")
                 }
-                None => panic!("no selected command for '/pet'"),
+                None => panic!("no selected command for '/pets'"),
             },
             _ => panic!("slash popup not active after typing '/pet'"),
         }
