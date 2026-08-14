@@ -157,7 +157,7 @@ impl ChatWidget {
         }
 
         let rendered_width = self.last_rendered_width.get().unwrap_or(u16::MAX);
-        let active_cell_right_reserve = self.ambient_pet_wrap_reserved_cols();
+        let active_cell_right_reserve = self.ambient_pet_wrap_reserved_cols(rendered_width);
         let active_cell_renderable = match &self.transcript.active_cell {
             Some(cell) => RenderableItem::Owned(Box::new(TranscriptAreaRenderable {
                 child: cell.as_ref(),
@@ -238,7 +238,19 @@ impl ChatWidget {
             );
         }
         flex.push(/*flex*/ 0, bottom_pane_renderable);
-        RenderableItem::Owned(Box::new(flex))
+        let content = RenderableItem::Owned(Box::new(flex));
+        match self
+            .ambient_pet
+            .as_ref()
+            .filter(|pet| pet.text_height().is_some())
+        {
+            Some(pet) => RenderableItem::Owned(Box::new(TextPetRenderable {
+                child: content,
+                pet,
+                visible: self.bottom_pane.no_modal_or_popup_active(),
+            })),
+            None => content,
+        }
     }
 
     /// Returns the composer, footer, and active modal without the live transcript above it.
@@ -269,7 +281,9 @@ impl ChatWidget {
             {
                 0
             } else {
-                self.ambient_pet_wrap_reserved_cols()
+                self.ambient_pet_composer_reserved_cols(
+                    self.last_rendered_width.get().unwrap_or(u16::MAX),
+                )
             };
             options.rendered_selection = Some(&self.rendered_selection);
             options.warning_count = self.warning_display_state.count;
@@ -347,6 +361,40 @@ impl ChatWidget {
 
     pub(crate) fn note_screen_height(&self, height: u16) {
         self.last_screen_height.set(Some(height));
+    }
+}
+
+struct TextPetRenderable<'a> {
+    child: RenderableItem<'a>,
+    pet: &'a crate::pets::AmbientPet,
+    visible: bool,
+}
+
+impl Renderable for TextPetRenderable<'_> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        self.child.render(area, buf);
+        if self.visible {
+            self.pet.render_text(area, area.bottom(), buf);
+        }
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        let child_height = self.child.desired_height(width);
+        let Some(pet_height) = self.pet.text_height() else {
+            return child_height;
+        };
+        if !self.visible || self.pet.hidden_at_width(width) {
+            return child_height;
+        }
+        child_height.max(pet_height.saturating_add(/*rhs*/ 1))
+    }
+
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        self.child.cursor_pos(area)
+    }
+
+    fn cursor_style(&self, area: Rect) -> crossterm::cursor::SetCursorStyle {
+        self.child.cursor_style(area)
     }
 }
 
