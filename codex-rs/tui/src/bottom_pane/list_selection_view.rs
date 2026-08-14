@@ -1584,18 +1584,6 @@ impl Renderable for ListSelectionView {
             height = height.saturating_add(/*rhs*/ 1);
         }
 
-        // Side content: when the terminal is wide enough the panel sits beside
-        // the list and shares vertical space; otherwise it stacks below.
-        if self.side_layout_width(inner_width).is_some() {
-            // Side-by-side — side content shares list rows vertically so it
-            // doesn't add to total height.
-        } else {
-            let side_h = self.stacked_side_content().desired_height(inner_width);
-            if side_h > 0 {
-                height = height.saturating_add(1 + side_h);
-            }
-        }
-
         let show_selected_description = should_show_selected_description_below(
             &rows,
             &self.state,
@@ -1603,14 +1591,35 @@ impl Renderable for ListSelectionView {
             effective_rows_width,
             column_width,
         );
-        height = height.saturating_add(
-            self.footer_note_lines(width.saturating_sub(/*rhs*/ 2), show_selected_description)
-                .len() as u16,
-        );
-        height = height.saturating_add(
-            self.footer_hint_lines(width.saturating_sub(/*rhs*/ 2))
-                .len() as u16,
-        );
+        let note_width = width.saturating_sub(2);
+        let footer_height = self
+            .footer_note_lines(note_width, show_selected_description)
+            .len() as u16
+            + self
+                .footer_hint_lines(width.saturating_sub(/*rhs*/ 2))
+                .len() as u16;
+
+        // Side content: when the terminal is wide enough the panel sits beside
+        // the list and shares vertical space; otherwise it stacks below.
+        let side_layout = self.side_layout_width(inner_width);
+        if let Some(side_w) = side_layout {
+            // A taller side panel must still expand the popup. Its render area
+            // excludes the panel's top gap and the footer, so include that
+            // chrome when enforcing the side content's desired height.
+            let side_h = self.side_content.desired_height(side_w);
+            if side_h > 0 {
+                let side_chrome =
+                    u16::from(self.picker_surface == PickerSurface::Panel) + footer_height;
+                height = height.max(side_h.saturating_add(side_chrome));
+            }
+        } else {
+            let side_h = self.stacked_side_content().desired_height(inner_width);
+            if side_h > 0 {
+                height = height.saturating_add(1 + side_h);
+            }
+            height = height.saturating_add(footer_height);
+        }
+
         height
     }
 
