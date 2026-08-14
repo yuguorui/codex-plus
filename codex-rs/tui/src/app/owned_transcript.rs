@@ -556,6 +556,9 @@ impl App {
             now,
             ..
         } = *prepared;
+        let text_pet_exclusion_height = self
+            .chat_widget
+            .ambient_text_pet_exclusion_height(area.width, area.height);
         let (working_tip, completion_tip) = match prepared.turn_tip.as_ref() {
             Some((TipSurface::Working, tip)) => (Some(tip), None),
             Some((TipSurface::Completion, tip)) => (None, Some(tip)),
@@ -617,7 +620,10 @@ impl App {
             if agents_overview_present {
                 area.height
             } else {
-                bottom.desired_height(area.width).min(area.height)
+                bottom
+                    .desired_height(area.width)
+                    .min(area.height)
+                    .max(text_pet_exclusion_height)
             }
         };
         let bottom_height = measure_bottom(&bottom);
@@ -690,6 +696,7 @@ impl App {
                 MotionMode::from_animations_enabled(self.local_settings.tui.animations),
             );
         bottom.render(bottom_area, frame.buffer);
+        chat_widget.render_ambient_text_pet(area, bottom_area.bottom(), frame.buffer);
         if let (Some(tip), Some(area)) = (completion_tip, completion_tip_area) {
             tip.render(area, frame.buffer);
         }
