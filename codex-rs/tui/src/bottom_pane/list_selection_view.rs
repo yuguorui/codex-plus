@@ -1331,27 +1331,37 @@ impl Renderable for ListSelectionView {
             height = height.saturating_add(/*rhs*/ 1);
         }
 
+        let note_width = width.saturating_sub(2);
+        let footer_height = self
+            .footer_note
+            .as_ref()
+            .map(|note| wrap_styled_line(note, note_width).len() as u16)
+            .unwrap_or_default()
+            + self
+                .footer_hint_lines(width.saturating_sub(/*rhs*/ 2))
+                .len() as u16;
+
         // Side content: when the terminal is wide enough the panel sits beside
         // the list and shares vertical space; otherwise it stacks below.
-        if self.side_layout_width(inner_width).is_some() {
-            // Side-by-side — side content shares list rows vertically so it
-            // doesn't add to total height.
+        let side_layout = self.side_layout_width(inner_width);
+        if let Some(side_w) = side_layout {
+            // A taller side panel must still expand the popup. Its render area
+            // excludes the panel's top gap and the footer, so include that
+            // chrome when enforcing the side content's desired height.
+            let side_h = self.side_content.desired_height(side_w);
+            if side_h > 0 {
+                let side_chrome =
+                    u16::from(self.picker_surface == PickerSurface::Panel) + footer_height;
+                height = height.max(side_h.saturating_add(side_chrome));
+            }
         } else {
             let side_h = self.stacked_side_content().desired_height(inner_width);
             if side_h > 0 {
                 height = height.saturating_add(1 + side_h);
             }
+            height = height.saturating_add(footer_height);
         }
 
-        if let Some(note) = &self.footer_note {
-            let note_width = width.saturating_sub(2);
-            let note_lines = wrap_styled_line(note, note_width);
-            height = height.saturating_add(note_lines.len() as u16);
-        }
-        height = height.saturating_add(
-            self.footer_hint_lines(width.saturating_sub(/*rhs*/ 2))
-                .len() as u16,
-        );
         height
     }
 
