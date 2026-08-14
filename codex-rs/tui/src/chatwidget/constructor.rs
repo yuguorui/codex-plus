@@ -89,9 +89,15 @@ impl ChatWidget {
             config.http_client_factory(),
             codex_http_client::ClientRouteClass::Other,
         );
+        // ASCII Bongo Cat needs no asset I/O or network fetch. Installing it
+        // synchronously ensures its height is part of the very first layout;
+        // an async completion can race startup's initial frame and leave the
+        // inline viewport sized as though no pet were configured.
+        let ambient_pet =
+            pets::load_immediate_ascii_bongo_pet(&local_settings, frame_requester.clone());
         pets::start_configured_pet_load_if_needed(
             &local_settings,
-            /*ambient_pet_missing*/ true,
+            /*ambient_pet_missing*/ ambient_pet.is_none(),
             frame_requester.clone(),
             app_event_tx.clone(),
             pet_http_client.clone(),
@@ -220,7 +226,7 @@ impl ChatWidget {
             active_hook_cell: None,
             pet_http_client,
             workflows,
-            ambient_pet: None,
+            ambient_pet,
             pet_picker_preview_state: crate::pets::PetPickerPreviewState::default(),
             pet_picker_preview_pet: None,
             pet_picker_preview_request_id: 0,
