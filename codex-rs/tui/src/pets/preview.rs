@@ -54,6 +54,12 @@ impl PetPickerPreviewState {
         });
     }
 
+    pub(crate) fn set_ascii_bongo(&self) {
+        self.update(|inner| {
+            inner.status = PetPickerPreviewStatus::BongoAscii;
+        });
+    }
+
     pub(crate) fn set_error(&self, message: String) {
         self.update(|inner| {
             inner.status = PetPickerPreviewStatus::Error { message };
@@ -91,6 +97,7 @@ enum PetPickerPreviewStatus {
     Loading,
     Disabled,
     Ready,
+    BongoAscii,
     Error {
         message: String,
     },
@@ -115,6 +122,10 @@ impl Renderable for PetPickerPreviewRenderable {
                     Some("No pet will be shown.".to_string()),
                 ),
                 PetPickerPreviewStatus::Ready => return,
+                PetPickerPreviewStatus::BongoAscii => {
+                    super::bongo::BongoCat::render_preview(area, buf);
+                    return;
+                }
                 PetPickerPreviewStatus::Error { message } => {
                     ("Preview unavailable", Some(message.clone()))
                 }
@@ -133,7 +144,17 @@ impl Renderable for PetPickerPreviewRenderable {
     }
 
     fn desired_height(&self, _width: u16) -> u16 {
-        4
+        let Ok(inner) = self.inner.lock() else {
+            return 4;
+        };
+        match inner.status {
+            PetPickerPreviewStatus::BongoAscii => super::bongo::BONGO_CAT_HEIGHT,
+            PetPickerPreviewStatus::Hidden
+            | PetPickerPreviewStatus::Loading
+            | PetPickerPreviewStatus::Disabled
+            | PetPickerPreviewStatus::Ready
+            | PetPickerPreviewStatus::Error { .. } => 4,
+        }
     }
 }
 
@@ -159,6 +180,36 @@ mod tests {
             Rect::new(
                 /*x*/ 5, /*y*/ 13, /*width*/ 20, /*height*/ 2
             )
+        );
+    }
+
+    #[test]
+    fn ascii_bongo_preview_renders_at_sprite_width() {
+        let preview_state = PetPickerPreviewState::default();
+        preview_state.set_ascii_bongo();
+        let renderable = preview_state.renderable();
+        let mut buffer = Buffer::empty(Rect::new(
+            /*x*/ 0,
+            /*y*/ 0,
+            /*width*/ super::super::bongo::BONGO_CAT_WIDTH,
+            /*height*/ super::super::bongo::BONGO_CAT_HEIGHT,
+        ));
+        let area = buffer.area;
+
+        Renderable::render(&renderable, area, &mut buffer);
+
+        assert!(
+            (0..buffer.area.width).any(|x| {
+                (0..buffer.area.height).any(|y| {
+                    buffer
+                        .cell((x, y))
+                        .expect("cell should exist")
+                        .symbol()
+                        .chars()
+                        .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch))
+                })
+            }),
+            "the ASCII Bongo Cat preview must fit the dedicated picker panel"
         );
     }
 }
