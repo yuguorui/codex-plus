@@ -524,7 +524,7 @@ impl ChatWidget {
             SlashCommand::Theme => {
                 self.open_theme_picker();
             }
-            SlashCommand::Pets => {
+            SlashCommand::Pet | SlashCommand::Pets => {
                 self.open_pets_picker();
             }
             SlashCommand::Ps => {
@@ -1006,7 +1006,7 @@ impl ChatWidget {
                 self.app_event_tx
                     .send(AppEvent::ResumeSessionByIdOrName(args));
             }
-            SlashCommand::Pets
+            SlashCommand::Pet | SlashCommand::Pets
                 if matches!(
                     args.trim().to_ascii_lowercase().as_str(),
                     "disable" | "disabled" | "hide" | "hidden" | "off" | "none"
@@ -1014,7 +1014,7 @@ impl ChatWidget {
             {
                 self.app_event_tx.send(AppEvent::PetDisabled);
             }
-            SlashCommand::Pets if !trimmed.is_empty() => {
+            SlashCommand::Pet | SlashCommand::Pets if !trimmed.is_empty() => {
                 self.select_pet_by_id(args);
             }
             _ => self.dispatch_command(cmd),
@@ -1241,6 +1241,7 @@ impl ChatWidget {
             | SlashCommand::Title
             | SlashCommand::Statusline
             | SlashCommand::Theme
+            | SlashCommand::Pet
             | SlashCommand::Pets => QueueDrain::Stop,
         }
     }
