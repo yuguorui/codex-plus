@@ -89,7 +89,16 @@ Codex++ includes `deep-research` and `code-review` workflows. It can also discov
 
 Runs continue in the background after launch. Open `/workflows` in the TUI to inspect phases and agents, stop a run, or skip and retry individual agents.
 
-Workflow agents default to a CPU-derived per-run limit. To cap (or raise) the aggregate agent concurrency for one app-server process, set `[workflow] global_concurrency = 32` in `config.toml`, or set `CODEX_WORKFLOW_GLOBAL_CONCURRENCY=32` in the app-server environment. Restart the app server after changing either value.
+Workflow agents default to a CPU-derived per-run limit. 
+
+To cap (or raise) the aggregate agent concurrency, set in `config.toml`:
+
+```yaml
+[workflow]
+global_concurrency = 32
+```
+
+Or set `CODEX_WORKFLOW_GLOBAL_CONCURRENCY=32` in environment variables.
 
 ## Configuration
 
