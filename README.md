@@ -16,14 +16,15 @@ Codex++ extends the official [Codex CLI](https://github.com/openai/codex) with:
 - **A fork that keeps up** - automation rebases Codex++ onto the latest upstream Codex every day, validates the result, and publishes fresh binaries when upstream changes. You should not have to choose between fork features and current upstream features.
 - **Dynamic multi-agent workflows** - run deterministic JavaScript orchestration in the background with parallel agents, structured outputs, worktree isolation, retries, resumable runs, and live progress in `/workflows`.
 - **Universal provider support** - connect Codex++ to any provider through either native wire protocol:
-  - **Chat Completions API** (`wire_api = "chat"`) - works with OpenAI-compatible providers including Ollama, vLLM, LiteLLM, DeepSeek, Mistral, Groq, Together, DashScope, and more.
-  - **Anthropic Messages API** (`wire_api = "anthropic"`) - use Claude models directly through Anthropic's native API.
-  - **Auth header scheme control** (`env_key_auth`) - choose between `Bearer` and `x-api-key` auth per provider.
-  - **Provider-specific request fields** (`extra_body`) - merge arbitrary JSON into request bodies for provider-specific features like `enable_thinking` or `thinking_budget`.
-  - **Non-GPT-friendly file tools** - offer hashline editing and Claude Code-compatible structured `Read` / `Edit` interfaces, giving models that struggle with Codex's freeform `apply_patch` grammar more reliable alternatives.
+  - **Chat Completions API** (`wire_api = "chat"`) - works with OpenAI-compatible providers including Ollama, vLLM, LiteLLM, DeepSeek, Mistral, Groq, Together, DashScope, and more, with cross-provider `reasoning_effort` projection (`low`/`high`/`max`) and `thinking_budget` reconciliation.
+  - **Anthropic Messages API** (`wire_api = "anthropic"`) - use Claude models directly through Anthropic's native API with `output_config.effort` mapping, automatic ephemeral prompt caching, and configurable `capabilities.max_output_tokens`.
+  - **Flexible endpoint & auth controls** - override `base_url` from the environment via `env_base_url`, pick `Bearer` or `x-api-key` auth via `env_key_auth`, and tune Responses-compatible gateway quirks with `[model_providers.<id>.capabilities]` (`supports_custom_exec_tool`, `supports_native_tool_search`, `max_output_tokens`).
+  - **Provider-specific request fields** (`extra_body`) - merge arbitrary JSON into request bodies for provider-specific features like `enable_thinking`, `thinking_budget`, or custom `thinking` blocks.
+  - **Non-GPT-friendly file tools** - offer hashline editing (`fuzz_view_edit`) alongside `apply_patch` and Claude Code-compatible structured `Read` / `Edit` tools (`apply_patch_tool_type = "claude_code"`), giving models that struggle with freeform patches more reliable alternatives.
+- **Sharper TUI & streaming reliability** - cancel pending steers with double-`Esc` (`esc esc`) before the model consumes them, pause queued messages after pre-send validation failures, switch models thread-locally inside side conversations via `/model`, search subagents in `/agents`, and avoid discarding non-interruptible SSE streams when steering mid-turn.
 - **More control** - make Codex++ adapt to your setup, not the other way around:
   - **Multi-agent v2 opt-out** (`features.multi_agent_v2 = false`) - honor an explicit local disable even when the model catalog selects v2, so third-party providers are not forced onto its Responses API-specific namespaced and encrypted-schema tool protocol.
-  - **Always retry** - automatically apply exponential backoff for any reasonable retry condition.
+  - **Always retry** - automatically apply exponential backoff for HTTP 429, 5xx, `ServerOverloaded`, and transport errors.
 - **Third-party memory compatibility** - use the active thread model for memory extraction and consolidation on non-OpenAI providers instead of sending provider-incompatible OpenAI model names.
 
 For a detailed technical breakdown, see [`codex-rs/README.md`](./codex-rs/README.md).
@@ -33,11 +34,11 @@ For a detailed technical breakdown, see [`codex-rs/README.md`](./codex-rs/README
 ### One-command install (recommended)
 
 ```shell
-curl -fsSL https://github.com/yuguorui/codex/releases/latest/download/install-fork.sh | sh
+curl -fsSL https://github.com/yuguorui/codex-plus/releases/latest/download/install-fork.sh | sh
 ```
 
 ```powershell
-irm https://github.com/yuguorui/codex/releases/latest/download/install-fork.ps1 | iex
+irm https://github.com/yuguorui/codex-plus/releases/latest/download/install-fork.ps1 | iex
 ```
 
 The install script resolves the latest release, verifies SHA-256 checksums, stores the standalone package under `~/.codex/packages/standalone`, and installs the `codex++` command into `~/.local/bin`.
@@ -45,7 +46,7 @@ The install script resolves the latest release, verifies SHA-256 checksums, stor
 Environment variables:
 - `CODEX_INSTALL_DIR` - change the install directory
 - `CODEX_BIN_NAME` - override the command name
-- `CODEX_RELEASE_REPOSITORY` - override the release repository
+- `CODEX_RELEASE_REPOSITORY` - override the release repository (default: `yuguorui/codex-plus`)
 
 ### Build from source
 
@@ -59,17 +60,17 @@ cargo build --release --bin codex
 ### Quick usage
 
 ```shell
-# Use with a Chat Completions provider
-codex++ -m ollama/qwen3
-codex++ -m deepseek/deepseek-chat
-codex++ -m dashscope/qwen-plus
+# Use with a Chat Completions provider defined under [model_providers.<id>]
+codex++ -c model_provider=local_ollama -m qwen3
+codex++ -c model_provider=deepseek -m deepseek-chat
+codex++ -c model_provider=dashscope -m qwen-plus
 
 # Use with Anthropic
-codex++ -m anthropic/claude-sonnet-4-20250514
+codex++ -c model_provider=anthropic -m claude-sonnet-4-20250514
 
 # Use with reasoning effort control
-codex++ -m deepseek/deepseek-chat --reasoning-effort low
-codex++ -m anthropic/claude-sonnet-4-20250514 --reasoning-effort high
+codex++ -c model_provider=deepseek -m deepseek-chat -c model_reasoning_effort=low
+codex++ -c model_provider=anthropic -m claude-sonnet-4-20250514 -c model_reasoning_effort=high
 ```
 
 ## Typing-reactive Bongo Cat
@@ -96,32 +97,42 @@ codex++ workflow run review-changes --resume wf_abc123
 codex++ workflow validate ./.claude/workflows/review-changes.js --json
 ```
 
-`workflow run` launches a normal `codex exec` turn that calls the existing `Workflow` tool and waits for the terminal result, then verifies the newest local workflow snapshot and exits non-zero unless the run completed. Omit `--args` to leave the script's `args` global `undefined`, or pass `--args null` for an explicit null. `--resume` continues an existing run and, without `--args`, restores the original arguments and their presence. `workflow validate` parses and validates the root script locally without a model call; saved child workflows are resolved and frozen when the root workflow is launched. For concurrent CI jobs, give each invocation a distinct `CODEX_HOME` so snapshot verification cannot observe another job's run. `workflow run` still follows the thread's approval and automatic-review policy; non-interactive workers must configure approval appropriately, or pass the root bypass flag only when that is acceptable.
+`workflow run` launches a normal `codex++ exec` turn that calls the existing `Workflow` tool and waits for the terminal result, then verifies the newest local workflow snapshot and exits non-zero unless the run completed. Omit `--args` to leave the script's `args` global `undefined`, or pass `--args null` for an explicit null. `--resume` continues an existing run and, without `--args`, restores the original arguments and their presence. `workflow validate` parses and validates the root script locally without a model call; saved child workflows are resolved and frozen when the root workflow is launched. For concurrent CI jobs, give each invocation a distinct `CODEX_HOME` so snapshot verification cannot observe another job's run. `workflow run` still follows the thread's approval and automatic-review policy; non-interactive workers must configure approval appropriately, or pass the root bypass flag only when that is acceptable.
 
-Workflow agents default to a CPU-derived per-run limit. To cap (or raise) the aggregate agent concurrency for one app-server process, set `[workflow] global_concurrency = 32` in `config.toml`, or set `CODEX_WORKFLOW_GLOBAL_CONCURRENCY=32` in the app-server environment. Restart the app server after changing either value.
+Workflow agents default to a CPU-derived per-run limit.
+
+To cap (or raise) the aggregate agent concurrency, set in `config.toml`:
+
+```toml
+[workflow]
+global_concurrency = 32
+```
+
+Or set `CODEX_WORKFLOW_GLOBAL_CONCURRENCY=32` in environment variables.
 
 ## Configuration
 
-Codex++ uses `config.toml` (same location as upstream: `~/.codex/config.toml`). Add provider blocks to configure third-party models:
+Codex++ uses `config.toml` (same location as upstream: `~/.codex/config.toml`). Add custom provider blocks under `[model_providers.<id>]` (avoiding reserved built-in IDs such as `openai`, `ollama`, and `lmstudio`):
 
 ```toml
-# Chat Completions provider (Ollama, vLLM, DeepSeek, etc.)
-[model_provider.ollama]
-name = "Ollama"
+# Chat Completions provider (local Ollama, vLLM, DeepSeek, etc.)
+[model_providers.local_ollama]
+name = "Local Ollama"
 base_url = "http://localhost:11434/v1"
+env_base_url = "OLLAMA_BASE_URL"
 env_key = "OLLAMA_API_KEY"
 wire_api = "chat"
 
 # Anthropic (Claude)
-[model_provider.anthropic]
+[model_providers.anthropic]
 name = "Anthropic"
-base_url = "https://api.anthropic.com"
+base_url = "https://api.anthropic.com/v1"
 env_key = "ANTHROPIC_API_KEY"
 env_key_auth = "x-api-key"
 wire_api = "anthropic"
 
 # DashScope (Qwen) with thinking enabled
-[model_provider.dashscope]
+[model_providers.dashscope]
 name = "DashScope"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 env_key = "DASHSCOPE_API_KEY"
@@ -151,7 +162,7 @@ extract_model = "provider/model-for-extraction"
 consolidation_model = "provider/model-for-consolidation"
 ```
 
-See [`codex-rs/README.md`](./codex-rs/README.md) for full configuration reference including `extra_body`, `extra_headers`, `env_key_auth`, `request_max_retry_delay_ms`, and reasoning effort mapping.
+See [`codex-rs/README.md`](./codex-rs/README.md) for the full configuration reference including `env_base_url`, `[model_providers.<id>.capabilities]`, `extra_body`, `extra_headers`, `env_key_auth`, `request_max_retry_delay_ms`, file tools, TUI features, and reasoning effort mapping.
 
 ## Upstream Features
 
