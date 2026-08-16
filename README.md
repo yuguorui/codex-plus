@@ -98,7 +98,16 @@ codex++ workflow validate ./.claude/workflows/review-changes.js --json
 
 `workflow run` launches a normal `codex exec` turn that calls the existing `Workflow` tool and waits for the terminal result, then verifies the newest local workflow snapshot and exits non-zero unless the run completed. Omit `--args` to leave the script's `args` global `undefined`, or pass `--args null` for an explicit null. `--resume` continues an existing run and, without `--args`, restores the original arguments and their presence. `workflow validate` parses and validates the root script locally without a model call; saved child workflows are resolved and frozen when the root workflow is launched. For concurrent CI jobs, give each invocation a distinct `CODEX_HOME` so snapshot verification cannot observe another job's run. `workflow run` still follows the thread's approval and automatic-review policy; non-interactive workers must configure approval appropriately, or pass the root bypass flag only when that is acceptable.
 
-Workflow agents default to a CPU-derived per-run limit. To cap (or raise) the aggregate agent concurrency for one app-server process, set `[workflow] global_concurrency = 32` in `config.toml`, or set `CODEX_WORKFLOW_GLOBAL_CONCURRENCY=32` in the app-server environment. Restart the app server after changing either value.
+Workflow agents default to a CPU-derived per-run limit.
+
+To cap (or raise) the aggregate agent concurrency, set in `config.toml`:
+
+```yaml
+[workflow]
+global_concurrency = 32
+```
+
+Or set `CODEX_WORKFLOW_GLOBAL_CONCURRENCY=32` in environment variables.
 
 ## Configuration
 
