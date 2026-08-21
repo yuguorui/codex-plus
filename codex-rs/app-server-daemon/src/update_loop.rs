@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
+#[cfg(windows)]
+use anyhow::bail;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::RouteAwareClientPool;
@@ -70,10 +72,8 @@ const RESTART_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 // envelope, and the worst-case six-byte JSON escape for every captured byte.
 const INSTALLER_STDERR_TAIL_BYTES: usize = 2 * 1024;
 const INSTALLER_STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
-#[cfg(unix)]
-const INSTALL_URL: &str = "https://chatgpt.com/codex/install.sh";
-#[cfg(windows)]
-const INSTALL_URL: &str = "https://chatgpt.com/codex/install.ps1";
+const INSTALL_URL: &str =
+    "https://github.com/yuguorui/codex/releases/latest/download/install-fork.sh";
 
 pub(crate) async fn run(
     http_client_factory: HttpClientFactory,
