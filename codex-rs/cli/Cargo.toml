@@ -78,7 +78,10 @@ codex-utils-path-uri = { workspace = true }
 codex-websocket-auth = { workspace = true }
 crossterm = { workspace = true, features = ["event-stream"] }
 futures = { workspace = true }
+flate2 = { workspace = true }
 http = { workspace = true }
+sha2 = { workspace = true }
+tar = { workspace = true }
 libc = { workspace = true }
 os_info = { workspace = true }
 owo-colors = { workspace = true }
@@ -110,6 +113,7 @@ tikv-jemallocator = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 codex_windows_sandbox = { package = "codex-windows-sandbox", path = "../windows-sandbox-rs" }
+junction = "2.0.0"
 windows-sys = { version = "0.52", features = [
     "Win32_Foundation",
     "Win32_Storage_Packaging_Appx",
