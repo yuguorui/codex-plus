@@ -568,19 +568,33 @@ impl Daemon {
             {
                 return Ok(RestartIfRunningOutcome::AlreadyCurrent);
             }
-            let mode = if mode == RestartMode::IfBinaryOrVersionChanged {
+            let (mode, binary_matches) = if mode == RestartMode::IfBinaryOrVersionChanged {
                 let managed_identity =
                     managed_install::executable_identity(managed_codex_bin).await?;
-                if backend.running_executable_identity().await?.as_ref() == Some(&managed_identity)
-                {
-                    RestartMode::IfVersionChanged
+                let binary_matches = backend.running_executable_identity().await?.as_ref()
+                    == Some(&managed_identity);
+                if binary_matches {
+                    (RestartMode::IfVersionChanged, true)
                 } else {
-                    RestartMode::Always
+                    (RestartMode::Always, false)
                 }
+            } else if mode == RestartMode::IfVersionChanged {
+                let managed_identity =
+                    managed_install::executable_identity(managed_codex_bin).await?;
+                (
+                    mode,
+                    backend.running_executable_identity().await?.as_ref()
+                        == Some(&managed_identity),
+                )
             } else {
-                mode
+                (mode, false)
             };
-            match restart_decision(mode, info.as_ref(), managed_version.as_deref()) {
+            match restart_decision(
+                mode,
+                info.as_ref(),
+                managed_version.as_deref(),
+                binary_matches,
+            ) {
                 RestartDecision::NotReady => {
                     diagnostics::event("daemon_not_ready", ());
                     return Ok(RestartIfRunningOutcome::NotReady);
@@ -1226,6 +1240,7 @@ fn restart_decision(
     mode: RestartMode,
     info: Option<&client::ProbeInfo>,
     managed_version: Option<&str>,
+    binary_matches: bool,
 ) -> RestartDecision {
     match (mode, info, managed_version) {
         (RestartMode::IfBinaryOrVersionChanged, _, _) => {
@@ -1233,7 +1248,8 @@ fn restart_decision(
         }
         (RestartMode::IfVersionChanged, None, _) => RestartDecision::NotReady,
         (RestartMode::IfVersionChanged, Some(info), Some(managed_version))
-            if info.app_server_version == managed_version =>
+            if info.app_server_version == managed_version
+                || (info.app_server_version == "0.0.0" && binary_matches) =>
         {
             RestartDecision::AlreadyCurrent
         }
@@ -1302,17 +1318,25 @@ mod tests {
                     RestartMode::IfVersionChanged,
                     Some(&current_info),
                     Some("0.1.0"),
+                    /*binary_matches*/ true,
                 ),
                 restart_decision(
                     RestartMode::IfVersionChanged,
                     /*info*/ None,
                     /*managed_version*/ None,
+                    /*binary_matches*/ false,
                 ),
-                restart_decision(RestartMode::Always, Some(&current_info), Some("0.1.0")),
+                restart_decision(
+                    RestartMode::Always,
+                    Some(&current_info),
+                    Some("0.1.0"),
+                    /*binary_matches*/ false,
+                ),
                 restart_decision(
                     RestartMode::Always,
                     /*info*/ None,
                     /*managed_version*/ None,
+                    /*binary_matches*/ false,
                 ),
             ],
             [
@@ -1321,6 +1345,31 @@ mod tests {
                 RestartDecision::Restart,
                 RestartDecision::Restart,
             ]
+        );
+    }
+
+    #[test]
+    fn restart_decision_accepts_fork_timestamp_with_unknown_app_server_version() {
+        let fork_info = ProbeInfo {
+            app_server_version: "0.0.0".to_string(),
+        };
+        assert_eq!(
+            restart_decision(
+                RestartMode::IfVersionChanged,
+                Some(&fork_info),
+                Some("202610231517"),
+                /*binary_matches*/ true,
+            ),
+            RestartDecision::AlreadyCurrent
+        );
+        assert_eq!(
+            restart_decision(
+                RestartMode::IfVersionChanged,
+                Some(&fork_info),
+                Some("202610231517"),
+                /*binary_matches*/ false,
+            ),
+            RestartDecision::Restart
         );
     }
 

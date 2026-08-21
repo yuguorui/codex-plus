@@ -25,13 +25,24 @@ fn daemon(home: &std::path::Path) -> crate::Daemon {
 }
 
 fn package(root: &Path, version: &str) -> PathBuf {
+    package_with_manifest_version(root, version, version)
+}
+
+fn package_with_manifest_version(
+    root: &Path,
+    manifest_version: &str,
+    executable_version: &str,
+) -> PathBuf {
     let target = super::platform_target().expect("target");
     for dir in ["bin", "codex-path", "codex-resources/nested"] {
         std::fs::create_dir_all(root.join(dir)).expect("package directory");
     }
     let bin = root.join("bin/codex++");
-    codex_utils_cargo_bin::write_executable(&bin, &format!("#!/bin/sh\necho 'codex {version}'\n"))
-        .expect("codex executable");
+    codex_utils_cargo_bin::write_executable(
+        &bin,
+        &format!("#!/bin/sh\necho 'codex {executable_version}'\n"),
+    )
+    .expect("codex executable");
     for file in ["bin/codex-code-mode-host", "codex-path/rg"] {
         codex_utils_cargo_bin::write_executable(&root.join(file), "runtime")
             .expect("executable helper");
@@ -44,12 +55,42 @@ fn package(root: &Path, version: &str) -> PathBuf {
     std::fs::write(
         root.join("codex-package.json"),
         serde_json::json!({
-            "version": version, "target": target, "entrypoint": "bin/codex++"
+            "version": manifest_version, "target": target, "entrypoint": "bin/codex++"
         })
         .to_string(),
     )
     .expect("manifest");
     bin
+}
+
+#[tokio::test]
+async fn seeds_fork_timestamp_package_as_latest() {
+    let temp = tempfile::TempDir::new().expect("temp");
+    let home = temp.path().join("home");
+    let daemon = daemon(&home);
+    let source = temp.path().join("fork-source");
+    let source_bin = package_with_manifest_version(&source, "0.0.0", "202610231517");
+    prepare_from_package(
+        &daemon,
+        &DaemonSettings::default(),
+        InstallMode::Missing,
+        Some(&source),
+        &source_bin,
+        |_| Ok(true),
+    )
+    .await
+    .expect("seed fork package");
+
+    let root = home.join("packages/app-server-daemon");
+    let selected = std::fs::canonicalize(root.join("current")).expect("selected");
+    let target = super::platform_target().expect("target");
+    let expected = format!("202610231517-{target}");
+    assert_eq!(selected.file_name().unwrap(), expected.as_str());
+    assert_eq!(
+        std::fs::read_to_string(root.join("auto-update-version")).expect("marker"),
+        expected
+    );
+    assert!(daemon.is_stable_standalone_release().unwrap());
 }
 
 #[tokio::test]
@@ -101,6 +142,8 @@ async fn seeds_full_package() {
     let linked = releases.join(format!("0.148.0-{target}"));
     package(&linked, "0.148.0");
     std::os::unix::fs::symlink(&outside, linked.join("codex-resources/other")).unwrap();
+    let fork_release = releases.join(format!("202610231517-{target}"));
+    package(&fork_release, "0.0.0");
     let _operation_lock = daemon.acquire_operation_lock().await.unwrap();
     let _install_lock = crate::install_lock::acquire_install_lock(&root)
         .await
@@ -122,6 +165,7 @@ async fn seeds_full_package() {
     std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o555)).unwrap();
     let _ = release_pruning::prune(&daemon, &root, &settings).await;
     assert!(!old.exists());
+    assert!(!fork_release.exists());
     for retained in [&selected, &previous, &outside, &linked] {
         assert!(retained.join("codex-resources/nested/runtime").is_file());
     }
@@ -278,6 +322,38 @@ async fn standalone_seed_preserves_explicit_pin_or_latest_channel() {
                 "0.152.0-local-target",
             )
             .unwrap();
+        }
+        prepare_from_package(
+            &daemon(&home),
+            &DaemonSettings::default(),
+            InstallMode::Missing,
+            Some(&source),
+            &bin,
+            |_| Ok(true),
+        )
+        .await
+        .unwrap();
+        let root = home.join("packages/app-server-daemon");
+        let selected = root.join("current").canonicalize().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("auto-update-version")).ok(),
+            follows_latest.then(|| selected.file_name().unwrap().to_string_lossy().into_owned())
+        );
+    }
+}
+
+#[tokio::test]
+async fn standalone_seed_preserves_fork_timestamp_channel() {
+    for follows_latest in [false, true] {
+        let temp = tempfile::TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let standalone = home.join("packages/standalone");
+        let name = "202610231517-local-target";
+        let source = standalone.join("releases").join(name);
+        let bin = package_with_manifest_version(&source, "0.0.0", "202610231517");
+        std::os::unix::fs::symlink(&source, standalone.join("current")).unwrap();
+        if follows_latest {
+            std::fs::write(standalone.join("auto-update-version"), name).unwrap();
         }
         prepare_from_package(
             &daemon(&home),
