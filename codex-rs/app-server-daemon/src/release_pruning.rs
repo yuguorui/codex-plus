@@ -212,7 +212,10 @@ pub(crate) async fn prune(daemon: &Daemon, root: &Path, settings: &DaemonSetting
             .and_then(|s| s.strip_suffix(&format!("-{}", manifest.target)));
         if !(name == format!("{}-{}", manifest.version, manifest.target)
             || local.is_some_and(|digest| blake3::Hash::from_hex(digest).is_ok()))
-            || !matches!(manifest.entrypoint.as_str(), "bin/codex" | "bin/codex.exe")
+            || !matches!(
+                manifest.entrypoint.as_str(),
+                "bin/codex" | "bin/codex.exe" | "bin/codex++" | "bin/codex++.exe"
+            )
         {
             continue;
         }
@@ -224,12 +227,19 @@ pub(crate) async fn prune(daemon: &Daemon, root: &Path, settings: &DaemonSetting
         }
         let mut pending = vec![path.clone()];
         while let Some(child) = pending.pop() {
-            // The Unix installer adds this alias; it never traverses outside the release.
+            // The Unix installer adds one of these aliases; it never traverses outside the release.
             #[cfg(unix)]
-            if child == path.join("codex")
-                && std::fs::read_link(&child).ok().as_deref() == Some(Path::new("bin/codex"))
             {
-                continue;
+                let alias_target = match child.file_name().and_then(|name| name.to_str()) {
+                    Some("codex") => Some("bin/codex"),
+                    Some("codex++") => Some("bin/codex++"),
+                    _ => None,
+                };
+                if alias_target.is_some_and(|target| {
+                    std::fs::read_link(&child).ok().as_deref() == Some(Path::new(target))
+                }) {
+                    continue;
+                }
             }
             if !owned_mount(&child).is_ok_and(|id| id == mount) {
                 continue 'releases;
