@@ -35,7 +35,7 @@ impl TestDaemon {
         let managed = standalone
             .join("releases")
             .join(&release_name)
-            .join("bin/codex");
+            .join("bin/codex++");
         std::fs::create_dir_all(managed.parent().context("managed bin parent")?)?;
         // Preserve the installed path without invalidating the shared CLI's Rosetta cache.
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
