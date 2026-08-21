@@ -95,9 +95,9 @@ pub(super) async fn run(http: &impl InstallerHttp, legacy: &Daemon) -> Result<Up
         "installer did not prepare a latest-channel daemon package"
     );
     let entrypoint = if cfg!(windows) {
-        "bin/codex.exe"
+        "bin/codex++.exe"
     } else {
-        "bin/codex"
+        "bin/codex++"
     };
     let binary = release.join(entrypoint);
     let version = managed_install::managed_codex_version(&binary).await?;
@@ -166,14 +166,14 @@ pub(super) async fn run(http: &impl InstallerHttp, legacy: &Daemon) -> Result<Up
     };
     let running_version = if running.is_some() {
         selected.start_managed_backend(&settings).await.context(
-            "daemon migrated but could not start; retry with `codex app-server daemon start`",
+            "daemon migrated but could not start; retry with `codex++ app-server daemon start`",
         )?;
         Some(
             selected
                 .wait_until_ready()
                 .await
                 .context(
-                    "daemon migrated but is not ready; retry with `codex app-server daemon start`",
+                    "daemon migrated but is not ready; retry with `codex++ app-server daemon start`",
                 )?
                 .app_server_version,
         )
