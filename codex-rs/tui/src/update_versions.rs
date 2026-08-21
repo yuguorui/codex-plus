@@ -1,7 +1,8 @@
 #[cfg(any(not(debug_assertions), test))]
 pub(crate) fn is_newer(latest: &str, current: &str) -> Option<bool> {
     match (parse_version(latest), parse_version(current)) {
-        (Some(l), Some(c)) => Some(l > c),
+        (Some(ParsedVersion::Semver(l)), Some(ParsedVersion::Semver(c))) => Some(l > c),
+        (Some(ParsedVersion::ForkRelease(l)), Some(ParsedVersion::ForkRelease(c))) => Some(l > c),
         _ => None,
     }
 }
@@ -16,7 +17,7 @@ pub(crate) fn extract_version_from_latest_tag(latest_tag_name: &str) -> anyhow::
 
 #[cfg(any(not(debug_assertions), test))]
 pub(crate) fn is_source_build_version(version: &str) -> bool {
-    parse_version(version) == Some((0, 0, 0))
+    parse_version(version) == Some(ParsedVersion::Semver((0, 0, 0)))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,13 +44,23 @@ pub(crate) fn server_version_notice_kind(
         .then_some(ServerVersionNoticeKind::Older)
 }
 
-#[cfg(any(not(debug_assertions), test))]
-fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
-    let mut iter = v.trim().split('.');
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParsedVersion {
+    Semver((u64, u64, u64)),
+    ForkRelease(u64),
+}
+
+fn parse_version(v: &str) -> Option<ParsedVersion> {
+    let version = v.trim();
+    if version.len() == 12 && version.bytes().all(|byte| byte.is_ascii_digit()) {
+        return version.parse().ok().map(ParsedVersion::ForkRelease);
+    }
+
+    let mut iter = version.split('.');
     let maj = iter.next()?.parse::<u64>().ok()?;
     let min = iter.next()?.parse::<u64>().ok()?;
     let pat = iter.next()?.parse::<u64>().ok()?;
-    Some((maj, min, pat))
+    Some(ParsedVersion::Semver((maj, min, pat)))
 }
 
 #[cfg(test)]
@@ -85,6 +96,13 @@ mod tests {
     }
 
     #[test]
+    fn fork_release_comparisons_work() {
+        assert_eq!(is_newer("202608231531", "202608231530"), Some(true));
+        assert_eq!(is_newer("202608231530", "202608231531"), Some(false));
+        assert_eq!(is_newer("202608231530", "0.145.0"), None);
+    }
+
+    #[test]
     fn source_build_version_is_not_checked() {
         assert!(is_source_build_version("0.0.0"));
         assert!(!is_source_build_version("0.1.0"));
@@ -92,7 +110,10 @@ mod tests {
 
     #[test]
     fn whitespace_is_ignored() {
-        assert_eq!(parse_version(" 1.2.3 \n"), Some((1, 2, 3)));
+        assert_eq!(
+            parse_version(" 1.2.3 \n"),
+            Some(ParsedVersion::Semver((1, 2, 3)))
+        );
         assert_eq!(is_newer(" 1.2.3 ", "1.2.2"), Some(true));
     }
 
