@@ -542,7 +542,7 @@ fn manual_update_rejects_an_unowned_installation() -> Result<()> {
         daemon
             .home
             .path()
-            .join("packages/standalone/current/bin/codex"),
+            .join("packages/standalone/current/bin/codex++"),
     )?;
 
     assert_eq!(daemon.lifecycle("update")?["status"], "unsupported");
