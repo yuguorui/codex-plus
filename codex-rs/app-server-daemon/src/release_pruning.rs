@@ -131,6 +131,21 @@ fn owned_mount(path: &Path) -> Result<u64> {
     }
 }
 
+fn is_managed_release_name(name: &str, manifest: &Manifest) -> bool {
+    let local = name
+        .strip_prefix("local-")
+        .and_then(|s| s.strip_suffix(&format!("-{}", manifest.target)));
+    // Fork release manifests carry the workspace placeholder version 0.0.0,
+    // while their directory names use the yyyymmddhhmm release identity.
+    let fork_release = manifest.version == semver::Version::new(0, 0, 0)
+        && name
+            .strip_suffix(&format!("-{}", manifest.target))
+            .is_some_and(managed_install::is_fork_release_version);
+    name == format!("{}-{}", manifest.version, manifest.target)
+        || local.is_some_and(|digest| blake3::Hash::from_hex(digest).is_ok())
+        || fork_release
+}
+
 pub(crate) async fn prune(daemon: &Daemon, root: &Path, settings: &DaemonSettings) -> Result<()> {
     let home = daemon
         .settings_file
@@ -207,11 +222,7 @@ pub(crate) async fn prune(daemon: &Daemon, root: &Path, settings: &DaemonSetting
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        let local = name
-            .strip_prefix("local-")
-            .and_then(|s| s.strip_suffix(&format!("-{}", manifest.target)));
-        if !(name == format!("{}-{}", manifest.version, manifest.target)
-            || local.is_some_and(|digest| blake3::Hash::from_hex(digest).is_ok()))
+        if !is_managed_release_name(&name, &manifest)
             || !matches!(
                 manifest.entrypoint.as_str(),
                 "bin/codex" | "bin/codex.exe" | "bin/codex++" | "bin/codex++.exe"
@@ -258,4 +269,47 @@ pub(crate) async fn prune(daemon: &Daemon, root: &Path, settings: &DaemonSetting
         std::fs::remove_dir_all(retired.keep())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Manifest;
+    use super::is_managed_release_name;
+
+    fn manifest(version: &str, target: &str) -> Manifest {
+        Manifest {
+            version: semver::Version::parse(version).unwrap(),
+            target: target.to_string(),
+            entrypoint: "bin/codex++".to_string(),
+        }
+    }
+
+    #[test]
+    fn accepts_semver_local_and_fork_timestamp_releases() {
+        let target = "aarch64-apple-darwin";
+        let semver = manifest("1.2.3", target);
+        assert!(is_managed_release_name(&format!("1.2.3-{target}"), &semver));
+        assert!(!is_managed_release_name(
+            &format!("1.2.4-{target}"),
+            &semver
+        ));
+
+        let fork = manifest("0.0.0", target);
+        assert!(is_managed_release_name(
+            &format!("202610231517-{target}"),
+            &fork
+        ));
+        assert!(!is_managed_release_name(
+            &format!("20261023151-{target}"),
+            &fork
+        ));
+        assert!(!is_managed_release_name(
+            &format!("202610231517-other"),
+            &fork
+        ));
+        assert!(is_managed_release_name(
+            &format!("local-{}-{target}", blake3::hash(b"release").to_hex()),
+            &fork
+        ));
+    }
 }
