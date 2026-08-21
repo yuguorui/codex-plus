@@ -1,7 +1,8 @@
 #[cfg(any(not(debug_assertions), test))]
 pub(crate) fn is_newer(latest: &str, current: &str) -> Option<bool> {
     match (parse_version(latest), parse_version(current)) {
-        (Some(l), Some(c)) => Some(l > c),
+        (Some(ParsedVersion::Semver(l)), Some(ParsedVersion::Semver(c))) => Some(l > c),
+        (Some(ParsedVersion::ForkRelease(l)), Some(ParsedVersion::ForkRelease(c))) => Some(l > c),
         _ => None,
     }
 }
@@ -16,7 +17,7 @@ pub(crate) fn extract_version_from_latest_tag(latest_tag_name: &str) -> anyhow::
 
 #[cfg(any(not(debug_assertions), test))]
 pub(crate) fn is_source_build_version(version: &str) -> bool {
-    parse_version(version) == Some((0, 0, 0))
+    parse_version(version) == Some(ParsedVersion::Semver((0, 0, 0)))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,25 +32,61 @@ pub(crate) fn server_version_notice_kind(
     client: &str,
     server: &str,
 ) -> Option<ServerVersionNoticeKind> {
-    let client = semver::Version::parse(client).ok()?;
-    let server = semver::Version::parse(server).ok()?;
-    let client_release = (client.major, client.minor, client.patch);
-    let server_release = (server.major, server.minor, server.patch);
-    let client_is_local = client_release == (0, 0, 0) || !client.build.is_empty();
-    if client_is_local || (!client.pre.is_empty() && client_release != server_release) {
-        return (client != server).then_some(ServerVersionNoticeKind::Different);
+    match (
+        parse_fork_release_version(client),
+        parse_fork_release_version(server),
+    ) {
+        (Some(client), Some(server)) => (client > server).then_some(ServerVersionNoticeKind::Older),
+        (Some(_), None) => {
+            let server = semver::Version::parse(server).ok()?;
+            let server_is_local =
+                (server.major, server.minor, server.patch) == (0, 0, 0) || !server.build.is_empty();
+            (!server_is_local).then_some(ServerVersionNoticeKind::Different)
+        }
+        (None, Some(_)) => {
+            let _ = semver::Version::parse(client).ok()?;
+            Some(ServerVersionNoticeKind::Different)
+        }
+        (None, None) => {
+            let client = semver::Version::parse(client).ok()?;
+            let server = semver::Version::parse(server).ok()?;
+            let client_release = (client.major, client.minor, client.patch);
+            let server_release = (server.major, server.minor, server.patch);
+            let client_is_local = client_release == (0, 0, 0) || !client.build.is_empty();
+            if client_is_local || (!client.pre.is_empty() && client_release != server_release) {
+                return (client != server).then_some(ServerVersionNoticeKind::Different);
+            }
+            (server.build.is_empty() && server_release != (0, 0, 0) && client > server)
+                .then_some(ServerVersionNoticeKind::Older)
+        }
     }
-    (server.build.is_empty() && server_release != (0, 0, 0) && client > server)
-        .then_some(ServerVersionNoticeKind::Older)
+}
+
+fn parse_fork_release_version(version: &str) -> Option<u64> {
+    (version.len() == 12 && version.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| version.parse().ok())
+        .flatten()
 }
 
 #[cfg(any(not(debug_assertions), test))]
-fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
-    let mut iter = v.trim().split('.');
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParsedVersion {
+    Semver((u64, u64, u64)),
+    ForkRelease(u64),
+}
+
+#[cfg(any(not(debug_assertions), test))]
+fn parse_version(v: &str) -> Option<ParsedVersion> {
+    let version = v.trim();
+    if let Some(fork_release) = parse_fork_release_version(version) {
+        return Some(ParsedVersion::ForkRelease(fork_release));
+    }
+
+    let mut iter = version.split('.');
     let maj = iter.next()?.parse::<u64>().ok()?;
     let min = iter.next()?.parse::<u64>().ok()?;
     let pat = iter.next()?.parse::<u64>().ok()?;
-    Some((maj, min, pat))
+    Some(ParsedVersion::Semver((maj, min, pat)))
 }
 
 #[cfg(test)]
@@ -85,6 +122,13 @@ mod tests {
     }
 
     #[test]
+    fn fork_release_comparisons_work() {
+        assert_eq!(is_newer("202608231531", "202608231530"), Some(true));
+        assert_eq!(is_newer("202608231530", "202608231531"), Some(false));
+        assert_eq!(is_newer("202608231530", "0.145.0"), None);
+    }
+
+    #[test]
     fn source_build_version_is_not_checked() {
         assert!(is_source_build_version("0.0.0"));
         assert!(!is_source_build_version("0.1.0"));
@@ -92,7 +136,10 @@ mod tests {
 
     #[test]
     fn whitespace_is_ignored() {
-        assert_eq!(parse_version(" 1.2.3 \n"), Some((1, 2, 3)));
+        assert_eq!(
+            parse_version(" 1.2.3 \n"),
+            Some(ParsedVersion::Semver((1, 2, 3)))
+        );
         assert_eq!(is_newer(" 1.2.3 ", "1.2.2"), Some(true));
     }
 
@@ -174,10 +221,59 @@ mod tests {
             "0.153.0-alpha.01",
             "0.153.0-alpha..1",
         ] {
-            for release in ["0.153.0", "0.153.0-alpha.10", "0.0.0"] {
+            for release in ["0.153.0", "0.153.0-alpha.10", "0.0.0", "202611211200"] {
                 assert_eq!(server_version_notice_kind(version, release), None);
                 assert_eq!(server_version_notice_kind(release, version), None);
             }
+        }
+        assert_eq!(
+            server_version_notice_kind("202611211200", " 202611211100"),
+            None
+        );
+        assert_eq!(
+            server_version_notice_kind(" 202611211200", "202611211100"),
+            None
+        );
+    }
+
+    #[test]
+    fn fork_release_clients_compare_and_detect_release_line_mismatches() {
+        for (client, server, expected) in [
+            (
+                "202611211200",
+                "202611211159",
+                Some(ServerVersionNoticeKind::Older),
+            ),
+            ("202611211200", "202611211200", None),
+            ("202611211159", "202611211200", None),
+            ("202611211200", "0.0.0", None),
+            ("202611211200", "0.153.0+dev", None),
+            (
+                "202611211200",
+                "0.153.0",
+                Some(ServerVersionNoticeKind::Different),
+            ),
+            (
+                "0.0.0",
+                "202611211200",
+                Some(ServerVersionNoticeKind::Different),
+            ),
+            (
+                "0.153.0",
+                "202611211200",
+                Some(ServerVersionNoticeKind::Different),
+            ),
+            (
+                "0.155.0-alpha.1",
+                "202611211200",
+                Some(ServerVersionNoticeKind::Different),
+            ),
+        ] {
+            assert_eq!(
+                server_version_notice_kind(client, server),
+                expected,
+                "client={client}, server={server}"
+            );
         }
     }
 }
