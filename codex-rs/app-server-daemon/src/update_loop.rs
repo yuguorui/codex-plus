@@ -71,10 +71,10 @@ const RESTART_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 // envelope, and the worst-case six-byte JSON escape for every captured byte.
 const INSTALLER_STDERR_TAIL_BYTES: usize = 2 * 1024;
 const INSTALLER_STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
-#[cfg(unix)]
-const INSTALL_URL: &str = "https://chatgpt.com/codex/install.sh";
-#[cfg(windows)]
-const INSTALL_URL: &str = "https://chatgpt.com/codex/install.ps1";
+const RELEASE_REPOSITORY_ENV: &str = "CODEX_RELEASE_REPOSITORY";
+const DEFAULT_RELEASE_REPOSITORY: &str = "yuguorui/codex-plus";
+const INSTALL_URL: &str =
+    "https://github.com/yuguorui/codex-plus/releases/latest/download/install-fork.sh";
 
 pub(crate) async fn run(
     http_client_factory: HttpClientFactory,
@@ -757,8 +757,25 @@ async fn cancel_installer(child: &mut tokio::process::Child, package_root: &Path
     let _ = child.wait().await;
 }
 
+fn install_url_from_override(override_value: Option<&str>) -> String {
+    match override_value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(repository) if repository != DEFAULT_RELEASE_REPOSITORY => {
+            format!("https://github.com/{repository}/releases/latest/download/install-fork.sh")
+        }
+        _ => INSTALL_URL.to_string(),
+    }
+}
+
+fn install_url() -> String {
+    install_url_from_override(std::env::var(RELEASE_REPOSITORY_ENV).ok().as_deref())
+}
+
 async fn fetch_installer_script(http: &impl InstallerHttp) -> Result<Vec<u8>> {
-    match http.get(INSTALL_URL).await? {
+    let url = install_url();
+    match http.get(&url).await? {
         InstallerResponse::Success(body) => Ok(body),
         InstallerResponse::Unsuccessful { status } => {
             anyhow::bail!("standalone Codex updater request failed with status {status}")
