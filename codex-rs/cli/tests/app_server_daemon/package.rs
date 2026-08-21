@@ -33,10 +33,10 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
     // Reuse its prepared (and on Intel macOS, translated) executable. The installer
     // still makes a real independent package copy; only fixture setup shares this inode.
     std::fs::hard_link(
-        standalone.join("current/bin/codex"),
-        package.join("bin/codex"),
+        standalone.join("current/bin/codex++"),
+        package.join("bin/codex++"),
     )?;
-    daemon.codex = package.join("bin/codex");
+    daemon.codex = package.join("bin/codex++");
     for helper in [
         "bin/codex-code-mode-host",
         "codex-path/rg",
@@ -58,7 +58,7 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
     std::fs::write(
         package.join("codex-package.json"),
         serde_json::to_vec(&serde_json::json!({
-            "version": env!("CARGO_PKG_VERSION"), "target": target, "entrypoint": "bin/codex"
+            "version": env!("CARGO_PKG_VERSION"), "target": target, "entrypoint": "bin/codex++"
         }))?,
     )?;
     if action == "start" && initial == InitialDaemon::Missing {
@@ -103,7 +103,7 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
         output["managedCodexPath"],
         initial_root
             .canonicalize()?
-            .join("current/bin/codex")
+            .join("current/bin/codex++")
             .to_str()
             .context("managed path is not UTF-8")?
     );
@@ -171,7 +171,7 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
         assert_eq!(
             output["managedCodexPath"],
             current
-                .join("bin/codex")
+                .join("bin/codex++")
                 .to_str()
                 .context("managed path is not UTF-8")?
         );
