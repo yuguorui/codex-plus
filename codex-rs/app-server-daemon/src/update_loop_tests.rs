@@ -672,6 +672,23 @@ async fn test_control_server(
     daemon: &Daemon,
     home: &std::path::Path,
 ) -> tokio::task::JoinHandle<()> {
+    test_control_server_with_version(daemon, home, /*fixed_version*/ None).await
+}
+
+#[cfg(unix)]
+async fn test_fork_control_server(
+    daemon: &Daemon,
+    home: &std::path::Path,
+) -> tokio::task::JoinHandle<()> {
+    test_control_server_with_version(daemon, home, Some("0.0.0")).await
+}
+
+#[cfg(unix)]
+async fn test_control_server_with_version(
+    daemon: &Daemon,
+    home: &std::path::Path,
+    fixed_version: Option<&'static str>,
+) -> tokio::task::JoinHandle<()> {
     use futures::SinkExt;
     use futures::StreamExt;
     std::fs::create_dir_all(daemon.socket_path.parent().expect("socket parent"))
@@ -691,16 +708,18 @@ async fn test_control_server(
                 .await
                 .expect("initialize request")
                 .expect("frame");
-            let version = if std::fs::read_to_string(
-                crate::managed_install::package_root(&codex_home).join("auto-update-version"),
-            )
-            .unwrap_or_default()
-            .starts_with("1.1.0")
-            {
-                "1.1.0"
-            } else {
-                "1.0.0"
-            };
+            let version = fixed_version.unwrap_or_else(|| {
+                if std::fs::read_to_string(
+                    crate::managed_install::package_root(&codex_home).join("auto-update-version"),
+                )
+                .unwrap_or_default()
+                .starts_with("1.1.0")
+                {
+                    "1.1.0"
+                } else {
+                    "1.0.0"
+                }
+            });
             websocket.send(tokio_tungstenite::tungstenite::Message::Text(
                 serde_json::json!({"id": 1, "result": {
                     "userAgent": format!("codex_app_server_daemon/{version}"),
@@ -772,6 +791,77 @@ async fn scheduled_no_op_preserves_daemon_and_hands_off_stale_updater() {
     );
     assert!(daemon.managed_codex_bin.is_file());
     assert!(!stale.exists());
+    backend.stop().await.expect("stop daemon");
+    server.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn scheduled_fork_timestamp_no_op_preserves_daemon() {
+    let home = TempDir::new().expect("home");
+    let (daemon, release) = manual_update_daemon(&home);
+    let root = home.path().join("packages/standalone");
+    let target = release.strip_prefix("1.0.0-").expect("target suffix");
+    let fork_release = format!("202610231517-{target}");
+    let old_release = root.join("releases").join(&release);
+    let new_release = root.join("releases").join(&fork_release);
+    std::fs::rename(&old_release, &new_release).expect("rename fork release");
+    std::fs::remove_file(root.join("current")).expect("remove current");
+    std::os::unix::fs::symlink(format!("releases/{fork_release}"), root.join("current"))
+        .expect("fork current");
+    std::fs::write(root.join("auto-update-version"), &fork_release).expect("fork marker");
+    codex_utils_cargo_bin::write_executable(
+        &new_release.join("codex++"),
+        r#"#!/bin/sh
+if [ "$1" = '--version' ]; then echo codex 202610231517; else exec sleep 30; fi
+"#,
+    )
+    .expect("fork binary");
+
+    let settings = crate::settings::DaemonSettings::default();
+    let backend = crate::backend::pid_backend(daemon.backend_paths(&settings));
+    backend.start().await.expect("start daemon");
+    let server = test_fork_control_server(&daemon, home.path()).await;
+    assert!(
+        daemon.is_stable_standalone_release().expect("stable check"),
+        "fork release was not stable"
+    );
+    let pid_record = std::fs::read(&daemon.pid_file).expect("daemon PID record");
+    let no_op = FakeInstallerHttp::new(InstallerResponse::Success(
+        b"# CODEX_INSTALL_IF_LATEST
+exit 0
+"
+        .to_vec(),
+    ));
+
+    let outcome = super::update_once(
+        &no_op,
+        &daemon,
+        &executable_identity(&daemon.managed_codex_bin)
+            .await
+            .expect("updater identity"),
+        &mut test_terminate(),
+        super::UpdateTrigger::Scheduled,
+    )
+    .await
+    .expect("scheduled update");
+
+    assert!(matches!(
+        outcome,
+        (super::UpdateLoopControl::Continue, None)
+            | (
+                super::UpdateLoopControl::Continue,
+                Some(RestartIfRunningOutcome::AlreadyCurrent)
+            )
+    ));
+    assert_eq!(
+        std::fs::read(&daemon.pid_file).expect("daemon PID record"),
+        pid_record
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("auto-update-version")).expect("marker"),
+        fork_release
+    );
     backend.stop().await.expect("stop daemon");
     server.abort();
 }
