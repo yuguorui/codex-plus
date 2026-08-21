@@ -70,6 +70,21 @@ pub(crate) fn managed_codex_bin(codex_home: &Path) -> PathBuf {
     }
 }
 
+pub(crate) fn is_fork_release_version(version: &str) -> bool {
+    // Codex++ fork releases use the fixed-width yyyymmddhhmm tag format.
+    version.len() == 12 && version.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+pub(crate) fn is_stable_release_version(version: &str) -> bool {
+    let components: Vec<_> = version.split('.').collect();
+    let semver = components.len() == 3
+        && components.iter().all(|component| {
+            !component.is_empty() && component.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        && components.iter().any(|component| *component != "0");
+    semver || is_fork_release_version(version)
+}
+
 /// Only latest-channel stable releases may run the public latest-version updater.
 pub(crate) fn is_stable_standalone_release(codex_home: &Path, codex_bin: &Path) -> bool {
     let standalone = package_root(codex_home);
@@ -105,11 +120,7 @@ pub(crate) fn is_stable_standalone_release(codex_home: &Path, codex_bin: &Path) 
     else {
         return false;
     };
-    let components: Vec<_> = version.split('.').collect();
-    components.len() == 3
-        && components.iter().all(|component| {
-            !component.is_empty() && component.bytes().all(|byte| byte.is_ascii_digit())
-        })
+    is_stable_release_version(version)
         && std::fs::read_to_string(standalone.join("auto-update-version"))
             .is_ok_and(|selected| selected == release_name)
         && std::fs::canonicalize(codex_bin).is_ok_and(|bin| bin.starts_with(&release))
