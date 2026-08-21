@@ -26,7 +26,7 @@ fn package(root: &Path, version: &str) -> PathBuf {
     for dir in ["bin", "codex-path", "codex-resources/nested"] {
         std::fs::create_dir_all(root.join(dir)).expect("package directory");
     }
-    let bin = root.join("bin/codex");
+    let bin = root.join("bin/codex++");
     std::fs::write(&bin, format!("#!/bin/sh\necho 'codex {version}'\n")).expect("codex executable");
     for file in [
         "bin/codex-code-mode-host",
@@ -52,7 +52,7 @@ fn package(root: &Path, version: &str) -> PathBuf {
     std::fs::write(
         root.join("codex-package.json"),
         serde_json::json!({
-            "version": version, "target": target, "entrypoint": "bin/codex"
+            "version": version, "target": target, "entrypoint": "bin/codex++"
         })
         .to_string(),
     )
@@ -90,6 +90,27 @@ async fn seeds_full_package() {
         selected.file_name().expect("name").to_string_lossy()
     );
     assert!(validate_package(&selected).is_ok());
+}
+
+#[tokio::test]
+async fn missing_codex_plus_entrypoint_fails_without_selecting_it() {
+    let temp = tempfile::tempdir().expect("temp");
+    let source = temp.path().join("package");
+    let bin = package(&source, "0.152.0");
+    std::fs::remove_file(&bin).expect("remove Codex++ entrypoint");
+    let home = temp.path().join("home");
+    let error = prepare_from_package(
+        &daemon(&home),
+        &DaemonSettings::default(),
+        InstallMode::Missing,
+        Some(&source),
+        &bin,
+        |_| Ok(true),
+    )
+    .await
+    .expect_err("missing Codex++ entrypoint");
+    assert!(error.to_string().contains("bin/codex++"));
+    assert!(!home.join("packages/app-server-daemon/current").exists());
 }
 
 #[tokio::test]
@@ -297,7 +318,7 @@ async fn explicit_selection_requires_unchanged_cli_and_pins_all_versions() {
                 previous.to_string_lossy().as_bytes(),
             )
             .unwrap();
-            let before = std::fs::read(previous.join("bin/codex")).unwrap();
+            let before = std::fs::read(previous.join("bin/codex++")).unwrap();
             assert!(
                 !prepare_from_package(
                     &daemon,
@@ -342,10 +363,10 @@ async fn explicit_selection_requires_unchanged_cli_and_pins_all_versions() {
             }
             assert_ne!(selected, previous);
             assert_eq!(
-                std::fs::read(selected.join("bin/codex")).unwrap(),
+                std::fs::read(selected.join("bin/codex++")).unwrap(),
                 std::fs::read(&bin).unwrap()
             );
-            assert_eq!(std::fs::read(previous.join("bin/codex")).unwrap(), before);
+            assert_eq!(std::fs::read(previous.join("bin/codex++")).unwrap(), before);
             assert!(!root.join("auto-update-version").exists());
             assert!(daemon.running_backend(&settings).await.unwrap().is_none());
             previous = selected;
@@ -376,7 +397,7 @@ async fn broken_selection_is_not_a_missing_installation() {
     assert!(
         error
             .to_string()
-            .contains("repair the existing installation")
+            .contains("Repair the existing installation")
     );
     assert_eq!(
         std::fs::read_link(current).unwrap(),
