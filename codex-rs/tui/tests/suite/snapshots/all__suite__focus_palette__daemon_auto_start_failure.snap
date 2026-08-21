@@ -9,7 +9,7 @@ This command requires the standalone install managed by the Codex++ installer, b
 Repair the existing installation, or run `codex++ app-server daemon start` to install a missing daemon.
 
 Install it with:
-  curl -fsSL https://github.com/yuguorui/codex/releases/latest/download/install-fork.sh | sh
+  curl -fsSL https://github.com/yuguorui/codex-plus/releases/latest/download/install-fork.sh | sh
 
 Then rerun the command you just tried.
 To work without the background server, rerun the same command with --no-daemon (including resume or fork and its arguments).
