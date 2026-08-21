@@ -112,6 +112,34 @@ fn updater_only_runs_for_stable_installer_owned_releases() {
 }
 
 #[cfg(unix)]
+#[test]
+fn updater_accepts_fork_timestamp_releases_in_dedicated_package() {
+    let home = tempfile::TempDir::new().expect("home");
+    let root = home.path().join("packages/app-server-daemon");
+    let release = root.join("releases/202610231517-aarch64-apple-darwin");
+    let managed = release.join("bin/codex++");
+    std::fs::create_dir_all(managed.parent().expect("bin parent")).expect("release");
+    std::fs::write(&managed, b"stable").expect("managed bin");
+    std::os::unix::fs::symlink(&release, root.join("current")).expect("current release");
+
+    assert!(!super::is_stable_standalone_release(home.path(), &managed));
+    assert!(!super::is_stable_release_version("0.0.0"));
+    assert!(super::is_stable_release_version("0.0.1"));
+    std::fs::write(
+        root.join("auto-update-version"),
+        b"202610231517-aarch64-apple-darwin",
+    )
+    .expect("latest selection");
+    assert!(super::is_stable_standalone_release(home.path(), &managed));
+    std::fs::write(
+        root.join("auto-update-version"),
+        b"202610231516-aarch64-apple-darwin",
+    )
+    .expect("stale selection");
+    assert!(!super::is_stable_standalone_release(home.path(), &managed));
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn older_managed_binary_does_not_claim_updater_support() {
     let temp = tempfile::TempDir::new().expect("home");

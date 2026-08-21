@@ -153,8 +153,7 @@ async fn prepare_from_package(
         "CODEX_HOME must be outside the source CLI package"
     );
     let manifest_bytes = std::fs::read(source.join("codex-package.json"))?;
-    let manifest: CodexPackageManifest = serde_json::from_slice(&manifest_bytes)?;
-    let version = manifest.version.to_string();
+    let _manifest: CodexPackageManifest = serde_json::from_slice(&manifest_bytes)?;
     let target = platform_target()?;
     let mut metadata: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
     let entrypoint = if cfg!(windows) {
@@ -171,6 +170,10 @@ async fn prepare_from_package(
         "the CLI package does not match this platform or executable"
     );
     validate_package(source, source_entrypoint)?;
+    // Fork packages keep a placeholder manifest version while the executable
+    // carries the date-based release identity. Use the executable as the source
+    // of truth so latest-channel packages stay eligible for updates.
+    let version = managed_install::managed_codex_version(&source.join(source_entrypoint)).await?;
     // A local build may replace the executable while confirmation is pending.
     let running_identity = managed_install::executable_identity(running_exe).await?;
     if mode == InstallMode::Replace {
@@ -226,7 +229,7 @@ async fn prepare_from_package(
         "daemon running state changed while awaiting confirmation; retry the command"
     );
     let backend = current_backend;
-    let stable = stable_version(&version).is_some();
+    let stable = managed_install::is_stable_release_version(&version);
     let releases = root.join("releases");
     std::fs::create_dir_all(&releases)?;
     let stage = tempfile::Builder::new()
@@ -494,14 +497,6 @@ fn package_tree(
         }
     }
     Ok(hasher.finalize().to_hex().to_string())
-}
-
-fn stable_version(value: &str) -> Option<semver::Version> {
-    let version = semver::Version::parse(value).ok()?;
-    (version.pre.is_empty()
-        && version.build.is_empty()
-        && (version.major, version.minor, version.patch) != (0, 0, 0))
-        .then_some(version)
 }
 
 fn validate_package(root: &Path, entrypoint: &str) -> Result<()> {

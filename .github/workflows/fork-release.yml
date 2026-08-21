@@ -287,145 +287,18 @@ jobs:
           RELEASE_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          cat > dist/install-fork.sh <<'INSTALL_SCRIPT'
-          #!/usr/bin/env sh
-          set -eu
-
-          REPO="${CODEX_RELEASE_REPOSITORY:-__RELEASE_REPOSITORY__}"
-          RELEASE="${1:-latest}"
-          BIN_DIR="${CODEX_INSTALL_DIR:-$HOME/.local/bin}"
-          BIN_NAME="${CODEX_BIN_NAME:-codex++}"
-          PACKAGE_BIN_NAME="codex++"
-          CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-          STANDALONE_ROOT="$CODEX_HOME_DIR/packages/standalone"
-          RELEASES_DIR="$STANDALONE_ROOT/releases"
-          CURRENT_LINK="$STANDALONE_ROOT/current"
-
-          usage() {
-            cat <<'EOF'
-          Usage: install-fork.sh [VERSION]
-
-          VERSION may be "latest", "rust-vyyyymmddhhmm", or "yyyymmddhhmm".
-          Set CODEX_RELEASE_REPOSITORY=owner/repo to override the release repository.
-          Set CODEX_BIN_NAME=name to choose the command name installed into CODEX_INSTALL_DIR.
-          EOF
-          }
-
-          if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
-            usage
-            exit 0
-          fi
-
-          download_file() {
-            url="$1"
-            output="$2"
-            if command -v curl >/dev/null 2>&1; then
-              curl -fsSL "$url" -o "$output"
-            elif command -v wget >/dev/null 2>&1; then
-              wget -q -O "$output" "$url"
-            else
-              echo "curl or wget is required." >&2
-              exit 1
-            fi
-          }
-
-          download_text() {
-            url="$1"
-            if command -v curl >/dev/null 2>&1; then
-              curl -fsSL "$url"
-            elif command -v wget >/dev/null 2>&1; then
-              wget -q -O - "$url"
-            else
-              echo "curl or wget is required." >&2
-              exit 1
-            fi
-          }
-
-          normalize_version() {
-            case "$1" in
-              "" | latest) printf 'latest\n' ;;
-              rust-v*) printf '%s\n' "${1#rust-v}" ;;
-              v*) printf '%s\n' "${1#v}" ;;
-              *) printf '%s\n' "$1" ;;
-            esac
-          }
-
-          resolve_version() {
-            normalized="$(normalize_version "$RELEASE")"
-            if [ "$normalized" != "latest" ]; then
-              printf '%s\n' "$normalized"
-              return
-            fi
-            release_json="$(download_text "https://api.github.com/repos/$REPO/releases/latest")"
-            resolved="$(printf '%s\n' "$release_json" | sed -n 's/.*"tag_name":[[:space:]]*"rust-v\([^"]*\)".*/\1/p' | head -n 1)"
-            if [ -z "$resolved" ]; then
-              echo "Failed to resolve latest release for $REPO." >&2
-              exit 1
-            fi
-            printf '%s\n' "$resolved"
-          }
-
-          file_sha256() {
-            if command -v sha256sum >/dev/null 2>&1; then
-              sha256sum "$1" | awk '{print $1}'
-            else
-              shasum -a 256 "$1" | awk '{print $1}'
-            fi
-          }
-
-          case "$(uname -s)" in
-            Linux) target="x86_64-unknown-linux-musl" ;;
-            Darwin)
-              if [ "$(uname -m)" = "arm64" ] || [ "$(uname -m)" = "aarch64" ]; then
-                target="aarch64-apple-darwin"
-              else
-                echo "This fork release only supports Apple Silicon macOS." >&2
-                exit 1
-              fi
-              ;;
-            *)
-              echo "This fork release only supports Linux x64 and Apple Silicon macOS." >&2
-              exit 1
-              ;;
-          esac
-
-          if [ "$target" = "x86_64-unknown-linux-musl" ] && [ "$(uname -m)" != "x86_64" ] && [ "$(uname -m)" != "amd64" ]; then
-            echo "This fork release only supports Linux x64." >&2
-            exit 1
-          fi
-
-          version="$(resolve_version)"
-          tag="rust-v$version"
-          asset="codex-package-$target.tar.gz"
-          base_url="https://github.com/$REPO/releases/download/$tag"
-          tmp_dir="$(mktemp -d)"
-          trap 'rm -rf "$tmp_dir"' EXIT INT TERM
-
-          mkdir -p "$BIN_DIR" "$RELEASES_DIR"
-          download_file "$base_url/codex-package_SHA256SUMS" "$tmp_dir/codex-package_SHA256SUMS"
-          expected="$(awk -v asset="$asset" '$2 == asset { print $1; found = 1 } END { if (!found) exit 1 }' "$tmp_dir/codex-package_SHA256SUMS")"
-          download_file "$base_url/$asset" "$tmp_dir/$asset"
-          actual="$(file_sha256 "$tmp_dir/$asset")"
-          if [ "$actual" != "$expected" ]; then
-            echo "Checksum mismatch for $asset." >&2
-            echo "expected: $expected" >&2
-            echo "actual:   $actual" >&2
-            exit 1
-          fi
-
-          release_dir="$RELEASES_DIR/$version-$target"
-          rm -rf "$release_dir"
-          mkdir -p "$release_dir"
-          tar -C "$release_dir" -xzf "$tmp_dir/$asset"
-
-          ln -sfn "$release_dir" "$CURRENT_LINK"
-          ln -sfn "$release_dir/bin/$PACKAGE_BIN_NAME" "$BIN_DIR/$BIN_NAME"
-          ln -sfn "$release_dir/bin/codex-code-mode-host" "$BIN_DIR/codex-code-mode-host"
-          echo "Installed $BIN_NAME $version for $target at $release_dir"
-          echo "Ensure $BIN_DIR is on your PATH."
-          INSTALL_SCRIPT
-          sed -i "s#__RELEASE_REPOSITORY__#${RELEASE_REPOSITORY}#g" dist/install-fork.sh
+          mkdir -p dist
+          sed "s#__RELEASE_REPOSITORY__#${RELEASE_REPOSITORY}#g" \
+            scripts/install/install-fork.sh > dist/install-fork.sh
           chmod +x dist/install-fork.sh
+
+      - name: Test fork installer
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          bash scripts/install/test-install-fork.sh
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
