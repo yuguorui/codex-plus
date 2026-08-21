@@ -36,7 +36,7 @@ impl TestDaemon {
         let managed = standalone
             .join("releases")
             .join(&release_name)
-            .join("bin/codex");
+            .join("bin/codex++");
         std::fs::create_dir_all(managed.parent().context("managed bin parent")?)?;
         // Preserve the installed path without invalidating the shared CLI's Rosetta cache.
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
@@ -531,7 +531,7 @@ fn manual_update_rejects_an_unowned_installation() -> Result<()> {
         daemon
             .home
             .path()
-            .join("packages/standalone/current/bin/codex"),
+            .join("packages/standalone/current/bin/codex++"),
     )?;
 
     assert_eq!(daemon.lifecycle("update")?["status"], "unsupported");
@@ -557,8 +557,8 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
     for directory in ["bin", "codex-path", "codex-resources"] {
         std::fs::create_dir_all(package.join(directory))?;
     }
-    copy_executable(&daemon.codex, &package.join("bin/codex"))?;
-    daemon.codex = package.join("bin/codex");
+    copy_executable(&daemon.codex, &package.join("bin/codex++"))?;
+    daemon.codex = package.join("bin/codex++");
     for helper in [
         "bin/codex-code-mode-host",
         "codex-path/rg",
@@ -580,7 +580,7 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
     std::fs::write(
         package.join("codex-package.json"),
         serde_json::to_vec(&serde_json::json!({
-            "version": env!("CARGO_PKG_VERSION"), "target": target, "entrypoint": "bin/codex"
+            "version": env!("CARGO_PKG_VERSION"), "target": target, "entrypoint": "bin/codex++"
         }))?,
     )?;
     if action == "start" && initial == InitialDaemon::Missing {
@@ -625,7 +625,7 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
         output["managedCodexPath"],
         initial_root
             .canonicalize()?
-            .join("current/bin/codex")
+            .join("current/bin/codex++")
             .to_str()
             .context("managed path is not UTF-8")?
     );
@@ -693,7 +693,7 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
         assert_eq!(
             output["managedCodexPath"],
             current
-                .join("bin/codex")
+                .join("bin/codex++")
                 .to_str()
                 .context("managed path is not UTF-8")?
         );
