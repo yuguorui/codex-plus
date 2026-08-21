@@ -1,8 +1,6 @@
 #![cfg(not(debug_assertions))]
 
 use crate::legacy_core::config::Config;
-use crate::npm_registry;
-use crate::npm_registry::NpmPackageInfo;
 use crate::update_action;
 use crate::update_action::UpdateAction;
 use crate::update_versions::extract_version_from_latest_tag;
@@ -57,18 +55,11 @@ pub fn get_upgrade_version(config: &Config) -> Option<String> {
     })
 }
 
-// We use the latest version from the cask if installation is via homebrew - homebrew does not immediately pick up the latest release and can lag behind.
-const HOMEBREW_CASK_API_URL: &str = "https://formulae.brew.sh/api/cask/codex.json";
-const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/openai/codex/releases/latest";
+const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/yuguorui/codex/releases/latest";
 
 #[derive(Deserialize, Debug, Clone)]
 struct ReleaseInfo {
     tag_name: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-struct HomebrewCaskInfo {
-    version: String,
 }
 
 async fn check_for_update(
@@ -81,39 +72,12 @@ async fn check_for_update(
         ClientRouteClass::Other,
     )
     .with_legacy_custom_ca_fallback();
-    let latest_version = match action {
-        Some(UpdateAction::Daemon(_)) => return Ok(()),
-        Some(UpdateAction::BrewUpgrade) => {
-            let HomebrewCaskInfo { version } = client_pool
-                .get(HOMEBREW_CASK_API_URL)
-                .headers(default_headers())
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<HomebrewCaskInfo>()
-                .await?;
-            version
-        }
-        Some(UpdateAction::NpmGlobalLatest)
-        | Some(UpdateAction::BunGlobalLatest)
-        | Some(UpdateAction::VitePlusGlobalLatest)
-        | Some(UpdateAction::PnpmGlobalLatest) => {
-            let latest_version = fetch_latest_github_release_version(&client_pool).await?;
-            let package_info = client_pool
-                .get(npm_registry::PACKAGE_URL)
-                .headers(default_headers())
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<NpmPackageInfo>()
-                .await?;
-            npm_registry::ensure_version_ready(&package_info, &latest_version)?;
-            latest_version
-        }
-        Some(UpdateAction::StandaloneUnix) | Some(UpdateAction::StandaloneWindows) | None => {
-            fetch_latest_github_release_version(&client_pool).await?
-        }
-    };
+    // Codex++ always checks the fork release channel, so the install method does not
+    // change where the latest version comes from.
+    if matches!(action, Some(UpdateAction::Daemon(_))) {
+        return Ok(());
+    }
+    let latest_version = fetch_latest_github_release_version(&client_pool).await?;
 
     // Preserve any previously dismissed version if present.
     let prev_info = read_version_info(version_file).ok();
