@@ -5,9 +5,10 @@ expression: "render_bottom_popup(&app.chat_widget, 80)"
   Subagents
   Select an agent to watch. ⌥← previous, ⌥→ next.
 
+  Search by name or ID
 
-› 1. • /root/review (needs approval)  00000000-0000-0000-0000-000000000002
-  2. • /root/worker (needs approval)  00000000-0000-0000-0000-000000000123
-  3. • Main [default] (current)       00000000-0000-0000-0000-000000000001
+› • /root/review (needs approval)  00000000-0000-0000-0000-000000000002
+  • /root/worker (needs approval)  00000000-0000-0000-0000-000000000123
+  • Main [default] (current)       00000000-0000-0000-0000-000000000001
 
   enter select · esc back
