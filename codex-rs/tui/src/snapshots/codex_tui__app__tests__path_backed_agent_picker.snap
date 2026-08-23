@@ -5,7 +5,8 @@ expression: "render_bottom_popup(&app.chat_widget, 80)"
   Subagents
   Select an agent to watch. ⌥+← previous, ⌥+→ next.
 
+  Search by name or ID
 
-› 1. • /root/worker  00000000-0000-0000-0000-000000000123
+› • /root/worker  00000000-0000-0000-0000-000000000123
 
   enter select · esc back
