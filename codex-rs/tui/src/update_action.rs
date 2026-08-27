@@ -20,9 +20,9 @@ pub enum UpdateAction {
     PnpmGlobalLatest,
     /// Update via `brew upgrade codex`.
     BrewUpgrade,
-    /// Update via the standalone Unix installer.
+    /// Update via the Codex++ standalone updater.
     StandaloneUnix,
-    /// Update via `$env:CODEX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex`.
+    /// Update via the Codex++ standalone updater on Windows.
     StandaloneWindows,
 }
 
@@ -52,22 +52,9 @@ impl UpdateAction {
             UpdateAction::VitePlusGlobalLatest => ("vp", &["install", "-g", "@openai/codex"]),
             UpdateAction::PnpmGlobalLatest => ("pnpm", &["add", "-g", "@openai/codex"]),
             UpdateAction::BrewUpgrade => ("brew", &["upgrade", "--cask", "codex"]),
-            UpdateAction::StandaloneUnix => (
-                "sh",
-                &[
-                    "-c",
-                    r#"s=$(curl -fsSL https://chatgpt.com/codex/install.sh) && CODEX_NON_INTERACTIVE=1 eval "$s""#,
-                ],
-            ),
-            UpdateAction::StandaloneWindows => (
-                "powershell",
-                &[
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-c",
-                    "$env:CODEX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex",
-                ],
-            ),
+            UpdateAction::StandaloneUnix | UpdateAction::StandaloneWindows => {
+                ("codex++", &["update"])
+            }
         }
     }
 
@@ -156,36 +143,15 @@ mod tests {
     }
 
     #[test]
-    fn standalone_windows_update_command_reruns_latest_installer() {
+    fn standalone_update_commands_use_the_fork_updater() {
+        assert_eq!(
+            UpdateAction::StandaloneUnix.command_args(),
+            ("codex++", &["update"][..])
+        );
         assert_eq!(
             UpdateAction::StandaloneWindows.command_args(),
-            (
-                "powershell",
-                &[
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-c",
-                    "$env:CODEX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex"
-                ][..],
-            )
+            ("codex++", &["update"][..])
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn standalone_unix_update_fails_when_installer_download_fails() {
-        let (command, args) = UpdateAction::StandaloneUnix.command_args();
-        let offline_command = args[1].replace("https://chatgpt.com", "file:///dev/null");
-        assert_ne!(offline_command, args[1], "installer URL must be replaced");
-        let output = std::process::Command::new(command)
-            .args([args[0], &offline_command])
-            .env_clear()
-            .env("HOME", "/dev/null")
-            .env("PATH", "/usr/bin:/bin")
-            .output()
-            .expect("run standalone Unix update command");
-
-        assert!(!output.status.success(), "{output:?}");
     }
 }
 
