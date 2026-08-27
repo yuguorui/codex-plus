@@ -1,20 +1,53 @@
 # Codex++ (Rust Implementation)
 
-**Codex++** is a fork of [openai/codex](https://github.com/openai/codex) that adds support for third-party model providers (Chat Completions, Anthropic, custom providers) alongside the original OpenAI Responses API. It builds as a standalone executable with a zero-dependency install and is installed as the `codex++` command.
+**Codex++** is a fork of [openai/codex](https://github.com/openai/codex) that adds support for third-party model providers (Chat Completions, Anthropic Messages, custom Responses-compatible gateways), non-GPT-friendly file tools, TUI workflow improvements, and dynamic multi-agent workflows alongside the original OpenAI Responses API. It builds as a standalone executable with a zero-dependency install and is installed as the `codex++` command.
 
 ## Installing
 
-Codex++ is distributed independently from the upstream Codex CLI. It cannot be installed via `npm` (`@openai/codex`) or Homebrew (`brew install --cask codex`) - those install the official upstream version without Chat/Anthropic wire support. Use one of the methods below instead.
+Codex++ is distributed independently from the upstream Codex CLI. It cannot be installed via `npm` (`@openai/codex`) or Homebrew (`brew install --cask codex`) - those install the official upstream version without Codex++ wire and tool additions. Use one of the methods below instead.
 
 ### One-command install (recommended)
 
-Codex++ publishes its own pre-built binaries via a dedicated GitHub Actions release workflow. To install:
+Codex++ publishes pre-built binaries for macOS (Apple Silicon), Linux (x86_64), and Windows (x86_64) via a dedicated GitHub Actions release workflow. The installers below resolve the latest release, verify the SHA-256 checksum against `codex-package_SHA256SUMS`, extract the standalone package, and install the `codex++` command.
+
+**macOS / Linux** (run in a terminal):
 
 ```shell
-curl -fsSL https://github.com/yuguorui/codex/releases/latest/download/install-fork.sh | sh
+curl -fsSL https://github.com/yuguorui/codex-plus/releases/latest/download/install-fork.sh | sh
 ```
 
-The install script resolves the latest release, verifies SHA-256 checksums, stores the standalone package under `~/.codex/packages/standalone`, and installs the `codex++` command into `~/.local/bin`. Set `CODEX_INSTALL_DIR` to change the install directory, `CODEX_BIN_NAME` to override the command name, and `CODEX_RELEASE_REPOSITORY` to override the release repository.
+**Windows** (run in PowerShell):
+
+```powershell
+irm https://github.com/yuguorui/codex-plus/releases/latest/download/install-fork.ps1 | iex
+```
+
+The standalone package is stored under `~/.codex/packages/standalone` (`%USERPROFILE%\.codex\packages\standalone` on Windows), and the `codex++` command is installed into `~/.local/bin` (`%USERPROFILE%\.local\bin` on Windows). Make sure that directory is on your `PATH`.
+
+#### Installing a specific version
+
+The installers accept a version as the first argument: `latest` (default), `rust-vyyyymmddhhmm`, `vyyyymmddhhmm`, or the bare `yyyymmddhhmm`.
+
+```shell
+sh install-fork.sh rust-v202608271200
+```
+
+```powershell
+.\install-fork.ps1 202608271200
+```
+
+#### Installer options
+
+Both installers honor these environment variables:
+
+- `CODEX_RELEASE_REPOSITORY` - GitHub `owner/repo` that publishes fork releases (default: `yuguorui/codex-plus`).
+- `CODEX_INSTALL_DIR` - directory that receives the `codex++` executable (default: `~/.local/bin`).
+- `CODEX_BIN_NAME` - installed command name (default: `codex++`).
+- `CODEX_HOME` - Codex home directory that holds the standalone package tree (default: `~/.codex`).
+
+#### Updating
+
+Run the same installer again, or run `codex++ update` from a release install. Codex++ also checks for a newer `rust-v<yyyymmddhhmm>` release on startup (refreshed every 20 hours) and shows a banner with an **Update now** option when one is available.
 
 You can also build from source:
 
@@ -156,53 +189,75 @@ extra_body = { "thinking" = { "type" = "adaptive" } }
 
 - Nested objects deep-merge recursively.
 - Arrays and scalars replace the existing value; arrays are replaced wholesale, not appended.
-- `null` removes the key from the request body when present, and is a no-op when absent — at every nesting level. A merged body never gains a JSON `null` object value from `extra_body`, since several providers reject explicit nulls with a 400. This lets a model opt out of a projected default such as `reasoning_effort`. TOML has no null, so the opt-out is only expressible in JSON configuration (a model catalog, or a remote thread config's `extra_body_json`).
+- `null` removes the key from the request body when present, and is a no-op when absent - at every nesting level. A merged body never gains a JSON `null` object value from `extra_body`, since several providers reject explicit nulls with a 400. This lets a model opt out of a projected default such as `reasoning_effort`. TOML has no null, so the opt-out is only expressible in JSON configuration (a model catalog, or a remote thread config's `extra_body_json`).
 
 Provider-level `extra_body` is applied first, then per-request `extra_body` (from model info) is merged on top, so a model can override or remove what its provider declares.
 
-Wire-specific guards still apply: on the Chat wire, `stream_options` is object-merged and `include_usage` is forced to `true` (a non-object override is rejected); on the Anthropic wire, `stream` must remain `true`, and any other value — including `null` — is rejected.
+Wire-specific guards still apply: on the Chat wire, `stream_options` is object-merged and `include_usage` is forced to `true` (a non-object override is rejected), and a non-null top-level `thinking_budget` reconciles away a client-projected `reasoning_effort`; on the Anthropic wire, `stream` must remain `true`, and any other value - including `null` - is rejected.
 
 ### `extra_headers` / `env_extra_headers` - Alias Header Fields
 
 New aliases `extra_headers` and `env_extra_headers` are accepted alongside the existing `http_headers` and `env_http_headers`. These aliases match the naming convention used by other OpenAI-compatible tools, making config more portable.
 
-### 429 Rate-Limit Retry
+### Non-GPT-Friendly File Tools
 
-Custom model providers now automatically retry on HTTP 429 (rate-limit) responses, with exponential backoff capped by `request_max_retry_delay_ms` (default 10 s, max 300 s). Previously, only 5xx and transport errors were retried.
+Codex++ provides structured file-editing alternatives for models that perform better with line-anchored or exact-replacement tools than with freeform patches:
 
-New config field:
+Codex++ separates file editing into three mutually exclusive `apply_patch_tool_type` profiles and automatically aligns the generic default instructions with the active profile:
+
+- **Freeform patch (`apply_patch_tool_type = "freeform"`)** - registers `apply_patch` (default for OpenAI GPT models).
+- **`fuzz_view_edit` (`apply_patch_tool_type = "hashline"`)** - registers only `fuzz_view_edit`, supporting `read`, `edit`, `insert`, and `delete` over `LINE:HASH|content` 4-character xxHash line anchors, with strict stale checks for `LINE:HASH` writes, unique bare-hash targeting without re-reading line numbers, and fuzzy relocation for minor drift.
+- **Claude Code-compatible `Read` and `Edit` (`apply_patch_tool_type = "claude_code"`)** - registers `Read` (`file_read`) and `Edit` (`file_edit`). `Read` reads text files with line-number prefixes (`offset`/`limit`), images, PDF page ranges (`pages`), and Jupyter notebooks; `Edit` performs exact `old_string` -> `new_string` replacements with `replace_all` support and read-before-edit safety checks.
+
+### TUI Enhancements
+
+- **Pending steers & validation-failure queue management** - while a turn is running with pending steers, press `Esc` twice (`esc esc`, or bind `tui.keymap.chat.cancel_pending_steers`) to cancel pending steers before the model consumes them and restore them to the composer; pressing `Esc` once still interrupts and sends immediately. If a turn fails local prompt/tool-history validation before any provider request is sent, queued inputs pause instead of auto-sending until you manually retry.
+- **Side-conversation model switching** - `/model` is available inside active side conversations and switches the model thread-locally for that side conversation without overwriting your persisted default model settings.
+- **Searchable subagent picker** - the `/agents` subagent picker supports interactive text search/filtering.
+- **Typing-reactive Bongo Cat** - `/pets` lets you enable a typing-reactive Bongo Cat companion (full sprite rendering on Kitty, iTerm2, and Sixel terminals; ASCII fallback elsewhere).
+
+### Decoupled Stream Preemption
+
+User-input preemption (`input_preempt`) is decoupled from active stream preemption (`stream_preempt`):
+
+- Responses Lite over WebSocket (which carries a native server-side interrupt) continues to preempt and drain cleanly when steering arrives mid-stream.
+- Non-interruptible streams (Chat Completions SSE, Anthropic Messages SSE, Responses HTTP SSE, and non-Lite WebSocket) are no longer discarded locally on mid-stream steering, preventing abandoned server generations while still waking Code Mode `exec`/`wait` tools and skipping retry backoff before partial output arrives.
+
+### 429 & Overload Retry
+
+Custom model providers automatically retry on HTTP 429 (rate-limit) responses as well as `ServerOverloaded`, 5xx, and transport errors, using exponential backoff capped by `request_max_retry_delay_ms` (default 10 s, max 300 s).
 
 ```toml
-[model_provider.my_provider]
+[model_providers.my_provider]
 request_max_retry_delay_ms = 15_000   # cap backoff at 15 seconds
 ```
 
 ### Fork Release Workflow
 
-A dedicated GitHub Actions workflow (`fork-release.yml`) builds and publishes pre-built binaries for macOS (Apple Silicon) and Linux (x86_64/musl) on every manual trigger. Releases are tagged `rust-v<yyyymmddhhmm>` and include SHA-256 checksums.
+A dedicated GitHub Actions workflow (`fork-release.yml`) builds and publishes pre-built binaries for macOS (Apple Silicon), Linux (x86_64/musl), and Windows (x86_64 MSVC) on every manual or auto-rebase trigger. Releases are tagged `rust-v<yyyymmddhhmm>` and include SHA-256 checksums.
 
 ## Connecting to Chat and Anthropic Providers
 
 ### Chat Completions providers (Ollama, vLLM, LiteLLM, DeepSeek, etc.)
 
-Any server that implements the OpenAI Chat Completions API (`/v1/chat/completions`) can be used with Codex++ by setting `wire_api = "chat"`:
+Any server that implements the OpenAI Chat Completions API (`/chat/completions`) can be used with Codex++ by setting `wire_api = "chat"`:
 
 ```toml
-# Example: local Ollama
-[model_provider.ollama]
-name = "Ollama"
+# Example: local Ollama (use a custom ID since `ollama` is a reserved built-in ID)
+[model_providers.local_ollama]
+name = "Local Ollama"
 base_url = "http://localhost:11434/v1"
 wire_api = "chat"
 
 # Example: DeepSeek API
-[model_provider.deepseek]
+[model_providers.deepseek]
 name = "DeepSeek"
 base_url = "https://api.deepseek.com/v1"
 env_key = "DEEPSEEK_API_KEY"
 wire_api = "chat"
 
 # Example: DashScope (Qwen) with thinking enabled
-[model_provider.dashscope]
+[model_providers.dashscope]
 name = "DashScope"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 env_key = "DASHSCOPE_API_KEY"
