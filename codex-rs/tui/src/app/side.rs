@@ -286,6 +286,12 @@ impl App {
             .set_side_conversation_context_label(Some(format!("Side {}", label_parts.join(" · "))));
     }
 
+    /// Whether the thread currently displayed to the user is a side conversation.
+    pub(super) fn active_side_conversation(&self) -> bool {
+        self.current_displayed_thread_id()
+            .is_some_and(|thread_id| self.side_threads.contains_key(&thread_id))
+    }
+
     pub(super) fn active_side_parent_thread_id(&self) -> Option<ThreadId> {
         self.current_displayed_thread_id()
             .and_then(|thread_id| self.side_threads.get(&thread_id))
