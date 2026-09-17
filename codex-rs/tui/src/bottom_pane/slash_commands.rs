@@ -355,6 +355,7 @@ mod tests {
         assert_eq!(
             commands,
             vec![
+                SlashCommand::Model,
                 SlashCommand::Ide,
                 SlashCommand::Rename,
                 SlashCommand::Agents,

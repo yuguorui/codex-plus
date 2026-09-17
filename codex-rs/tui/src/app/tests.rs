@@ -99,6 +99,8 @@ mod saved_chat_loading;
 mod session_lifecycle_requests;
 #[path = "tests/side_chat_policy_tests.rs"]
 mod side_chat_policy_tests;
+#[path = "tests/side_model.rs"]
+mod side_model;
 #[path = "tests/sidebar_chooser_hover_tests.rs"]
 mod sidebar_chooser_hover_tests;
 #[path = "tests/sidebar_file_path_tests.rs"]
