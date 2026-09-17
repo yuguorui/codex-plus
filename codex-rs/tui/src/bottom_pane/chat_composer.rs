@@ -9392,6 +9392,32 @@ mod tests {
     }
 
     #[test]
+    fn slash_popup_side_conversation_includes_model_ui() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ false,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ false,
+        );
+        composer.set_side_conversation_active(/*active*/ true);
+        type_chars_humanlike(&mut composer, &['/']);
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 12)).expect("terminal");
+        terminal
+            .draw(|f| composer.render(f.area(), f.buffer_mut()))
+            .expect("draw composer");
+
+        insta::assert_snapshot!("slash_popup_side_conversation", terminal.backend());
+    }
+
+    #[test]
     fn service_tier_slash_command_dispatches_from_catalog_name() {
         let (tx, _rx) = unbounded_channel::<AppEvent>();
         let sender = AppEventSender::new(tx);

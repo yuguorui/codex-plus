@@ -3770,6 +3770,50 @@ async fn model_reasoning_selection_popup_applies_custom_effort() {
     );
 }
 
+#[tokio::test]
+async fn side_model_reasoning_selection_does_not_persist_default_model() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
+    let custom_effort = ReasoningEffortConfig::Custom("side-future".to_string());
+    chat.set_reasoning_effort(Some(ReasoningEffortConfig::XHigh));
+    chat.set_side_conversation_active(/*active*/ true);
+
+    let mut preset = get_available_model(&chat, "gpt-5.5");
+    preset
+        .supported_reasoning_efforts
+        .push(ReasoningEffortPreset {
+            effort: custom_effort.clone(),
+            description: "Side conversation reasoning".to_string(),
+        });
+    chat.open_reasoning_popup(preset);
+    while rx.try_recv().is_ok() {}
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AppEvent::UpdateModel(model) if model == "gpt-5.5"
+        )),
+        "expected the side thread model update: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AppEvent::UpdateReasoningEffort(effort)
+                if effort.as_ref() == Some(&custom_effort)
+        )),
+        "expected the side thread reasoning update: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, AppEvent::PersistModelSelection { .. })),
+        "side conversation model selection must not persist defaults: {events:?}"
+    );
+}
+
 async fn select_ultra_with_multi_agent_thread_limit(max_threads: usize) -> (bool, Vec<String>) {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     chat.config
