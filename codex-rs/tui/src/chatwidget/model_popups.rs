@@ -349,12 +349,16 @@ impl ChatWidget {
             return false;
         }
 
-        // Prompt whenever the selection is not a true no-op for both:
+        // Side conversations apply the selection only to their own thread, so there
+        // is no global Plan-mode/default scope to choose.
+        let model_selection_is_for_main_conversation = !self.active_side_conversation;
+        // Main conversations still ask whenever this is not a true no-op for both:
         // 1) the active Plan-mode effective reasoning, and
         // 2) the stored global defaults that would be updated by the fallback path.
-        selected_effort != self.effective_reasoning_effort()
-            || selected_model != self.current_collaboration_mode.model()
-            || selected_effort != self.current_collaboration_mode.reasoning_effort()
+        model_selection_is_for_main_conversation
+            && (selected_effort != self.effective_reasoning_effort()
+                || selected_model != self.current_collaboration_mode().model()
+                || selected_effort != self.current_collaboration_mode().reasoning_effort())
     }
 
     pub(crate) fn open_plan_reasoning_scope_prompt(
