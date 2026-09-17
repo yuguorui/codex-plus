@@ -979,6 +979,19 @@ impl App {
         }
     }
 
+    /// Update the visible thread's reasoning effort without changing default-model state.
+    ///
+    /// Side-conversation model selections are thread-local. Set both collaboration-mode slots in
+    /// the visible ChatWidget so the selection survives Plan/Default mode toggles within that
+    /// thread, while leaving the app-wide defaults used by future threads untouched.
+    pub(super) fn set_active_thread_reasoning_without_default(
+        &mut self,
+        effort: Option<ReasoningEffortConfig>,
+    ) {
+        self.chat_widget.set_reasoning_effort(effort.clone());
+        self.chat_widget.set_plan_mode_reasoning_effort(effort);
+    }
+
     pub(super) fn on_update_plan_mode_reasoning_effort(
         &mut self,
         effort: Option<ReasoningEffortConfig>,

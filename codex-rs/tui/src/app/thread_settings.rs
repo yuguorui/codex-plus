@@ -117,6 +117,27 @@ impl App {
         self.send_thread_settings_update(app_server, params).await;
     }
 
+    pub(super) async fn sync_active_side_thread_model_setting(
+        &mut self,
+        app_server: &mut AppServerSession,
+        model: String,
+        effort: Option<codex_protocol::openai_models::ReasoningEffort>,
+    ) {
+        let Some(mut params) = self.active_thread_model_setting_update_params(model) else {
+            return;
+        };
+        params.effort = effort;
+        // Side-conversation model selection must not implicitly broaden permissions. Cyber-model
+        // defaults remain a main-conversation behavior because the side thread explicitly opted
+        // into a model change, not into a permission-profile change.
+        params.permissions = None;
+        params.approval_policy = None;
+        params.approvals_reviewer = None;
+        self.send_thread_settings_update(app_server, params).await;
+        self.sync_active_thread_service_tier_to_cached_session()
+            .await;
+    }
+
     pub(super) fn active_thread_reasoning_setting_update_params(
         &self,
         effort: Option<codex_protocol::openai_models::ReasoningEffort>,
