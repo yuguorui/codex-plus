@@ -1,0 +1,16 @@
+---
+source: tui/src/bottom_pane/chat_composer.rs
+expression: terminal.backend()
+---
+"                                                                                                    "
+"› /                                                                                                 "
+"                                                                                                    "
+"                                                                                                    "
+"› /model    choose what model and reasoning effort to use                                           "
+"  /ide      include current selection, open files, and other context from your IDE                  "
+"  /agents   view and switch between all active agent sessions                                       "
+"  /copy     copy the last response or part of it                                                    "
+"  /export   export the conversation as markdown                                                     "
+"  /raw      toggle raw scrollback mode for copy-friendly terminal selection                         "
+"  /diff     show git diff (including untracked files)                                               "
+"  /mention  mention a file                                                                          "

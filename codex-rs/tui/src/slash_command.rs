@@ -190,6 +190,9 @@ impl SlashCommand {
     }
 
     /// Whether this command remains available inside an active side conversation.
+    ///
+    /// Model selection is available there, but its side-conversation dispatch path keeps the
+    /// selection thread-local and does not persist new default-model settings.
     pub fn available_in_side_conversation(self) -> bool {
         matches!(
             self,
@@ -204,6 +207,7 @@ impl SlashCommand {
                 | SlashCommand::Pwd
                 | SlashCommand::Usage
                 | SlashCommand::Ide
+                | SlashCommand::Model
         )
     }
 
@@ -361,6 +365,7 @@ mod tests {
         assert!(SlashCommand::Statusline.available_during_task());
         assert!(SlashCommand::Raw.available_during_task());
         assert!(SlashCommand::Raw.available_in_side_conversation());
+        assert!(SlashCommand::Model.available_in_side_conversation());
         assert!(SlashCommand::Raw.supports_inline_args());
         assert!(SlashCommand::App.available_during_task());
     }
