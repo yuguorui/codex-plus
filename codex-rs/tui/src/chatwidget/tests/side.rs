@@ -118,6 +118,23 @@ async fn slash_commands_without_side_flag_are_rejected_for_side_threads() {
 }
 
 #[tokio::test]
+async fn slash_model_is_available_for_side_threads() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.set_side_conversation_active(/*active*/ true);
+
+    chat.dispatch_command(SlashCommand::Model);
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::FetchModels { request_id: emitted_request_id })
+        if !emitted_request_id.is_nil()
+    );
+    assert!(rx.try_recv().is_err(), "expected no follow-up events");
+    assert!(op_rx.try_recv().is_err(), "expected no op");
+}
+
+#[tokio::test]
 async fn slash_side_is_rejected_for_side_threads() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.set_side_conversation_active(/*active*/ true);

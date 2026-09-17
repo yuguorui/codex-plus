@@ -293,6 +293,9 @@ impl ChatWidget {
             .and_then(|effort| self.ultra_reasoning_concurrency_warning(effort));
         let thread_id = self.thread_id();
         let sparkle_thread = self.sparkle_thread_for_picker_action(&model_for_action);
+        // Side-conversation selections remain thread-local, while main-conversation
+        // selections retain the existing default-model persistence behavior.
+        let model_selection_is_for_main_conversation = !self.active_side_conversation;
         vec![Box::new(move |tx| {
             if model_for_action == LUNA_RESERVE_MODEL {
                 // Reserve is temporary: update the active task without persisting a model default.
@@ -320,10 +323,12 @@ impl ChatWidget {
                         .into_picker_event(sparkle_thread, model_for_action.clone()),
                 );
                 tx.send(AppEvent::UpdateReasoningEffort(effort_for_action.clone()));
-                tx.send(AppEvent::PersistModelSelection {
-                    model: model_for_action.clone(),
-                    effort: effort_for_action.clone(),
-                });
+                if model_selection_is_for_main_conversation {
+                    tx.send(AppEvent::PersistModelSelection {
+                        model: model_for_action.clone(),
+                        effort: effort_for_action.clone(),
+                    });
+                }
             }
             if let Some(warning) = warning.clone() {
                 tx.send(AppEvent::InsertHistoryCell(Box::new(
@@ -346,12 +351,16 @@ impl ChatWidget {
             return false;
         }
 
-        // Prompt whenever the selection is not a true no-op for both:
+        // Side conversations apply the selection only to their own thread, so there
+        // is no global Plan-mode/default scope to choose.
+        let model_selection_is_for_main_conversation = !self.active_side_conversation;
+        // Main conversations still ask whenever this is not a true no-op for both:
         // 1) the active Plan-mode effective reasoning, and
         // 2) the stored global defaults that would be updated by the fallback path.
-        selected_effort != self.effective_reasoning_effort()
-            || selected_model != self.current_collaboration_mode.model()
-            || selected_effort != self.current_collaboration_mode.reasoning_effort()
+        model_selection_is_for_main_conversation
+            && (selected_effort != self.effective_reasoning_effort()
+                || selected_model != self.current_collaboration_mode().model()
+                || selected_effort != self.current_collaboration_mode().reasoning_effort())
     }
 
     pub(crate) fn open_plan_reasoning_scope_prompt(
