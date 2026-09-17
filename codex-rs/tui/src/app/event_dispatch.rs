@@ -1920,30 +1920,61 @@ impl App {
                 }
             }
             AppEvent::UpdateReasoningEffort(effort) => {
-                self.on_update_reasoning_effort(effort.clone());
-                self.sync_active_thread_reasoning_setting(app_server, effort)
-                    .await;
+                // Main conversations retain the existing behavior: update the app-wide
+                // in-memory default and sync that setting to the active thread.
+                if !self.active_side_conversation() {
+                    self.on_update_reasoning_effort(effort.clone());
+                    self.sync_active_thread_reasoning_setting(app_server, effort)
+                        .await;
+                } else {
+                    // Side-conversation selections are ephemeral and thread-local: update
+                    // the visible side thread only, with no app-wide default mutation.
+                    self.set_active_thread_reasoning_without_default(effort.clone());
+                    if let Some(mut params) =
+                        self.active_thread_reasoning_setting_update_params(effort.clone())
+                    {
+                        params.collaboration_mode =
+                            Some(self.chat_widget.effective_collaboration_mode());
+                        self.send_thread_settings_update(app_server, params).await;
+                    }
+                    let effort_label = Self::reasoning_label(effort.as_ref());
+                    self.chat_widget.add_info_message(
+                        format!("Reasoning effort set to {effort_label} for this side conversation"),
+                        /*hint*/ None,
+                    );
+                }
             }
             AppEvent::UpdateLunaReserveReasoning { thread_id, effort } => {
                 self.update_luna_reserve_reasoning(app_server, thread_id, effort)
                     .await;
             }
             AppEvent::UpdateModel(model) => {
-                if self
-                    .active_thread_model_setting_update_params(model.clone())
-                    .is_some_and(|params| params.permissions.is_some())
-                    && self.reject_pending_permission_change()
-                {
-                    return Ok(AppRunControl::Continue);
-                }
-                let model_changed = self.chat_widget.current_model() != model
-                    || self.chat_widget.current_collaboration_mode().model() != model;
-                if model_changed {
+                // Main conversations retain model-specific permission defaults and app-wide
+                // runtime state updates. Side conversations update only the visible thread.
+                if !self.active_side_conversation() {
+                    if self
+                        .active_thread_model_setting_update_params(model.clone())
+                        .is_some_and(|params| params.permissions.is_some())
+                        && self.reject_pending_permission_change()
+                    {
+                        return Ok(AppRunControl::Continue);
+                    }
+                    let model_changed = self.chat_widget.current_model() != model
+                        || self.chat_widget.current_collaboration_mode().model() != model;
+                    if model_changed {
+                        self.chat_widget.set_model(&model);
+                        self.sync_active_thread_model_setting(app_server, model, /*effort*/ None)
+                            .await;
+                        self.sync_active_thread_service_tier_to_cached_session().await;
+                    }
+                } else {
                     self.chat_widget.set_model(&model);
-                    self.sync_active_thread_model_setting(app_server, model, /*effort*/ None)
-                        .await;
-                    self.sync_active_thread_service_tier_to_cached_session()
-                        .await;
+                    self.sync_active_side_thread_model_setting(
+                        app_server,
+                        model,
+                        /*effort*/ None,
+                    )
+                    .await;
                 }
             }
             AppEvent::AstraSelectedFromModelPicker { thread_id, model, action } => {
@@ -2064,52 +2095,72 @@ impl App {
             }
             AppEvent::ApplyAdvancedReasoning { model, effort } => {
                 self.app_event_tx.send(AppEvent::FollowTranscript);
-                if self
-                    .active_thread_model_setting_update_params(model.clone())
-                    .is_some_and(|params| params.permissions.is_some())
-                    && self.reject_pending_permission_change()
-                {
-                    return Ok(AppRunControl::Continue);
-                }
-                let model_changed = self.chat_widget.current_model() != model
-                    || self.chat_widget.current_collaboration_mode().model() != model;
-                let default_effort =
-                    self.on_apply_advanced_reasoning(model.as_str(), effort.clone());
-                if model_changed {
-                    self.sync_active_thread_model_setting(
+                // Main conversations preserve the existing advanced-reasoning contract:
+                // update the active thread and the app-wide/default model state.
+                if !self.active_side_conversation() {
+                    if self
+                        .active_thread_model_setting_update_params(model.clone())
+                        .is_some_and(|params| params.permissions.is_some())
+                        && self.reject_pending_permission_change()
+                    {
+                        return Ok(AppRunControl::Continue);
+                    }
+                    let model_changed = self.chat_widget.current_model() != model
+                        || self.chat_widget.current_collaboration_mode().model() != model;
+                    let default_effort =
+                        self.on_apply_advanced_reasoning(model.as_str(), effort.clone());
+                    if model_changed {
+                        self.sync_active_thread_model_setting(
+                            app_server,
+                            model.clone(),
+                            Some(effort.clone()),
+                        )
+                        .await;
+                    } else if let Some(mut params) =
+                        self.active_thread_reasoning_setting_update_params(Some(effort.clone()))
+                    {
+                        params.collaboration_mode =
+                            Some(self.chat_widget.effective_collaboration_mode());
+                        self.send_thread_settings_update(app_server, params).await;
+                    }
+                    self.sync_active_thread_service_tier_to_cached_session()
+                        .await;
+
+                    if let Some(default_effort) = default_effort.as_ref()
+                        && let Err(err) = self.persist_model_defaults(
+                            app_server.request_handle(),
+                            crate::config_update::build_model_selection_edits(
+                                model.as_str(),
+                                Some(default_effort),
+                            ),
+                            "default model and reasoning effort",
+                        )
+                        .await
+                    {
+                        let error = format_config_error(&err);
+                        tracing::error!(error = %error, "failed to persist conversation model");
+                        self.chat_widget
+                            .add_error_message(format!("Failed to save default model: {error}"));
+                    } else {
+                        self.chat_widget.add_info_message(
+                            format!("Model changed to {model} {effort} for this conversation"),
+                            /*hint*/ None,
+                        );
+                    }
+                } else {
+                    // Advanced reasoning in a side conversation is also thread-local.
+                    // Apply it to the active side thread without selecting a new default
+                    // effort, broadening permissions, or persisting a model default.
+                    self.chat_widget.set_model(&model);
+                    self.set_active_thread_reasoning_without_default(Some(effort.clone()));
+                    self.sync_active_side_thread_model_setting(
                         app_server,
                         model.clone(),
                         Some(effort.clone()),
                     )
                     .await;
-                } else if let Some(mut params) =
-                    self.active_thread_reasoning_setting_update_params(Some(effort.clone()))
-                {
-                    params.collaboration_mode =
-                        Some(self.chat_widget.effective_collaboration_mode());
-                    self.send_thread_settings_update(app_server, params).await;
-                }
-                self.sync_active_thread_service_tier_to_cached_session()
-                    .await;
-
-                if let Some(default_effort) = default_effort.as_ref()
-                    && let Err(err) = self.persist_model_defaults(
-                        app_server.request_handle(),
-                        crate::config_update::build_model_selection_edits(
-                            model.as_str(),
-                            Some(default_effort),
-                        ),
-                        "default model and reasoning effort",
-                    )
-                    .await
-                {
-                    let error = format_config_error(&err);
-                    tracing::error!(error = %error, "failed to persist conversation model");
-                    self.chat_widget
-                        .add_error_message(format!("Failed to save default model: {error}"));
-                } else {
                     self.chat_widget.add_info_message(
-                        format!("Model changed to {model} {effort} for this conversation"),
+                        format!("Model changed to {model} {effort} for this side conversation"),
                         /*hint*/ None,
                     );
                 }
