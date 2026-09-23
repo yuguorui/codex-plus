@@ -292,6 +292,8 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -723,13 +725,172 @@ jobs:
           test -x "${codex_home}/packages/standalone/current/bin/codex++"
           test -x "${bin_dir}/codex++"
 
+      - name: Generate changelog with Codex++
+        env:
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_ANTHROPIC_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          notes_file="${RUNNER_TEMP}/release-notes.md"
+          input_file="${RUNNER_TEMP}/changelog-input.md"
+          fork_commits="${RUNNER_TEMP}/fork-commits.txt"
+          upstream_commits="${RUNNER_TEMP}/upstream-commits.txt"
+          repo_url="https://github.com/${GITHUB_REPOSITORY}"
+
+          # Resolve the previous release before fetching upstream so upstream's
+          # rust-v* tags can never leak into this lookup. Fork release versions
+          # are fixed-width timestamps, so lexical sort is authoritative.
+          previous_tag="$(
+            git tag --list 'rust-v*' |
+              grep -Ex 'rust-v[0-9]{12}' |
+              grep -vx "$RELEASE_TAG" |
+              sort |
+              tail -n 1 || true
+          )"
+
+          if ! git remote get-url upstream >/dev/null 2>&1; then
+            git remote add upstream https://github.com/openai/codex.git
+          fi
+
+          # The nightly rebase rewrites every fork commit, so a previous release
+          # tag is never an ancestor of HEAD and hash ranges cannot identify new
+          # fork work. Compare patch-ids instead: they survive rebases, while
+          # new commits and folded fixes (fixup/autosquash) get new patch-ids
+          # and correctly resurface in the changelog.
+          write_patch_ids() {
+            git rev-list "$@" |
+              while IFS= read -r rev; do
+                git diff-tree -p "$rev" |
+                  git patch-id --stable |
+                  awk -v rev="$rev" '{ print $1, rev }'
+              done
+          }
+
+          : > "$fork_commits"
+          : > "$upstream_commits"
+          if git fetch --no-tags upstream main; then
+            if [[ -n "$previous_tag" ]]; then
+              previous_upstream_base="$(git merge-base "$previous_tag" upstream/main)"
+              write_patch_ids "$previous_tag" --not "$previous_upstream_base" > "${RUNNER_TEMP}/previous-fork-patch-ids.txt"
+              write_patch_ids upstream/main..HEAD > "${RUNNER_TEMP}/current-fork-patch-ids.txt"
+              awk 'NR==FNR { seen[$1]=1; next } !($1 in seen)' \
+                "${RUNNER_TEMP}/previous-fork-patch-ids.txt" \
+                "${RUNNER_TEMP}/current-fork-patch-ids.txt" |
+                cut -d' ' -f2 |
+                xargs -r git show -s --format='%h %s' > "$fork_commits"
+
+              # Upstream commits are never rebased away, so the exact upstream
+              # range is bounded by HEAD's merge base with upstream/main.
+              fork_upstream_base="$(git merge-base HEAD upstream/main)"
+              git log --format='%h %s' "${previous_tag}..${fork_upstream_base}" > "$upstream_commits"
+            else
+              write_patch_ids upstream/main..HEAD |
+                cut -d' ' -f2 |
+                xargs -r git show -s --format='%h %s' > "$fork_commits"
+            fi
+          else
+            echo "::warning::Failed to fetch upstream main; changelog cannot split fork and upstream commits."
+            if [[ -n "$previous_tag" ]]; then
+              git log --format='%h %s' "${previous_tag}..HEAD" > "$upstream_commits"
+            else
+              git log -n 200 --format='%h %s' > "$upstream_commits"
+            fi
+          fi
+
+          {
+            echo "Repository: ${GITHUB_REPOSITORY}"
+            echo "Release version: ${RELEASE_VERSION}"
+            echo "Previous release tag: ${previous_tag:-none}"
+            echo
+            echo "## New fork commits since previous release"
+            if [[ -s "$fork_commits" ]]; then
+              cat "$fork_commits"
+            else
+              echo "(none)"
+            fi
+            echo
+            echo "## Upstream commits since previous release"
+            if [[ -s "$upstream_commits" ]]; then
+              cat "$upstream_commits"
+            else
+              echo "(none)"
+            fi
+          } > "$input_file"
+
+          write_fallback_notes() {
+            {
+              echo "## Codex++ changes"
+              if [[ -s "$fork_commits" ]]; then
+                sed 's/^/- /' "$fork_commits"
+              else
+                echo "- No Codex++ changes in this release."
+              fi
+              echo
+              echo "## Upstream sync"
+              if [[ -s "$upstream_commits" ]]; then
+                sed 's/^/- /' "$upstream_commits"
+              else
+                echo "- No upstream changes in this release."
+              fi
+              echo
+              echo "**Full Changelog**: ${repo_url}/commits/${RELEASE_TAG}"
+            } > "$notes_file"
+          }
+
+          package="dist/x86_64-unknown-linux-musl/codex-package-x86_64-unknown-linux-musl.tar.gz"
+          bin_root="${RUNNER_TEMP}/codexpp"
+          mkdir -p "$bin_root"
+          tar -xzf "$package" -C "$bin_root"
+          export PATH="${bin_root}/bin:${PATH}"
+          codex++ --version
+
+          prompt="$(cat <<EOF
+          Read ${input_file}, write a user-facing English changelog for Codex++ ${RELEASE_VERSION}, and write the result only to ${notes_file}.
+
+          Requirements:
+          1. The first section heading is "## Codex++ changes": summarize user-visible features, fixes, and improvements from the New fork commits since previous release, merging multiple commits on the same topic into one item. If there are none, write exactly "No Codex++ changes in this release." under the heading.
+          2. The second section heading is "## Upstream sync": summarize commits from Upstream commits since previous release, aggregating changes synced from upstream openai/codex by topic instead of listing every commit. If there are none, write exactly "No upstream changes in this release." under the heading.
+          3. Ignore rebase, formatting, and CI-maintenance noise; never invent information that is not in the input.
+          4. Keep the whole document under 60 lines and use no code blocks.
+          5. The last line must be exactly: **Full Changelog**: ${repo_url}/commits/${RELEASE_TAG}
+          6. Do not create, modify, or delete any file other than ${notes_file}.
+          EOF
+          )"
+
+          # Run outside the repository so the model cannot dirty release inputs.
+          cd "$RUNNER_TEMP"
+          set +e
+          timeout 420 codex++ exec \
+            --model deepseek-v4-flash \
+            --ephemeral \
+            --dangerously-bypass-approvals-and-sandbox \
+            -c 'model_provider="deepseek"' \
+            -c 'model_providers.deepseek.name="DeepSeek"' \
+            -c 'model_providers.deepseek.base_url="https://api.deepseek.com/"' \
+            -c 'model_providers.deepseek.env_key="DEEPSEEK_API_KEY"' \
+            -c 'model_providers.deepseek.wire_api="responses"' \
+            -c 'model_context_window=1000000' \
+            "$prompt"
+          codex_status=$?
+          set -e
+
+          if [[ $codex_status -ne 0 || ! -s "$notes_file" ]]; then
+            echo "::warning::Codex++ changelog generation failed (exit ${codex_status}); using raw commits."
+            write_fallback_notes
+          fi
+
+          cat "$notes_file"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
         with:
           name: ${{ needs.metadata.outputs.version }}
           tag_name: ${{ needs.metadata.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          generate_release_notes: true
+          body_path: ${{ runner.temp }}/release-notes.md
           files: dist/**
           overwrite_files: true
           make_latest: ${{ ! inputs.prerelease }}
