@@ -1,13 +1,17 @@
 //! Cloud config bundle lifecycle orchestration.
 //!
-//! Startup loads a shared bundle from cache or backend, and background refresh
-//! updates both the on-disk cache and the bundle observed by future config loads.
-//! One-shot network loads can disable disk-cache reads and writes.
+//! Startup loads a shared bundle from cache or backend. If a refresh fails or
+//! times out, a recently expired signed cache entry can keep startup available
+//! while background refresh updates the on-disk cache and the bundle observed
+//! by future config loads. One-shot network loads can disable disk-cache reads
+//! and writes.
 
 use crate::backend::BundleClient;
 use crate::backend::BundleRequestError;
 use crate::backend::RetryableFailureKind;
+use crate::cache::CLOUD_CONFIG_BUNDLE_CACHE_REFRESH_INTERVAL;
 use crate::cache::CacheLoadStatus;
+use crate::cache::CacheReadPolicy;
 use crate::cache::CloudConfigBundleCache;
 use crate::metrics::emit_fetch_attempt_metric;
 use crate::metrics::emit_fetch_final_metric;
@@ -34,7 +38,6 @@ use tokio::time::timeout;
 
 pub(crate) const CLOUD_CONFIG_BUNDLE_TIMEOUT: Duration = Duration::from_secs(20);
 const CLOUD_CONFIG_BUNDLE_MAX_ATTEMPTS: usize = 5;
-const CLOUD_CONFIG_BUNDLE_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const CLOUD_CONFIG_BUNDLE_TIMEOUT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const CLOUD_CONFIG_BUNDLE_LOAD_FAILED_MESSAGE: &str =
     "Failed to load cloud config bundle (workspace-managed policies).";
@@ -43,7 +46,9 @@ const CLOUD_CONFIG_BUNDLE_AUTH_RECOVERY_FAILED_MESSAGE: &str = concat!(
     "Please log out and sign in again."
 );
 
-fn auth_identity(auth: &CodexAuth) -> (Option<String>, Option<String>) {
+type AuthIdentity = (Option<String>, Option<String>);
+
+fn auth_identity(auth: &CodexAuth) -> AuthIdentity {
     (auth.get_chatgpt_user_id(), auth.get_account_id())
 }
 
@@ -65,9 +70,22 @@ fn optional_bundle(bundle: CloudConfigBundle) -> Option<CloudConfigBundle> {
     }
 }
 
+fn auth_unavailable_error() -> CloudConfigBundleLoadError {
+    CloudConfigBundleLoadError::new(
+        CloudConfigBundleLoadErrorCode::Auth,
+        /*status_code*/ None,
+        "authentication is no longer available for the cloud config bundle",
+    )
+}
+
 enum CachedBundleLookup {
     Hit(Option<CloudConfigBundle>),
     Miss,
+}
+
+struct LatestBundleState {
+    snapshot: Result<Option<CloudConfigBundle>, CloudConfigBundleLoadError>,
+    timeout_fallback_identity: Option<AuthIdentity>,
 }
 
 enum UnauthorizedRecoveryAction {
@@ -82,7 +100,7 @@ pub(crate) struct CloudConfigBundleService<C> {
     cache_enabled: bool,
     codex_home: AbsolutePathBuf,
     timeout: Duration,
-    latest_bundle: OnceCell<Mutex<Result<Option<CloudConfigBundle>, CloudConfigBundleLoadError>>>,
+    latest_bundle: OnceCell<Mutex<LatestBundleState>>,
 }
 
 impl<C> CloudConfigBundleService<C>
@@ -116,50 +134,57 @@ where
         &self,
     ) -> Result<Option<CloudConfigBundle>, CloudConfigBundleLoadError> {
         self.latest_bundle
-            .get_or_init(|| async { Mutex::new(self.load_startup_bundle_with_timeout().await) })
+            .get_or_init(|| async { Mutex::new(self.load_startup_bundle_state().await) })
             .await
             .lock()
             .await
+            .snapshot
             .clone()
     }
 
     pub(crate) async fn load_startup_bundle_with_timeout(
         &self,
     ) -> Result<Option<CloudConfigBundle>, CloudConfigBundleLoadError> {
+        self.load_startup_bundle_state().await.snapshot
+    }
+
+    async fn load_startup_bundle_state(&self) -> LatestBundleState {
         let _timer =
             codex_otel::start_global_timer("codex.cloud_config_bundle.fetch.duration_ms", &[]);
         let started_at = Instant::now();
-        let load_result = timeout(self.timeout, self.load_startup_bundle())
-            .await
-            .inspect_err(|_| {
-                let message = format!(
-                    "Timed out waiting for cloud config bundle after {}s",
-                    self.timeout.as_secs()
-                );
-                tracing::error!("{message}");
-                emit_load_metric("startup", "error", /*bundle*/ None);
-            })
-            .map_err(|_| {
-                CloudConfigBundleLoadError::new(
-                    CloudConfigBundleLoadErrorCode::Timeout,
-                    /*status_code*/ None,
-                    format!(
-                        "timed out waiting for cloud config bundle after {}s",
-                        self.timeout.as_secs()
-                    ),
-                )
-            })?;
+        let (snapshot, timeout_fallback_identity) =
+            match timeout(self.timeout, self.load_startup_bundle()).await {
+                Ok(snapshot) => (snapshot, None),
+                Err(_) => {
+                    if let Some((identity, bundle)) =
+                        self.load_cached_timeout_fallback_for_current_auth().await
+                    {
+                        tracing::warn!(
+                            path = %self.cache.path().display(),
+                            "Timed out refreshing cloud config bundle; using cached fallback"
+                        );
+                        (Ok(bundle), Some(identity))
+                    } else {
+                        let message = format!(
+                            "timed out waiting for cloud config bundle after {}s",
+                            self.timeout.as_secs()
+                        );
+                        tracing::error!("{message}");
+                        emit_load_metric("startup", "error", /*bundle*/ None);
+                        (
+                            Err(CloudConfigBundleLoadError::new(
+                                CloudConfigBundleLoadErrorCode::Timeout,
+                                /*status_code*/ None,
+                                message,
+                            )),
+                            None,
+                        )
+                    }
+                }
+            };
 
-        let result = match load_result {
-            Ok(result) => result,
-            Err(err) => {
-                emit_load_metric("startup", "error", /*bundle*/ None);
-                return Err(err);
-            }
-        };
-
-        match result.as_ref() {
-            Some(bundle) => {
+        match snapshot.as_ref() {
+            Ok(Some(bundle)) => {
                 tracing::info!(
                     elapsed_ms = started_at.elapsed().as_millis(),
                     config_fragments = bundle.config_toml.enterprise_managed.len(),
@@ -168,16 +193,20 @@ where
                 );
                 emit_load_metric("startup", "success", Some(bundle));
             }
-            None => {
+            Ok(None) => {
                 tracing::info!(
                     elapsed_ms = started_at.elapsed().as_millis(),
                     "Cloud config bundle load completed (none)"
                 );
                 emit_load_metric("startup", "success", /*bundle*/ None);
             }
+            Err(_) => {}
         }
 
-        Ok(result)
+        LatestBundleState {
+            snapshot,
+            timeout_fallback_identity,
+        }
     }
 
     async fn load_startup_bundle(
@@ -195,7 +224,11 @@ where
             // only consulted on cache miss or invalid cache contents.
             let (chatgpt_user_id, account_id) = auth_identity(&auth);
             match self
-                .load_valid_cached_bundle(chatgpt_user_id.as_deref(), account_id.as_deref())
+                .load_cached_bundle(
+                    chatgpt_user_id.as_deref(),
+                    account_id.as_deref(),
+                    CacheReadPolicy::FreshOnly,
+                )
                 .await
             {
                 CachedBundleLookup::Hit(bundle) => return Ok(bundle),
@@ -207,12 +240,19 @@ where
             .await
     }
 
-    async fn load_valid_cached_bundle(
+    async fn load_cached_bundle(
         &self,
         chatgpt_user_id: Option<&str>,
         account_id: Option<&str>,
+        policy: CacheReadPolicy,
     ) -> CachedBundleLookup {
-        match self.cache.load(chatgpt_user_id, account_id).await {
+        let cached = match policy {
+            CacheReadPolicy::FreshOnly => self.cache.load(chatgpt_user_id, account_id).await,
+            CacheReadPolicy::AllowStaleFallback => {
+                self.cache.load_fallback(chatgpt_user_id, account_id).await
+            }
+        };
+        match cached {
             Ok(signed_payload) => {
                 if let Err(err) = validate_bundle(&signed_payload.bundle, &self.codex_home) {
                     tracing::warn!(
@@ -235,6 +275,31 @@ where
                 self.cache.log_load_status(&cache_load_status);
                 CachedBundleLookup::Miss
             }
+        }
+    }
+
+    async fn load_cached_timeout_fallback_for_current_auth(
+        &self,
+    ) -> Option<(AuthIdentity, Option<CloudConfigBundle>)> {
+        if !self.cache_enabled {
+            return None;
+        }
+        let auth = self.auth_manager.auth_cached()?;
+        if !cloud_config_eligible_auth(&auth) {
+            return None;
+        }
+
+        let identity = auth_identity(&auth);
+        match self
+            .load_cached_bundle(
+                identity.0.as_deref(),
+                identity.1.as_deref(),
+                CacheReadPolicy::AllowStaleFallback,
+            )
+            .await
+        {
+            CachedBundleLookup::Hit(bundle) => Some((identity, bundle)),
+            CachedBundleLookup::Miss => None,
         }
     }
 
@@ -486,14 +551,17 @@ where
     pub(crate) async fn refresh_cache_in_background(&self) {
         loop {
             let mut refresh_interval = CLOUD_CONFIG_BUNDLE_CACHE_REFRESH_INTERVAL;
-            if let Some(latest_bundle) = self.latest_bundle.get()
-                && matches!(
-                    &*latest_bundle.lock().await,
+            let latest_timed_out = if let Some(latest_bundle) = self.latest_bundle.get() {
+                matches!(
+                    &latest_bundle.lock().await.snapshot,
                     Err(error) if error.code() == CloudConfigBundleLoadErrorCode::Timeout
                 )
-            {
-                // Recover startup timeouts through this worker without making
-                // readers fetch concurrently or extending the startup deadline.
+            } else {
+                false
+            };
+            if self.timeout_fallback_active().await || latest_timed_out {
+                // Recover startup fallbacks and timeouts through this worker without
+                // making readers fetch concurrently or extending the startup deadline.
                 refresh_interval = CLOUD_CONFIG_BUNDLE_TIMEOUT_RETRY_INTERVAL;
             }
             sleep(refresh_interval).await;
@@ -516,19 +584,67 @@ where
         }
     }
 
+    async fn timeout_fallback_active(&self) -> bool {
+        if let Some(latest) = self.latest_bundle.get() {
+            latest.lock().await.timeout_fallback_identity.is_some()
+        } else {
+            false
+        }
+    }
+
+    async fn timeout_fallback_auth_is_current(&self) -> bool {
+        let Some(latest) = self.latest_bundle.get() else {
+            return true;
+        };
+        let Some(expected_identity) = latest.lock().await.timeout_fallback_identity.clone() else {
+            return true;
+        };
+        self.auth_identity_is_current(expected_identity)
+    }
+
+    fn auth_identity_is_current(&self, expected_identity: AuthIdentity) -> bool {
+        let Some(auth) = self.auth_manager.auth_cached() else {
+            return false;
+        };
+        auth_identity(&auth) == expected_identity && cloud_config_eligible_auth(&auth)
+    }
+
+    async fn discard_timeout_fallback(&self, error: CloudConfigBundleLoadError) {
+        let Some(latest) = self.latest_bundle.get() else {
+            return;
+        };
+        let mut latest = latest.lock().await;
+        if latest.timeout_fallback_identity.take().is_some() {
+            latest.snapshot = Err(error);
+        }
+    }
+
     async fn refresh_cache_once(&self) -> bool {
         let Some(auth) = self.auth_manager.auth().await else {
+            self.discard_timeout_fallback(auth_unavailable_error())
+                .await;
             return false;
         };
         if !cloud_config_eligible_auth(&auth) {
+            self.discard_timeout_fallback(auth_unavailable_error())
+                .await;
             return false;
         }
+        let refresh_identity = auth_identity(&auth);
 
         match self
             .fetch_remote_bundle_and_update_cache_with_retries(auth, "refresh")
             .await
         {
             Ok(bundle) => {
+                if !self.auth_identity_is_current(refresh_identity) {
+                    tracing::warn!(
+                        "Authentication changed while refreshing cloud config bundle; discarding result"
+                    );
+                    self.discard_timeout_fallback(auth_unavailable_error())
+                        .await;
+                    return true;
+                }
                 emit_load_metric("refresh", "success", bundle.as_ref());
                 self.publish_refresh_result(Ok(bundle)).await;
             }
@@ -539,7 +655,14 @@ where
                     "Failed to refresh cloud config bundle cache from remote"
                 );
                 emit_load_metric("refresh", "error", /*bundle*/ None);
-                self.publish_refresh_result(Err(err)).await;
+                if !self.timeout_fallback_active().await
+                    || (err.code() == CloudConfigBundleLoadErrorCode::Timeout
+                        && self.timeout_fallback_auth_is_current().await)
+                {
+                    self.publish_refresh_result(Err(err)).await;
+                } else {
+                    self.discard_timeout_fallback(err).await;
+                }
             }
         }
         true
@@ -553,8 +676,9 @@ where
             return;
         };
         let mut latest = latest.lock().await;
-        if result.is_ok() || latest.is_err() {
-            *latest = result;
+        if result.is_ok() || latest.snapshot.is_err() {
+            latest.snapshot = result;
+            latest.timeout_fallback_identity = None;
         }
     }
 }

@@ -81,7 +81,7 @@ async fn save_writes_signed_payload_and_loads_for_matching_identity() {
             .expect("parse cache");
     assert!(
         cache_file.signed_payload.expires_at
-            <= cache_file.signed_payload.cached_at + ChronoDuration::minutes(60)
+            <= cache_file.signed_payload.cached_at + ChronoDuration::hours(24)
     );
     assert!(cache_file.signed_payload.expires_at > cache_file.signed_payload.cached_at);
     assert_eq!(
@@ -187,6 +187,39 @@ async fn load_rejects_expired_cache() {
 
     assert_eq!(
         cache.load(Some("user-12345"), Some("account-12345")).await,
+        Err(CacheLoadStatus::CacheExpired)
+    );
+}
+
+#[tokio::test]
+async fn load_fallback_allows_soft_stale_but_not_hard_expired_cache() {
+    let codex_home = tempdir().expect("tempdir");
+    let cache = create_test_cache(codex_home.path());
+    let mut signed_payload = valid_signed_payload();
+    signed_payload.cached_at = Utc::now() - ChronoDuration::minutes(61);
+    signed_payload.expires_at = Utc::now() + ChronoDuration::hours(23);
+    let cache_file = signed_cache_file(signed_payload.clone());
+    write_cache_file(&cache, &cache_file);
+
+    assert_eq!(
+        cache.load(Some("user-12345"), Some("account-12345")).await,
+        Err(CacheLoadStatus::CacheExpired)
+    );
+    assert_eq!(
+        cache
+            .load_fallback(Some("user-12345"), Some("account-12345"))
+            .await,
+        Ok(signed_payload.clone())
+    );
+
+    signed_payload.cached_at = Utc::now() - ChronoDuration::hours(25);
+    signed_payload.expires_at = Utc::now() - ChronoDuration::hours(1);
+    write_cache_file(&cache, &signed_cache_file(signed_payload));
+
+    assert_eq!(
+        cache
+            .load_fallback(Some("user-12345"), Some("account-12345"))
+            .await,
         Err(CacheLoadStatus::CacheExpired)
     );
 }

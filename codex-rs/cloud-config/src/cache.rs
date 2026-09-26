@@ -1,7 +1,8 @@
 //! Signed on-disk cache for cloud config bundles.
 //!
-//! The cache is scoped to the authenticated ChatGPT user and account, has a
-//! short TTL, and is HMAC-signed so malformed or edited files fail closed.
+//! The cache is scoped to the authenticated ChatGPT user and account. Entries
+//! refresh after a short interval but remain eligible as a bounded startup
+//! fallback, and are HMAC-signed so malformed or edited files fail closed.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -22,7 +23,10 @@ use tokio::fs;
 
 const CLOUD_CONFIG_BUNDLE_CACHE_VERSION: u32 = 1;
 pub(super) const CLOUD_CONFIG_BUNDLE_CACHE_FILENAME: &str = "cloud-config-bundle-cache.json";
+pub(super) const CLOUD_CONFIG_BUNDLE_CACHE_REFRESH_INTERVAL: Duration =
+    Duration::from_secs(15 * 60);
 const CLOUD_CONFIG_BUNDLE_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
+const CLOUD_CONFIG_BUNDLE_CACHE_HARD_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const CLOUD_CONFIG_BUNDLE_CACHE_WRITE_HMAC_KEY: &[u8] =
     b"codex-cloud-config-bundle-cache-v1-6160ae70-bcfd-4ca8-a99b-40f73b3b072e";
 const CLOUD_CONFIG_BUNDLE_CACHE_READ_HMAC_KEYS: &[&[u8]] =
@@ -33,6 +37,12 @@ type HmacSha256 = Hmac<Sha256>;
 #[derive(Clone)]
 pub(super) struct CloudConfigBundleCache {
     path: AbsolutePathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CacheReadPolicy {
+    FreshOnly,
+    AllowStaleFallback,
 }
 
 impl CloudConfigBundleCache {
@@ -50,6 +60,29 @@ impl CloudConfigBundleCache {
         &self,
         chatgpt_user_id: Option<&str>,
         account_id: Option<&str>,
+    ) -> Result<CloudConfigBundleCacheSignedPayload, CacheLoadStatus> {
+        self.load_with_policy(chatgpt_user_id, account_id, CacheReadPolicy::FreshOnly)
+            .await
+    }
+
+    pub(super) async fn load_fallback(
+        &self,
+        chatgpt_user_id: Option<&str>,
+        account_id: Option<&str>,
+    ) -> Result<CloudConfigBundleCacheSignedPayload, CacheLoadStatus> {
+        self.load_with_policy(
+            chatgpt_user_id,
+            account_id,
+            CacheReadPolicy::AllowStaleFallback,
+        )
+        .await
+    }
+
+    async fn load_with_policy(
+        &self,
+        chatgpt_user_id: Option<&str>,
+        account_id: Option<&str>,
+        policy: CacheReadPolicy,
     ) -> Result<CloudConfigBundleCacheSignedPayload, CacheLoadStatus> {
         let (Some(chatgpt_user_id), Some(account_id)) = (chatgpt_user_id, account_id) else {
             return Err(CacheLoadStatus::AuthIdentityIncomplete);
@@ -99,7 +132,21 @@ impl CloudConfigBundleCache {
             return Err(CacheLoadStatus::CacheIdentityMismatch);
         }
 
-        if cache_file.signed_payload.expires_at <= Utc::now() {
+        let now = Utc::now();
+        let cache_age = now
+            .signed_duration_since(cache_file.signed_payload.cached_at)
+            .to_std();
+        if cache_file.signed_payload.expires_at <= now
+            || !matches!(cache_age, Ok(cache_age) if cache_age < CLOUD_CONFIG_BUNDLE_CACHE_HARD_TTL)
+        {
+            return Err(CacheLoadStatus::CacheExpired);
+        }
+        if policy == CacheReadPolicy::FreshOnly
+            && !matches!(
+                cache_age,
+                Ok(cache_age) if cache_age < CLOUD_CONFIG_BUNDLE_CACHE_TTL
+            )
+        {
             return Err(CacheLoadStatus::CacheExpired);
         }
 
@@ -134,7 +181,7 @@ impl CloudConfigBundleCache {
         let now = Utc::now();
         let expires_at = now
             .checked_add_signed(
-                ChronoDuration::from_std(CLOUD_CONFIG_BUNDLE_CACHE_TTL)
+                ChronoDuration::from_std(CLOUD_CONFIG_BUNDLE_CACHE_HARD_TTL)
                     .map_err(|_| CloudConfigBundleCacheError)?,
             )
             .ok_or(CloudConfigBundleCacheError)?;
