@@ -7,8 +7,8 @@ pub(crate) struct TurnAborted {
 }
 
 impl TurnAborted {
-    pub(crate) const INTERRUPTED_GUIDANCE: &'static str = "The user interrupted the previous turn on purpose. Any running unified exec processes may still be running in the background. If any tools/commands were aborted, they may have partially executed.";
-    pub(crate) const INTERRUPTED_DEVELOPER_GUIDANCE: &'static str = "The previous turn was interrupted on purpose. Any running unified exec processes may still be running in the background. If any tools/commands were aborted, they may have partially executed.";
+    pub(crate) const INTERRUPTED_GUIDANCE: &'static str = "The user interrupted the previous turn on purpose. This means the agent stopped waiting for pending results; underlying work may be running, completed, failed, or partially applied. Do not take further action based solely on the interruption; identify the exact operation and non-destructively verify its outcome or current state first.";
+    pub(crate) const INTERRUPTED_DEVELOPER_GUIDANCE: &'static str = "The previous turn was interrupted on purpose. This means the agent stopped waiting for pending results; underlying work may be running, completed, failed, or partially applied. Do not take further action based solely on the interruption; identify the exact operation and non-destructively verify its outcome or current state first.";
 
     pub(crate) fn new(guidance: impl Into<String>) -> Self {
         Self {
