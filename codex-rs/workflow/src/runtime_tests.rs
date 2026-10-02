@@ -2514,11 +2514,8 @@ async fn dynamic_progress_text_and_stall_timeout_have_host_side_limits() {
     }
 
     let result = execute_workflow(
-        &script(&format!(
-            "return agent('bounded', {{ stallMs: {} }})",
-            MAX_WORKFLOW_AGENT_STALL_MS + 1
-        )),
-        json!(null),
+        &script("return agent('bounded', { stallMs: args.stallMs })"),
+        json!({ "stallMs": MAX_WORKFLOW_AGENT_STALL_MS + 1 }),
         Arc::new(FakeAgentRuntime::default()),
         Arc::new(|_, _| {}),
         WorkflowRuntimeConfig::default(),
