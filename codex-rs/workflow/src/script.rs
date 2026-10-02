@@ -53,6 +53,15 @@ pub enum WorkflowScriptError {
         reason: &'static str,
     },
     #[error(
+        "workflow script has an invalid `agent()` option `{field}` at line {line}, column {column}: {reason}"
+    )]
+    InvalidAgentOption {
+        field: String,
+        line: usize,
+        column: usize,
+        reason: &'static str,
+    },
+    #[error(
         "workflow script has an invalid child workflow reference at line {line}, column {column}: {reason}"
     )]
     InvalidWorkflowReference {
@@ -85,7 +94,7 @@ pub fn validate_workflow_script(
     validate_reserved_identifiers(body)?;
     let body_start = source.len() - body.len();
     let analysis = analyze_workflow_body(body).map_err(|error| match error {
-        WorkflowBodyAnalysisError::InvalidAgentPrompt(invalid) => {
+        WorkflowBodyAnalysisError::AgentPrompt(invalid) => {
             let (line, column) = line_and_column(&source, body_start + invalid.byte_offset);
             WorkflowScriptError::InvalidAgentPrompt {
                 line,
@@ -93,7 +102,16 @@ pub fn validate_workflow_script(
                 reason: invalid.reason,
             }
         }
-        WorkflowBodyAnalysisError::InvalidWorkflowReference(invalid) => {
+        WorkflowBodyAnalysisError::AgentOption(invalid) => {
+            let (line, column) = line_and_column(&source, body_start + invalid.byte_offset);
+            WorkflowScriptError::InvalidAgentOption {
+                field: invalid.field,
+                line,
+                column,
+                reason: invalid.reason,
+            }
+        }
+        WorkflowBodyAnalysisError::WorkflowReference(invalid) => {
             let (line, column) = line_and_column(&source, body_start + invalid.byte_offset);
             WorkflowScriptError::InvalidWorkflowReference {
                 line,
