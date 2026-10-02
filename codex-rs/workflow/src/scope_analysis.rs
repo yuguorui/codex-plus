@@ -9,6 +9,7 @@ use oxc_span::GetSpan;
 use oxc_span::SourceType;
 use std::collections::BTreeSet;
 
+use crate::MAX_WORKFLOW_AGENT_STALL_MS;
 use crate::WorkflowChildReference;
 
 pub(crate) const UNAVAILABLE_GLOBAL_NAMES: &[&str] = &[
@@ -51,6 +52,21 @@ const DYNAMIC_SCOPE_MARKERS: &[&str] = &[
     "typeof",
     "with",
 ];
+
+const AGENT_OPTION_NAMES: &[&str] = &[
+    "label",
+    "phase",
+    "schema",
+    "model",
+    "effort",
+    "isolation",
+    "agentType",
+    "stallMs",
+    "inputs",
+];
+
+const WORKFLOW_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+const WORKFLOW_ISOLATIONS: &[&str] = &["remote", "worktree"];
 
 // These are intrinsic ECMAScript globals rather than host-provided extension points. Unknown
 // globals outside this list make the analysis bail out because calling one could establish a
@@ -130,14 +146,21 @@ pub(crate) struct InvalidAgentPrompt {
     pub(crate) reason: &'static str,
 }
 
+pub(crate) struct InvalidAgentOption {
+    pub(crate) byte_offset: usize,
+    pub(crate) field: String,
+    pub(crate) reason: &'static str,
+}
+
 pub(crate) struct InvalidWorkflowReference {
     pub(crate) byte_offset: usize,
     pub(crate) reason: &'static str,
 }
 
 pub(crate) enum WorkflowBodyAnalysisError {
-    InvalidAgentPrompt(InvalidAgentPrompt),
-    InvalidWorkflowReference(InvalidWorkflowReference),
+    AgentPrompt(InvalidAgentPrompt),
+    AgentOption(InvalidAgentOption),
+    WorkflowReference(InvalidWorkflowReference),
 }
 
 pub(crate) struct WorkflowBodyAnalysis {
@@ -173,9 +196,10 @@ pub(crate) fn analyze_workflow_body(
         .iter()
         .any(|marker| body.contains(marker));
     if let Some(invalid_prompt) = find_invalid_agent_prompt(&semantic) {
-        return Err(WorkflowBodyAnalysisError::InvalidAgentPrompt(
-            invalid_prompt,
-        ));
+        return Err(WorkflowBodyAnalysisError::AgentPrompt(invalid_prompt));
+    }
+    if let Some(invalid_option) = find_invalid_agent_options(&semantic) {
+        return Err(WorkflowBodyAnalysisError::AgentOption(invalid_option));
     }
     let child_references = find_workflow_child_references(&semantic)?;
     let unavailable_global = if has_dynamic_scope {
@@ -326,14 +350,39 @@ fn invalid_workflow_reference(
     source_offset: u32,
     reason: &'static str,
 ) -> WorkflowBodyAnalysisError {
-    WorkflowBodyAnalysisError::InvalidWorkflowReference(InvalidWorkflowReference {
+    WorkflowBodyAnalysisError::WorkflowReference(InvalidWorkflowReference {
         byte_offset: body_offset(source_offset),
         reason,
     })
 }
 
+fn is_runtime_agent_callee(
+    semantic: &oxc_semantic::Semantic<'_>,
+    callee: &oxc_ast::ast::IdentifierReference<'_>,
+) -> bool {
+    if !matches!(callee.name.as_str(), "agent" | "agentSettled") {
+        return false;
+    }
+    let Some(reference_id) = callee.reference_id.get() else {
+        return false;
+    };
+    let reference = semantic.scoping().get_reference(reference_id);
+    if semantic
+        .nodes()
+        .ancestor_kinds(reference.node_id())
+        .any(|ancestor| matches!(ancestor, AstKind::WithStatement(_)))
+    {
+        return false;
+    }
+    let Some(symbol_id) = reference.symbol_id() else {
+        return false;
+    };
+    usize::try_from(semantic.scoping().symbol_span(symbol_id).start)
+        .map(|start| start < ANALYSIS_PREFIX.len())
+        .unwrap_or(false)
+}
+
 fn find_invalid_agent_prompt(semantic: &oxc_semantic::Semantic<'_>) -> Option<InvalidAgentPrompt> {
-    let scoping = semantic.scoping();
     semantic.nodes().iter().find_map(|node| {
         let AstKind::CallExpression(call) = node.kind() else {
             return None;
@@ -341,20 +390,7 @@ fn find_invalid_agent_prompt(semantic: &oxc_semantic::Semantic<'_>) -> Option<In
         let Expression::Identifier(callee) = call.callee.without_parentheses() else {
             return None;
         };
-        if !matches!(callee.name.as_str(), "agent" | "agentSettled") {
-            return None;
-        }
-        let reference_id = callee.reference_id.get()?;
-        let reference = scoping.get_reference(reference_id);
-        if semantic
-            .nodes()
-            .ancestor_kinds(reference.node_id())
-            .any(|ancestor| matches!(ancestor, AstKind::WithStatement(_)))
-        {
-            return None;
-        }
-        let symbol_id = reference.symbol_id()?;
-        if usize::try_from(scoping.symbol_span(symbol_id).start).ok()? >= ANALYSIS_PREFIX.len() {
+        if !is_runtime_agent_callee(semantic, callee) {
             return None;
         }
 
@@ -370,6 +406,139 @@ fn find_invalid_agent_prompt(semantic: &oxc_semantic::Semantic<'_>) -> Option<In
             reason,
         })
     })
+}
+
+fn find_invalid_agent_options(semantic: &oxc_semantic::Semantic<'_>) -> Option<InvalidAgentOption> {
+    semantic.nodes().iter().find_map(|node| {
+        let AstKind::CallExpression(call) = node.kind() else {
+            return None;
+        };
+        let Expression::Identifier(callee) = call.callee.without_parentheses() else {
+            return None;
+        };
+        if !is_runtime_agent_callee(semantic, callee) {
+            return None;
+        }
+
+        let argument = call.arguments.get(1)?;
+        let expression = argument.as_expression()?;
+        match expression.without_parentheses() {
+            Expression::ObjectExpression(object) => object.properties.iter().find_map(|property| {
+                let ObjectPropertyKind::ObjectProperty(property) = property else {
+                    return None;
+                };
+                if property.computed {
+                    return None;
+                }
+                let field = property.key.static_name()?.to_string();
+                if !AGENT_OPTION_NAMES.contains(&field.as_str()) {
+                    return Some(InvalidAgentOption {
+                        byte_offset: body_offset(property.span.start),
+                        field,
+                        reason: "remove the unknown agent option",
+                    });
+                }
+                if property.kind != PropertyKind::Init || property.method {
+                    return Some(InvalidAgentOption {
+                        byte_offset: body_offset(property.span.start),
+                        field,
+                        reason: "agent options must contain plain values, not methods or accessors",
+                    });
+                }
+                invalid_agent_option_value(&field, &property.value).map(|reason| {
+                    InvalidAgentOption {
+                        byte_offset: body_offset(property.span.start),
+                        field,
+                        reason,
+                    }
+                })
+            }),
+            Expression::ArrayExpression(_)
+            | Expression::StringLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::BigIntLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::NullLiteral(_) => Some(InvalidAgentOption {
+                byte_offset: body_offset(expression.span().start),
+                field: "<options>".to_string(),
+                reason: "agent options must be an object",
+            }),
+            _ => None,
+        }
+    })
+}
+
+fn invalid_agent_option_value(field: &str, value: &Expression<'_>) -> Option<&'static str> {
+    let value = value.without_parentheses();
+    match field {
+        "label" | "phase" | "model" | "agentType" => static_string_option(value),
+        "effort" => static_enum_option(value, WORKFLOW_EFFORTS),
+        "isolation" => static_enum_option(value, WORKFLOW_ISOLATIONS),
+        "stallMs" => static_stall_ms_option(value),
+        "schema" => matches!(value, Expression::ArrayExpression(_))
+            .then_some("schema must be a JSON object"),
+        _ => None,
+    }
+}
+
+fn static_string_option(value: &Expression<'_>) -> Option<&'static str> {
+    match value {
+        Expression::StringLiteral(_) | Expression::NullLiteral(_) => None,
+        Expression::TemplateLiteral(template) if template.expressions.is_empty() => None,
+        Expression::BooleanLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BigIntLiteral(_)
+        | Expression::RegExpLiteral(_)
+        | Expression::ArrayExpression(_)
+        | Expression::ArrowFunctionExpression(_)
+        | Expression::ClassExpression(_)
+        | Expression::FunctionExpression(_)
+        | Expression::NewExpression(_)
+        | Expression::ObjectExpression(_)
+        | Expression::JSXElement(_)
+        | Expression::JSXFragment(_) => Some("this agent option must be a string"),
+        _ => None,
+    }
+}
+
+fn static_enum_option(
+    value: &Expression<'_>,
+    allowed: &'static [&'static str],
+) -> Option<&'static str> {
+    match value {
+        Expression::StringLiteral(literal) => {
+            let value = literal.value.as_str();
+            (!allowed.contains(&value)).then_some("this agent option has an unsupported value")
+        }
+        _ => static_string_option(value),
+    }
+}
+
+fn static_stall_ms_option(value: &Expression<'_>) -> Option<&'static str> {
+    match value {
+        Expression::NumericLiteral(literal) => {
+            let milliseconds = literal.value;
+            if !milliseconds.is_finite()
+                || milliseconds < 0.0
+                || milliseconds.fract() != 0.0
+                || milliseconds > u64::MAX as f64
+            {
+                Some("stallMs must be a non-negative integer number of milliseconds")
+            } else if milliseconds > MAX_WORKFLOW_AGENT_STALL_MS as f64 {
+                Some("choose stallMs within the supported workflow agent timeout range")
+            } else {
+                None
+            }
+        }
+        Expression::BigIntLiteral(_)
+        | Expression::StringLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::ArrayExpression(_)
+        | Expression::ObjectExpression(_) => {
+            Some("stallMs must be a non-negative integer number of milliseconds")
+        }
+        _ => None,
+    }
 }
 
 fn invalid_prompt_reason(expression: &Expression<'_>) -> Option<&'static str> {

@@ -1677,6 +1677,37 @@ async fn invalid_agent_prompt_is_rejected_before_approval_or_launch() {
 }
 
 #[tokio::test]
+async fn invalid_agent_option_is_rejected_before_approval_or_launch() {
+    let fixture = ToolFixture::new(AskForApproval::OnRequest).await;
+    let emitter = Arc::new(ApprovalEmitter::new(ToolApprovalDecision::Approved));
+    let source = "export const meta = { name: 'invalid-option', description: 'invalid option' };\nreturn agent('work', { stallMs: 2_400_000 });";
+
+    let result = fixture
+        .handle(workflow_call_with_payload(
+            emitter.clone(),
+            workflow_payload_with_source(source),
+        ))
+        .await;
+
+    let Err(FunctionCallError::RespondToModel(message)) = result else {
+        panic!("invalid agent option should fail before launch");
+    };
+    assert_eq!(
+        message,
+        "workflow script has an invalid `agent()` option `stallMs` at line 2, column 24: choose stallMs within the supported workflow agent timeout range"
+    );
+    assert!(emitter.requests().is_empty());
+    assert!(
+        fixture
+            .service
+            .list(fixture.thread_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn never_approval_policy_launches_without_prompting() {
     let fixture = ToolFixture::new(AskForApproval::Never).await;
     let emitter = Arc::new(ApprovalEmitter::new(ToolApprovalDecision::Denied));
