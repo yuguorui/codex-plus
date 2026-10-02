@@ -354,6 +354,108 @@ fn validates_agent_settled_prompts_like_agent_prompts() {
 }
 
 #[test]
+fn rejects_statically_invalid_agent_options_before_starting_the_workflow() {
+    for (body, field, reason) in [
+        (
+            "return agent('work', { stallMs: 2_400_000 })",
+            "stallMs",
+            "choose stallMs within the supported workflow agent timeout range",
+        ),
+        (
+            "return agent('work', { stallMs: 1.5 })",
+            "stallMs",
+            "stallMs must be a non-negative integer number of milliseconds",
+        ),
+        (
+            "return agent('work', { stallMS: 1_800_000 })",
+            "stallMS",
+            "remove the unknown agent option",
+        ),
+        (
+            "return agent('work', { effort: 'ultra' })",
+            "effort",
+            "this agent option has an unsupported value",
+        ),
+        (
+            "return agent('work', { isolation: 'copy' })",
+            "isolation",
+            "this agent option has an unsupported value",
+        ),
+        (
+            "return agent('work', { label: 7 })",
+            "label",
+            "this agent option must be a string",
+        ),
+        (
+            "return agentSettled('work', [])",
+            "<options>",
+            "agent options must be an object",
+        ),
+        (
+            "return agent('work', null)",
+            "<options>",
+            "agent options must be an object",
+        ),
+    ] {
+        assert!(
+            matches!(
+                validate_workflow_script(valid_script(body)),
+                Err(WorkflowScriptError::InvalidAgentOption {
+                    field: actual_field,
+                    reason: actual_reason,
+                    ..
+                }) if actual_field == field && actual_reason == reason
+            ),
+            "accepted `{body}`"
+        );
+    }
+}
+
+#[test]
+fn reports_static_agent_option_locations_in_full_workflow_coordinates() {
+    let error =
+        validate_workflow_script(valid_script("return agent('work', { stallMs: 2_400_000 })"))
+            .unwrap_err();
+
+    assert!(matches!(
+        error,
+        WorkflowScriptError::InvalidAgentOption {
+            field,
+            line: 2,
+            column: 24,
+            reason: "choose stallMs within the supported workflow agent timeout range",
+        } if field == "stallMs"
+    ));
+}
+
+#[test]
+fn accepts_valid_and_dynamic_agent_options() {
+    for body in [
+        "return agent('work')",
+        "return agent('work', args.options)",
+        "return agent('work', { ...args.options })",
+        "return agent('work', { [args.field]: true })",
+        r#"return agent('work', {
+          label: args.label,
+          phase: args.phase,
+          schema: args.schema,
+          model: args.model,
+          effort: args.effort,
+          isolation: args.isolation,
+          agentType: args.agentType,
+          stallMs: args.stallMs,
+          inputs: { job: args.job },
+        })"#,
+        "return agent('work', { label: null, effort: null, isolation: null })",
+        "return agent('work', { stallMs: 1800000 })",
+    ] {
+        validate_workflow_script(valid_script(body)).unwrap_or_else(|error| {
+            panic!("rejected valid or dynamic agent options in `{body}`: {error}")
+        });
+    }
+}
+
+#[test]
 fn allows_dynamic_agent_prompts_and_shadowed_agent_bindings() {
     for body in [
         "return agent(args.prompt)",
