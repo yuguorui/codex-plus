@@ -862,7 +862,8 @@ async fn manual_interrupt_restores_pending_steers_to_composer() {
 }
 
 #[tokio::test]
-async fn esc_interrupt_sends_all_pending_steers_immediately_and_keeps_existing_draft() {
+async fn esc_interrupt_sends_all_pending_steers_after_double_press_window_and_keeps_existing_draft()
+{
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());
     chat.on_task_started();
@@ -905,6 +906,7 @@ async fn esc_interrupt_sends_all_pending_steers_immediately_and_keeps_existing_d
         .set_composer_text("still editing".to_string(), Vec::new(), Vec::new());
 
     chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    expire_pending_steer_escape_cancel(&mut chat);
     next_interrupt_op(&mut op_rx);
 
     chat.on_interrupted_turn(TurnAbortReason::Interrupted);
@@ -958,6 +960,7 @@ async fn esc_with_pending_steers_overrides_agent_command_interrupt_behavior() {
     chat.bottom_pane
         .set_composer_text("/subagents ".to_string(), Vec::new(), Vec::new());
     chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    expire_pending_steer_escape_cancel(&mut chat);
 
     next_interrupt_op(&mut op_rx);
     assert_eq!(chat.bottom_pane.composer_text(), "/subagents ");
