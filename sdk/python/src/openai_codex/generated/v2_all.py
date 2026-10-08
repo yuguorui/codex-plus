@@ -7078,6 +7078,36 @@ class TurnStatus(Enum):
     in_progress = "inProgress"
 
 
+class TurnSteerCancelParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    client_user_message_ids: Annotated[
+        list[str],
+        Field(
+            alias="clientUserMessageIds",
+            description="Pending user messages to remove. Core returns the subset that was still pending; already-consumed messages are omitted.",
+        ),
+    ]
+    expected_turn_id: Annotated[
+        str,
+        Field(
+            alias="expectedTurnId",
+            description="Required active turn id precondition. The request fails when it does not match the currently active turn.",
+        ),
+    ]
+    thread_id: Annotated[str, Field(alias="threadId")]
+
+
+class TurnSteerCancelResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    cancelled_client_user_message_ids: Annotated[
+        list[str], Field(alias="cancelledClientUserMessageIds")
+    ]
+
+
 class TurnSteerResponse(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -8291,6 +8321,15 @@ class PluginUninstallRequest(BaseModel):
     id: RequestId
     method: Annotated[Literal["plugin/uninstall"], Field(title="Plugin/uninstallRequestMethod")]
     params: PluginUninstallParams
+
+
+class TurnSteerCancelRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[Literal["turn/steer/cancel"], Field(title="Turn/steer/cancelRequestMethod")]
+    params: TurnSteerCancelParams
 
 
 class TurnInterruptRequest(BaseModel):
@@ -14292,6 +14331,7 @@ class ClientRequest(
         | PluginUninstallRequest
         | TurnStartRequest
         | TurnSteerRequest
+        | TurnSteerCancelRequest
         | TurnInterruptRequest
         | ReviewStartRequest
         | ModelListRequest
@@ -14405,6 +14445,7 @@ class ClientRequest(
         | PluginUninstallRequest
         | TurnStartRequest
         | TurnSteerRequest
+        | TurnSteerCancelRequest
         | TurnInterruptRequest
         | ReviewStartRequest
         | ModelListRequest
