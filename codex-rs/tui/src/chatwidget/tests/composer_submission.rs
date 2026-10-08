@@ -1803,6 +1803,55 @@ async fn output_free_ctrl_c_interrupt_keeps_prompt_and_opens_blank_composer() {
 }
 
 #[tokio::test]
+async fn steer_enters_transcript_only_after_core_commits_it() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.submit_user_message(UserMessage::from("first prompt"));
+    let Op::UserTurn { .. } = next_submit_op(&mut op_rx) else {
+        panic!("expected the first user turn");
+    };
+    handle_turn_started(&mut chat, "turn-1");
+    drain_insert_history(&mut rx);
+
+    chat.submit_user_message(UserMessage::from("steer while the tool runs"));
+    let Op::UserTurn {
+        client_user_message_id: steer_id,
+        ..
+    } = next_submit_op(&mut op_rx)
+    else {
+        panic!("expected the steer turn");
+    };
+
+    // The steer is accepted by the UI, but it is not a transcript cell until the core records
+    // it at a legal call/output boundary.
+    assert!(
+        drain_insert_history(&mut rx).is_empty(),
+        "a pending steer must not look committed"
+    );
+    assert_eq!(chat.input_queue.pending_steers.len(), 1);
+
+    chat.on_committed_user_message(
+        &[UserInput::Text {
+            text: "steer while the tool runs".to_string(),
+            text_elements: Vec::new(),
+        }],
+        Some(&steer_id),
+        /*from_replay*/ false,
+        "turn-1",
+    );
+    let rendered = drain_insert_history(&mut rx);
+    assert_eq!(rendered.len(), 1, "one committed steer renders once");
+    assert!(
+        lines_to_single_string(&rendered[0]).contains("steer while the tool runs"),
+        "the committed steer is the cell that was pending"
+    );
+    assert!(chat.input_queue.pending_steers.is_empty());
+
+    handle_turn_completed(&mut chat, "turn-1", /*duration_ms*/ None);
+    drain_insert_history(&mut rx);
+}
+
+#[tokio::test]
 async fn pending_steer_esc_does_not_steal_vim_insert_escape() {
     let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
@@ -1822,13 +1871,126 @@ async fn pending_steer_esc_does_not_steal_vim_insert_escape() {
     assert!(!chat.input_queue.submit_pending_steers_after_interrupt);
     assert!(op_rx.try_recv().is_err());
 
+    // The first Esc after leaving insert mode arms the rapid double-press gesture.
     chat.handle_key_event(esc);
+    assert!(chat.pending_steer_escape_cancel.is_some());
+    assert!(op_rx.try_recv().is_err());
+
+    expire_pending_steer_escape_cancel(&mut chat);
 
     match op_rx.try_recv() {
         Ok(Op::Interrupt) => {}
         other => panic!("expected Op::Interrupt, got {other:?}"),
     }
     assert!(chat.input_queue.submit_pending_steers_after_interrupt);
+}
+
+#[tokio::test]
+async fn rapid_double_esc_requests_all_pending_steer_cancellation() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.turn_lifecycle.last_turn_id = Some("turn-1".to_string());
+    chat.bottom_pane.set_task_running(/*running*/ true);
+    let mut latest = pending_steer("latest queued steer");
+    latest.client_id = "latest-steer".to_string();
+    chat.input_queue
+        .pending_steers
+        .push_back(pending_steer("earlier queued steer"));
+    chat.input_queue.pending_steers.push_back(latest);
+    while rx.try_recv().is_ok() {}
+
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+    chat.handle_key_event(esc);
+    assert!(chat.pending_steer_escape_cancel.is_some());
+    assert!(op_rx.try_recv().is_err());
+
+    chat.handle_key_event(esc);
+
+    match op_rx.try_recv() {
+        Ok(Op::CancelPendingSteers {
+            client_user_message_ids,
+            expected_turn_id,
+        }) => {
+            assert_eq!(
+                client_user_message_ids,
+                vec!["test-submission", "latest-steer"]
+            );
+            assert_eq!(expected_turn_id, "turn-1");
+        }
+        other => panic!("expected pending steer cancellation, got {other:?}"),
+    }
+    assert_eq!(chat.input_queue.pending_steers.len(), 2);
+    assert!(chat.pending_steer_escape_cancel.is_none());
+    assert!(chat.bottom_pane.composer_is_empty());
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn single_pending_steer_esc_interrupts_after_double_press_window() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.bottom_pane.set_task_running(/*running*/ true);
+    chat.input_queue
+        .pending_steers
+        .push_back(pending_steer("queued steer"));
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(op_rx.try_recv().is_err());
+
+    expire_pending_steer_escape_cancel(&mut chat);
+
+    match op_rx.try_recv() {
+        Ok(Op::Interrupt) => {}
+        other => panic!("expected Op::Interrupt, got {other:?}"),
+    }
+    assert!(chat.input_queue.submit_pending_steers_after_interrupt);
+}
+
+#[tokio::test]
+async fn confirmed_steer_cancellation_restores_composer_without_history() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    let mut steer = pending_steer("cancelled steer");
+    steer.client_id = "steer-to-cancel".to_string();
+    chat.input_queue.pending_steers.push_back(steer);
+    while rx.try_recv().is_ok() {}
+
+    assert!(chat.cancel_pending_steers(&["steer-to-cancel".to_string()]));
+
+    assert!(chat.input_queue.pending_steers.is_empty());
+    assert_eq!(chat.bottom_pane.composer_text(), "cancelled steer");
+    while let Ok(event) = rx.try_recv() {
+        assert!(
+            !matches!(event, AppEvent::InsertHistoryCell(_)),
+            "cancellation inserted history: {event:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn confirmed_steer_cancellation_restores_all_messages_in_order() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    let mut latest = pending_steer("second steer");
+    latest.client_id = "latest-steer".to_string();
+    chat.input_queue
+        .pending_steers
+        .push_back(pending_steer("first steer"));
+    chat.input_queue.pending_steers.push_back(latest);
+    while rx.try_recv().is_ok() {}
+
+    assert!(
+        chat.cancel_pending_steers(&["test-submission".to_string(), "latest-steer".to_string()])
+    );
+
+    assert!(chat.input_queue.pending_steers.is_empty());
+    assert_eq!(
+        chat.bottom_pane.composer_text(),
+        "first steer\nsecond steer"
+    );
+    while let Ok(event) = rx.try_recv() {
+        assert!(!matches!(event, AppEvent::InsertHistoryCell(_)));
+    }
 }
 
 #[tokio::test]
@@ -1844,11 +2006,15 @@ async fn pending_steer_interrupt_uses_remapped_binding() {
         .push_back(pending_steer("queued steer"));
 
     chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-
+    assert!(chat.pending_steer_escape_cancel.is_none());
     assert!(!chat.input_queue.submit_pending_steers_after_interrupt);
     assert!(op_rx.try_recv().is_err());
 
     chat.handle_key_event(KeyEvent::new(KeyCode::F(12), KeyModifiers::NONE));
+    assert!(chat.pending_steer_escape_cancel.is_some());
+    assert!(op_rx.try_recv().is_err());
+
+    expire_pending_steer_escape_cancel(&mut chat);
 
     match op_rx.try_recv() {
         Ok(Op::Interrupt) => {}

@@ -128,6 +128,7 @@ define_keymap_actions! {
     }
     chat "Chat" {
         interrupt_turn => "Interrupt the active turn.",
+        cancel_pending_steers => "Cancel all pending steers before the model consumes them.",
         decrease_reasoning_effort => "Decrease reasoning effort.",
         increase_reasoning_effort => "Increase reasoning effort.",
         previous_permission_mode => "Switch to the previous available permission mode.",

@@ -114,6 +114,38 @@ pub(crate) struct TurnInputQueue {
     notified_activity: Option<InputQueueActivity>,
 }
 
+impl TurnInputQueue {
+    /// Remove the requested pending user inputs before they are drained into a
+    /// model request. Returns requested IDs in request order for inputs that
+    /// were still pending.
+    pub(crate) fn remove_user_inputs(&mut self, client_ids: &[String]) -> Vec<String> {
+        client_ids
+            .iter()
+            .filter(|client_id| {
+                self.items.iter().any(|input| {
+                    matches!(input, TurnInput::UserInput { client_id: Some(id), .. } if id == *client_id)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter_map(|client_id| {
+                let position = self.items.iter().position(|input| {
+                    matches!(input, TurnInput::UserInput { client_id: Some(id), .. } if *id == client_id)
+                })?;
+                self.items.remove(position);
+                Some(client_id)
+            })
+            .collect()
+    }
+
+    pub(crate) fn has_user_input(&self) -> bool {
+        self.items
+            .iter()
+            .any(|input| matches!(input, TurnInput::UserInput { .. }))
+    }
+}
+
 /// Session-scoped pending input storage and active-turn mailbox delivery coordination.
 pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
@@ -335,7 +367,11 @@ impl InputQueue {
         let mut activity = self.activity_tx.subscribe();
         Some(AbortOnDropHandle::new(tokio::spawn(async move {
             loop {
-                if turn_state.lock().await.pending_input.has_user_input() {
+                let should_cancel = {
+                    let mut turn_state = turn_state.lock().await;
+                    turn_state.begin_pending_user_input_preempt()
+                };
+                if should_cancel {
                     interrupt.cancel();
                     return;
                 }
@@ -514,12 +550,6 @@ impl InputQueue {
 }
 
 impl TurnInputQueue {
-    fn has_user_input(&self) -> bool {
-        self.items
-            .iter()
-            .any(|input| matches!(input, TurnInput::UserInput { .. }))
-    }
-
     pub(crate) fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
