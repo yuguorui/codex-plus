@@ -28,6 +28,11 @@ pub(crate) struct PendingInputPreview {
     pub(super) edit_binding: Option<key_hint::ShortcutHint>,
     /// Key combination rendered for immediately interrupting and sending steers.
     interrupt_binding: Option<key_hint::ShortcutHint>,
+    /// Key combination rendered for cancelling all pending steers.
+    cancel_binding: Option<key_hint::ShortcutHint>,
+    /// Whether the first stroke of the built-in double-Esc cancel gesture was
+    /// just pressed and is waiting for its completion stroke.
+    escape_cancel_armed: bool,
 }
 
 enum QuestionPresence {
@@ -39,12 +44,18 @@ const PREVIEW_LINE_LIMIT: usize = 3;
 
 impl PendingInputPreview {
     pub(crate) fn new() -> Self {
+        let escape = key_hint::plain(KeyCode::Esc);
         Self {
             pending_steers: Vec::new(),
             rejected_steers: Vec::new(),
             queued_messages: Vec::new(),
             edit_binding: Some(key_hint::shift(KeyCode::Left).into()),
-            interrupt_binding: Some(key_hint::plain(KeyCode::Esc).into()),
+            interrupt_binding: Some(escape.into()),
+            cancel_binding: Some(key_hint::ShortcutHint::Chord {
+                prefix: escape,
+                completion: escape,
+            }),
+            escape_cancel_armed: false,
         }
     }
 
@@ -57,6 +68,19 @@ impl PendingInputPreview {
 
     pub(crate) fn set_interrupt_binding(&mut self, binding: Option<key_hint::ShortcutHint>) {
         self.interrupt_binding = binding;
+    }
+
+    pub(crate) fn set_cancel_binding(&mut self, binding: Option<key_hint::ShortcutHint>) {
+        self.cancel_binding = binding;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cancel_binding(&self) -> Option<key_hint::ShortcutHint> {
+        self.cancel_binding
+    }
+
+    pub(crate) fn set_escape_cancel_armed(&mut self, armed: bool) {
+        self.escape_cancel_armed = armed;
     }
 
     fn push_truncated_preview_lines(
@@ -97,10 +121,28 @@ impl PendingInputPreview {
 
         if !self.pending_steers.is_empty() {
             let mut header = vec!["Messages to be submitted after next tool call".into()];
-            if let Some(interrupt_binding) = self.interrupt_binding {
+            if self.escape_cancel_armed
+                && let Some(interrupt_binding) = self.interrupt_binding
+            {
                 header.push(" (press ".dim());
                 header.extend(interrupt_binding.spans());
-                header.push(" to interrupt and send immediately)".dim());
+                header.push(" again to cancel pending messages".dim());
+                header.push(")".dim());
+            } else if let Some(cancel_binding) = self.cancel_binding {
+                header.push(" (press ".dim());
+                header.extend(cancel_binding.spans());
+                header.push(" to cancel pending messages".dim());
+                if let Some(interrupt_binding) = self.interrupt_binding {
+                    header.push("; press ".dim());
+                    header.extend(interrupt_binding.spans());
+                    header.push(" once to interrupt and send immediately".dim());
+                }
+                header.push(")".dim());
+            } else if let Some(interrupt_binding) = self.interrupt_binding {
+                header.push(" (press ".dim());
+                header.extend(interrupt_binding.spans());
+                header.push(" to interrupt and send immediately".dim());
+                header.push(")".dim());
             }
             Self::push_section_header(&mut lines, width, Line::from(header));
 
@@ -431,10 +473,52 @@ mod tests {
     }
 
     #[test]
+    fn render_one_pending_steer_shows_cancel_hint() {
+        let mut queue = PendingInputPreview::new();
+        queue.pending_steers.push("Please continue.".to_string());
+        let width = 100;
+        let height = queue.desired_height(width);
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
+        queue.render(Rect::new(0, 0, width, height), &mut buf);
+        let rendered = (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rendered.contains("esc esc to cancel pending messages"),
+            "rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn render_armed_pending_steer_prompts_for_second_escape() {
+        let mut queue = PendingInputPreview::new();
+        queue.pending_steers.push("Please continue.".to_string());
+        queue.set_escape_cancel_armed(/*armed*/ true);
+        let width = 100;
+        let height = queue.desired_height(width);
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
+        queue.render(Rect::new(0, 0, width, height), &mut buf);
+        let rendered = (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rendered.contains("press esc again to cancel pending messages"),
+            "rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn render_one_pending_steer_with_remapped_interrupt_binding() {
         let mut queue = PendingInputPreview::new();
         queue.pending_steers.push("Please continue.".to_string());
-        queue.set_interrupt_binding(Some(key_hint::plain(KeyCode::F(12)).into()));
+        let f12 = key_hint::plain(KeyCode::F(12));
+        queue.set_interrupt_binding(Some(f12.into()));
+        queue.set_cancel_binding(Some(key_hint::ShortcutHint::Chord {
+            prefix: f12,
+            completion: f12,
+        }));
         let width = 48;
         let height = queue.desired_height(width);
         let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
