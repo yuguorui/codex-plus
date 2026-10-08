@@ -561,6 +561,8 @@ impl BottomPane {
         let interrupt_binding = keymap.primary_hint(KeymapContext::Chat, "interrupt_turn");
         self.pending_input_preview
             .set_interrupt_binding(interrupt_binding);
+        self.pending_input_preview
+            .set_recall_binding(keymap.primary_hint(KeymapContext::Chat, "recall_pending_steer"));
         if let Some(status) = self.status.as_mut() {
             status.set_interrupt_binding(interrupt_binding);
         }

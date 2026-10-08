@@ -220,6 +220,16 @@ impl ChatWidget {
             return KeyEventAction::None;
         }
 
+        if self.chat_keymap.recall_pending_steer.is_pressed(key_event)
+            && !self.input_queue.pending_steers.is_empty()
+            && self.bottom_pane.is_task_running()
+            && self.bottom_pane.no_modal_or_popup_active()
+            && !self.should_handle_vim_insert_escape(key_event)
+        {
+            self.request_cancel_all_pending_steers();
+            return KeyEventAction::None;
+        }
+
         if self.chat_keymap.interrupt_turn.is_pressed(key_event)
             && !self.input_queue.pending_steers.is_empty()
             && self.bottom_pane.is_task_running()

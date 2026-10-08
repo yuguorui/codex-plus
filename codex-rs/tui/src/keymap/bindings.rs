@@ -286,6 +286,7 @@ define_runtime_action_bindings! {
     "chat" => Chat, chat, chat [
         toggle_voice,
         interrupt_turn,
+        recall_pending_steer,
         decrease_reasoning_effort,
         increase_reasoning_effort,
         previous_permission_mode,

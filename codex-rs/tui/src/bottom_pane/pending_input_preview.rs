@@ -28,6 +28,8 @@ pub(crate) struct PendingInputPreview {
     pub(super) edit_binding: Option<key_hint::ShortcutHint>,
     /// Key combination rendered for immediately interrupting and sending steers.
     interrupt_binding: Option<key_hint::ShortcutHint>,
+    /// Key combination rendered for cancelling the latest pending steer.
+    recall_binding: Option<key_hint::ShortcutHint>,
 }
 
 enum QuestionPresence {
@@ -45,6 +47,7 @@ impl PendingInputPreview {
             queued_messages: Vec::new(),
             edit_binding: Some(key_hint::shift(KeyCode::Left).into()),
             interrupt_binding: Some(key_hint::plain(KeyCode::Esc).into()),
+            recall_binding: Some(key_hint::shift(KeyCode::Esc).into()),
         }
     }
 
@@ -57,6 +60,10 @@ impl PendingInputPreview {
 
     pub(crate) fn set_interrupt_binding(&mut self, binding: Option<key_hint::ShortcutHint>) {
         self.interrupt_binding = binding;
+    }
+
+    pub(crate) fn set_recall_binding(&mut self, binding: Option<key_hint::ShortcutHint>) {
+        self.recall_binding = binding;
     }
 
     fn push_truncated_preview_lines(
@@ -100,7 +107,17 @@ impl PendingInputPreview {
             if let Some(interrupt_binding) = self.interrupt_binding {
                 header.push(" (press ".dim());
                 header.extend(interrupt_binding.spans());
-                header.push(" to interrupt and send immediately)".dim());
+                header.push(" to interrupt and send immediately".dim());
+                if let Some(recall_binding) = self.recall_binding {
+                    header.push("; ".dim());
+                    header.extend(recall_binding.spans());
+                    header.push(" to cancel pending messages".dim());
+                }
+                header.push(")".dim());
+            } else if let Some(recall_binding) = self.recall_binding {
+                header.push(" (press ".dim());
+                header.extend(recall_binding.spans());
+                header.push(" to cancel pending messages)".dim());
             }
             Self::push_section_header(&mut lines, width, Line::from(header));
 
@@ -428,6 +445,25 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
         queue.render(Rect::new(0, 0, width, height), &mut buf);
         assert_snapshot!("render_one_pending_steer", format!("{buf:?}"));
+    }
+
+    #[test]
+    fn render_one_pending_steer_shows_recall_hint() {
+        let mut queue = PendingInputPreview::new();
+        queue.pending_steers.push("Please continue.".to_string());
+        let width = 100;
+        let height = queue.desired_height(width);
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
+        queue.render(Rect::new(0, 0, width, height), &mut buf);
+        let rendered = (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("esc"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("cancel pending messages"),
+            "rendered:\n{rendered}"
+        );
     }
 
     #[test]

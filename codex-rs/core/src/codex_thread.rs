@@ -688,6 +688,20 @@ impl CodexThread {
         }
     }
 
+    /// Removes pending, not-yet-sampled user steers from the active regular turn.
+    ///
+    /// Returns the requested IDs that were removed. IDs for inputs already
+    /// consumed are omitted. No history event is emitted for successful cancels.
+    pub async fn cancel_pending_user_inputs(
+        &self,
+        expected_turn_id: &str,
+        client_user_message_ids: &[String],
+    ) -> CodexResult<Vec<String>> {
+        self.session
+            .cancel_pending_user_inputs(expected_turn_id, client_user_message_ids)
+            .await
+    }
+
     async fn submit_turn_input_with_mode(
         &self,
         request: impl Into<WithTurnExtensionData<TurnInputRequest>>,

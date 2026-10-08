@@ -551,6 +551,9 @@ pub(crate) struct ChatWidget {
     /// Remote app servers cannot read image paths on the TUI host.
     pub(crate) snapshot_local_images: bool,
     pending_image_submission: Option<image_submission::PendingImageSubmission>,
+    /// Client IDs whose pending steers Core confirmed removed before sampling.
+    /// Guards against a late receipt inserting a cancelled message into history.
+    cancelled_pending_steer_ids: HashSet<String>,
     pub(crate) local_worktree_operations: bool,
     pub(crate) windows_sandbox_local_server: bool,
     pub(crate) windows_sandbox_config: crate::windows_sandbox::WindowsSandboxConfig,
@@ -1355,6 +1358,12 @@ impl ChatWidget {
         }
 
         // Servers may omit media from receipts, so prefer the submission identity.
+        if client_id
+            .as_deref()
+            .is_some_and(|client_id| self.cancelled_pending_steer_ids.contains(client_id))
+        {
+            return;
+        }
         if client_id.is_some() && self.last_rendered_user_message_client_id.as_deref() == client_id
         {
             return;

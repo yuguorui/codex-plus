@@ -1,6 +1,7 @@
 //! Input queue restore and thread-input snapshot behavior for `ChatWidget`.
 
 use std::collections::HashSet;
+use std::collections::VecDeque;
 
 use crate::bottom_pane::ComposerDraftSnapshot;
 use crate::bottom_pane::KillBufferSnapshot;
@@ -283,6 +284,73 @@ impl ChatWidget {
                 Vec::new(),
             ))
         }
+    }
+
+    /// Ask Core to remove every pending steer, then recall them into the composer.
+    ///
+    /// Local pending entries are retained until Core confirms removal, so a steer
+    /// that has already been consumed cannot silently disappear from the preview.
+    pub(crate) fn request_cancel_all_pending_steers(&mut self) -> bool {
+        let Some(expected_turn_id) = self.turn_lifecycle.last_turn_id.clone() else {
+            return false;
+        };
+        if self.input_queue.pending_steers.is_empty() {
+            return false;
+        }
+        let client_user_message_ids = self
+            .input_queue
+            .pending_steers
+            .iter()
+            .map(|steer| steer.client_id.clone())
+            .collect();
+        self.submit_op(AppCommand::cancel_pending_steers(
+            client_user_message_ids,
+            expected_turn_id,
+        ))
+    }
+
+    /// Restore steers after Core confirms they were removed before sampling.
+    /// This intentionally does not append a cancellation event to history.
+    pub(crate) fn recall_pending_steers(&mut self, client_user_message_ids: &[String]) -> bool {
+        if client_user_message_ids.is_empty() {
+            return false;
+        }
+        let cancelled_ids: HashSet<&str> =
+            client_user_message_ids.iter().map(String::as_str).collect();
+        let mut removed = Vec::new();
+        let mut retained = VecDeque::new();
+        for pending in std::mem::take(&mut self.input_queue.pending_steers) {
+            if cancelled_ids.contains(pending.client_id.as_str()) {
+                removed.push(pending);
+            } else {
+                retained.push_back(pending);
+            }
+        }
+        self.input_queue.pending_steers = retained;
+        if removed.is_empty() {
+            self.refresh_pending_input_preview();
+            return false;
+        }
+
+        for pending in &removed {
+            self.cancelled_pending_steer_ids
+                .insert(pending.client_id.clone());
+        }
+        self.refresh_pending_input_preview();
+        let (user_message, _history_record) = merge_user_messages_with_history_record(
+            removed
+                .into_iter()
+                .map(|pending| {
+                    (
+                        user_message_for_restore(pending.user_message, &pending.history_record),
+                        pending.history_record,
+                    )
+                })
+                .collect(),
+        );
+        self.restore_user_message_to_composer(user_message);
+        self.request_redraw();
+        true
     }
 
     pub(crate) fn enqueue_rejected_steer(&mut self) -> bool {
