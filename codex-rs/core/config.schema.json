@@ -4846,6 +4846,7 @@
               "open_thread": null
             },
             "chat": {
+              "cancel_pending_steers": null,
               "decrease_reasoning_effort": null,
               "edit_queued_message": null,
               "increase_reasoning_effort": null,
@@ -5355,6 +5356,14 @@
       "additionalProperties": false,
       "description": "Chat context keybindings.",
       "properties": {
+        "cancel_pending_steers": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Cancel all pending steers before the model consumes them."
+        },
         "decrease_reasoning_effort": {
           "allOf": [
             {
@@ -5849,6 +5858,7 @@
             }
           ],
           "default": {
+            "cancel_pending_steers": null,
             "decrease_reasoning_effort": null,
             "edit_queued_message": null,
             "increase_reasoning_effort": null,
