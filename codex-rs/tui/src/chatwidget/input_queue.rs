@@ -55,6 +55,9 @@ pub(super) struct InputQueueState {
     pub(super) rate_limit_recovery_pending: bool,
     /// Pause for user recovery (for example an image or permission failure), independent of delivery.
     pub(super) recovered_queue: bool,
+    /// A request failed local prompt/tool-history validation before any provider call. The
+    /// displayed user message is recorded locally but was never delivered to the model.
+    pub(super) failed_before_send: bool,
 }
 
 impl InputQueueState {
@@ -67,7 +70,9 @@ impl InputQueueState {
     }
 
     pub(super) fn submissions_paused(&self) -> bool {
-        self.suppress_queue_autosend || self.transcript_copy.strong_count() > 0
+        self.suppress_queue_autosend
+            || self.transcript_copy.strong_count() > 0
+            || self.failed_before_send
     }
 
     pub(super) fn has_unconfirmed_messages(&self) -> bool {
@@ -94,6 +99,7 @@ impl InputQueueState {
         self.pending_steers.clear();
         self.submit_pending_steers_after_interrupt = false;
         self.rate_limit_recovery_pending = false;
+        self.failed_before_send = false;
     }
 
     pub(super) fn preview(&self) -> PendingInputPreview {
