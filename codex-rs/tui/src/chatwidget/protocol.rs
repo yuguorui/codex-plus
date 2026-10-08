@@ -237,6 +237,7 @@ impl ChatWidget {
                         self.handle_non_retry_error(
                             notification.error.message,
                             notification.error.codex_error_info,
+                            from_replay,
                         );
                     }
                 }
@@ -534,7 +535,11 @@ impl ChatWidget {
                             self.maybe_send_next_queued_input();
                         }
                     } else {
-                        self.handle_non_retry_error(error.message, error.codex_error_info);
+                        self.handle_non_retry_error(
+                            error.message,
+                            error.codex_error_info,
+                            replay_kind.is_some(),
+                        );
                     }
                 } else {
                     self.last_non_retry_error = None;

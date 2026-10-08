@@ -1,4 +1,5 @@
 use super::helpers::drain_insert_history_transcript;
+use super::helpers::lines_to_single_string;
 use super::*;
 use crate::bottom_pane::goal_status_indicator_line;
 use crate::chatwidget::ThreadUsageOutcome;
@@ -3775,6 +3776,7 @@ async fn failed_turn_refreshes_estimated_thread_usage() {
     chat.handle_non_retry_error(
         "turn failed after generating tokens".to_string(),
         /*codex_error_info*/ None,
+        /*from_replay*/ false,
     );
 
     assert!(
@@ -6125,4 +6127,43 @@ async fn chatwidget_tall() {
         "chatwidget_tall",
         normalize_snapshot_paths(term.backend().vt100().screen().contents())
     );
+}
+
+#[tokio::test]
+async fn local_tool_history_validation_error_pauses_queue_and_warns_not_sent() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.handle_non_retry_error(
+        "invalid chat tool call history: assistant message at index 146 has tool calls without matching tool outputs before message index 148".to_string(),
+        /*codex_error_info*/ None,
+        /*from_replay*/ false,
+    );
+
+    assert!(chat.input_queue.failed_before_send);
+    let cells = drain_insert_history_transcript(&mut rx);
+    assert_eq!(cells.len(), 2);
+    let warning = lines_to_single_string(&cells[1]);
+    assert!(
+        warning.contains("did not receive it"),
+        "warning should say the model did not receive the message: {warning}"
+    );
+}
+
+#[tokio::test]
+async fn replayed_local_tool_history_validation_error_does_not_pause_queue() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.handle_non_retry_error(
+        "invalid chat tool call history: assistant message at index 146 has tool calls without matching tool outputs before message index 148".to_string(),
+        /*codex_error_info*/ None,
+        /*from_replay*/ true,
+    );
+
+    assert!(
+        !chat.input_queue.failed_before_send,
+        "a historical error must not pause the live input queue"
+    );
+    let cells = drain_insert_history_transcript(&mut rx);
+    assert_eq!(cells.len(), 1, "the historical error is still rendered");
+    assert!(lines_to_single_string(&cells[0]).contains("invalid chat tool call history"));
 }
