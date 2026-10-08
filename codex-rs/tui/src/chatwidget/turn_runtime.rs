@@ -418,6 +418,26 @@ impl ChatWidget {
         self.maybe_send_next_queued_input();
     }
 
+    /// A local wire-history validation failure happens before any provider request. The
+    /// optimistic user message is already in local history, but the model never saw it. Pause
+    /// the queue and tell the user instead of silently draining more messages into the same
+    /// invalid thread.
+    fn on_failed_before_send(&mut self, message: String) {
+        self.input_queue.submit_pending_steers_after_interrupt = false;
+        self.input_queue.failed_before_send = true;
+        self.finalize_turn();
+        self.add_to_history(history_cell::new_error_event(message));
+        self.add_to_history(history_cell::new_warning_event(
+            "The request was rejected before it reached the model. Your message is saved locally, but the model did not receive it. Queued messages are paused; repair this thread or start a new chat to continue."
+                .to_string(),
+        ));
+        self.set_ambient_pet_notification(
+            crate::pets::PetNotificationKind::Failed,
+            /*body*/ None,
+        );
+        self.request_redraw();
+    }
+
     pub(crate) fn handle_turn_start_rejection(&mut self, message: String) -> bool {
         if !self.input_queue.user_turn_pending_start {
             return false;
@@ -536,11 +556,23 @@ impl ChatWidget {
         &mut self,
         message: String,
         codex_error_info: Option<AppServerCodexErrorInfo>,
+        from_replay: bool,
     ) {
         if codex_error_info
             .as_ref()
             .is_some_and(|info| self.handle_app_server_steer_rejected_error(info))
         {
+            return;
+        }
+        if is_local_tool_history_validation_error(&message) {
+            if from_replay {
+                // Historical failures are replayed when a thread is resumed. They must not
+                // pause the live input queue: the current binary may already repair the
+                // history, and the user needs to be able to try the next turn.
+                self.add_to_history(history_cell::new_error_event(message));
+            } else {
+                self.on_failed_before_send(message);
+            }
             return;
         }
         let question_drafts = if self.thread_usage.replaying_turn_completion {
@@ -616,4 +648,9 @@ impl ChatWidget {
         self.refresh_status_surfaces();
         self.add_to_history(history_cell::new_plan_update(update));
     }
+}
+
+fn is_local_tool_history_validation_error(message: &str) -> bool {
+    message.starts_with("invalid chat tool call history:")
+        || message.starts_with("invalid anthropic tool history:")
 }
