@@ -305,6 +305,8 @@ use codex_app_server_protocol::TurnSettingsUpdateStatus;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
+use codex_app_server_protocol::TurnSteerCancelParams;
+use codex_app_server_protocol::TurnSteerCancelResponse;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::TurnSteerResponse;
 use codex_app_server_protocol::UserInput as V2UserInput;
