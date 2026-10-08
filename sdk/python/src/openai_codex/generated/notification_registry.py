@@ -90,6 +90,9 @@ from .v2_all import TurnStartedNotification
 from .v2_all import WarningNotification
 from .v2_all import WindowsSandboxSetupCompletedNotification
 from .v2_all import WindowsWorldWritableWarningNotification
+from .v2_all import WorkflowCompletedNotification
+from .v2_all import WorkflowProgressNotification
+from .v2_all import WorkflowStartedNotification
 
 KnownNotificationPayload: TypeAlias = (
     AccountLoginCompletedNotification
@@ -175,6 +178,9 @@ KnownNotificationPayload: TypeAlias = (
     | WarningNotification
     | WindowsSandboxSetupCompletedNotification
     | WindowsWorldWritableWarningNotification
+    | WorkflowCompletedNotification
+    | WorkflowProgressNotification
+    | WorkflowStartedNotification
 )
 
 NOTIFICATION_MODELS: dict[str, type[KnownNotificationPayload]] = {
@@ -263,6 +269,9 @@ NOTIFICATION_MODELS: dict[str, type[KnownNotificationPayload]] = {
     "warning": WarningNotification,
     "windows/worldWritableWarning": WindowsWorldWritableWarningNotification,
     "windowsSandbox/setupCompleted": WindowsSandboxSetupCompletedNotification,
+    "workflow/completed": WorkflowCompletedNotification,
+    "workflow/progress": WorkflowProgressNotification,
+    "workflow/started": WorkflowStartedNotification,
 }
 
 DIRECT_TURN_ID_NOTIFICATION_TYPES: tuple[type[BaseModel], ...] = (
@@ -294,6 +303,9 @@ DIRECT_TURN_ID_NOTIFICATION_TYPES: tuple[type[BaseModel], ...] = (
     TurnDiffUpdatedNotification,
     TurnModerationMetadataNotification,
     TurnPlanUpdatedNotification,
+    WorkflowCompletedNotification,
+    WorkflowProgressNotification,
+    WorkflowStartedNotification,
 )
 
 NESTED_TURN_NOTIFICATION_TYPES: tuple[type[BaseModel], ...] = (
