@@ -268,6 +268,16 @@ impl TurnRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
+    pub(crate) async fn turn_steer_cancel(
+        &self,
+        request_id: &ConnectionRequestId,
+        params: TurnSteerCancelParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.turn_steer_cancel_inner(request_id, params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
     pub(crate) async fn turn_interrupt(
         &self,
         request_id: &ConnectionRequestId,
@@ -1175,6 +1185,32 @@ impl TurnRequestProcessor {
             }
         };
         Ok(TurnSteerResponse { turn_id })
+    }
+
+    async fn turn_steer_cancel_inner(
+        &self,
+        request_id: &ConnectionRequestId,
+        params: TurnSteerCancelParams,
+    ) -> Result<TurnSteerCancelResponse, JSONRPCErrorError> {
+        let (_, thread) = self
+            .load_thread(&params.thread_id)
+            .await
+            .inspect_err(|error| {
+                self.track_error_response(request_id, error, /*error_type*/ None);
+            })?;
+        self.ensure_direct_input_allowed(request_id, thread.as_ref())
+            .await?;
+        let cancelled = thread
+            .cancel_pending_user_inputs(&params.expected_turn_id, &params.client_user_message_ids)
+            .await
+            .map_err(|err| {
+                let error = internal_error(format!("failed to cancel steer: {err}"));
+                self.track_error_response(request_id, &error, /*error_type*/ None);
+                error
+            })?;
+        Ok(TurnSteerCancelResponse {
+            cancelled_client_user_message_ids: cancelled,
+        })
     }
 
     async fn prepare_realtime_conversation_thread(

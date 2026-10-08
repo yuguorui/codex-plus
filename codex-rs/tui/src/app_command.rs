@@ -130,6 +130,10 @@ pub(crate) enum AppCommand {
         final_output_json_schema: Option<Value>,
         collaboration_mode: Option<CollaborationMode>,
     },
+    CancelPendingSteers {
+        client_user_message_ids: Vec<String>,
+        expected_turn_id: String,
+    },
     OverrideTurnContext {
         cwd: Option<PathBuf>,
         approval_policy: Option<AskForApproval>,
@@ -253,6 +257,16 @@ impl AppCommand {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(crate) fn cancel_pending_steers(
+        client_user_message_ids: Vec<String>,
+        expected_turn_id: String,
+    ) -> Self {
+        Self::CancelPendingSteers {
+            client_user_message_ids,
+            expected_turn_id,
+        }
+    }
+
     pub(crate) fn override_turn_context(
         cwd: Option<PathBuf>,
         approval_policy: Option<AskForApproval>,

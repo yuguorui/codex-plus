@@ -12469,11 +12469,20 @@ async fn submit_steer_only(
     input: Vec<UserInput>,
     expected_turn_id: &str,
 ) -> TurnInputSubmission {
+    submit_steer_with_client_id(sess, input, None, expected_turn_id).await
+}
+
+async fn submit_steer_with_client_id(
+    sess: &Arc<Session>,
+    input: Vec<UserInput>,
+    client_id: Option<String>,
+    expected_turn_id: &str,
+) -> TurnInputSubmission {
     super::turn_input::handle(
         sess,
         TurnInputRequest::new(SubmittedTurnInput::UserInput {
             content: input,
-            client_id: None,
+            client_id,
         }),
         TurnInputMode::Steer {
             expected_turn_id: expected_turn_id.to_string(),
@@ -12482,6 +12491,85 @@ async fn submit_steer_only(
     )
     .await
     .expect("steer-only submission should be valid")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_pending_user_inputs_removes_steers_without_history_events() {
+    let (sess, tc, rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |_config| {},
+    )
+    .await;
+    sess.spawn_task(
+        Arc::clone(&tc),
+        vec![TurnInput::UserInput {
+            metadata: Default::default(),
+            content: vec![UserInput::Text {
+                text: "original task".to_string(),
+                text_elements: Vec::new(),
+            }],
+            client_id: None,
+        }],
+        NeverEndingTask {
+            kind: TaskKind::Regular,
+            listen_to_cancellation_token: false,
+        },
+    )
+    .await;
+    while rx.try_recv().is_ok() {}
+
+    let client_ids = vec![
+        "pending-steer-to-cancel-1".to_string(),
+        "pending-steer-to-cancel-2".to_string(),
+    ];
+    for (index, client_id) in client_ids.iter().enumerate() {
+        let submission = submit_steer_with_client_id(
+            &sess,
+            vec![UserInput::Text {
+                text: format!("recalled steer {}", index + 1),
+                text_elements: Vec::new(),
+            }],
+            Some(client_id.clone()),
+            &tc.sub_id,
+        )
+        .await;
+        assert!(matches!(submission, TurnInputSubmission::Steered { .. }));
+    }
+
+    let cancelled = sess
+        .cancel_pending_user_inputs(&tc.sub_id, &client_ids)
+        .await
+        .expect("cancel pending steers");
+    assert_eq!(cancelled, client_ids);
+    assert!(
+        sess.cancel_pending_user_inputs(&tc.sub_id, &client_ids)
+            .await
+            .expect("cancel already-removed steers")
+            .is_empty()
+    );
+
+    sess.on_task_finished(Arc::clone(&tc), /*task_result*/ Ok(None))
+        .await;
+
+    let history = sess.clone_history().await;
+    assert!(raw_history_items(&history).iter().all(|item| match item {
+        ResponseItem::Message { content, .. } => !content.iter().any(|content| {
+            matches!(content, ContentItem::InputText { text }
+                if text == "recalled steer 1" || text == "recalled steer 2")
+        }),
+        _ => true,
+    }));
+
+    while let Some(event) = rx.try_recv().ok() {
+        assert!(
+            !matches!(
+                event.msg,
+                EventMsg::UserMessage(_) | EventMsg::ItemStarted(_) | EventMsg::ItemCompleted(_)
+            ),
+            "cancelled steer emitted a history event: {event:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

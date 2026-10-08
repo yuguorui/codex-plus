@@ -1772,6 +1772,30 @@
             },
             "method": {
               "enum": [
+                "turn/steer/cancel"
+              ],
+              "title": "Turn/steer/cancelRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/TurnSteerCancelParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Turn/steer/cancelRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "turn/interrupt"
               ],
               "title": "Turn/interruptRequestMethod",
@@ -26200,6 +26224,48 @@
           "inProgress"
         ],
         "type": "string"
+      },
+      "TurnSteerCancelParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "clientUserMessageIds": {
+            "description": "Pending user messages to remove. Core returns the subset that was still pending; already-consumed messages are omitted.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "expectedTurnId": {
+            "description": "Required active turn id precondition. The request fails when it does not match the currently active turn.",
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "clientUserMessageIds",
+          "expectedTurnId",
+          "threadId"
+        ],
+        "title": "TurnSteerCancelParams",
+        "type": "object"
+      },
+      "TurnSteerCancelResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "cancelledClientUserMessageIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "cancelledClientUserMessageIds"
+        ],
+        "title": "TurnSteerCancelResponse",
+        "type": "object"
       },
       "TurnSteerParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",

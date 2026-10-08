@@ -136,6 +136,8 @@ pub(crate) struct ChatKeymap {
     chord_hints: Arc<RuntimeChordKeymap>,
     /// Interrupt the active turn.
     pub(crate) interrupt_turn: Vec<KeyBinding>,
+    /// Cancel all still-pending steers without interrupting the turn.
+    pub(crate) cancel_pending_steers: Vec<KeyBinding>,
     /// Decrease the active reasoning effort.
     pub(crate) decrease_reasoning_effort: Vec<KeyBinding>,
     /// Increase the active reasoning effort.
@@ -779,6 +781,11 @@ impl RuntimeKeymap {
                 keymap.chat.interrupt_turn.as_ref(),
                 &defaults.chat.interrupt_turn,
                 "tui.keymap.chat.interrupt_turn",
+            )?,
+            cancel_pending_steers: resolve_bindings(
+                keymap.chat.cancel_pending_steers.as_ref(),
+                &defaults.chat.cancel_pending_steers,
+                "tui.keymap.chat.cancel_pending_steers",
             )?,
             decrease_reasoning_effort: resolve_bindings(
                 keymap.chat.decrease_reasoning_effort.as_ref(),
@@ -1666,6 +1673,7 @@ impl RuntimeKeymap {
                 toggle_voice_mute: default_bindings![plain(KeyCode::F(9))],
                 chord_hints: Arc::default(),
                 interrupt_turn: default_bindings![plain(KeyCode::Esc)],
+                cancel_pending_steers: default_bindings![],
                 decrease_reasoning_effort: default_bindings![
                     alt(KeyCode::Char(',')),
                     shift(KeyCode::Down)
@@ -2031,6 +2039,10 @@ impl RuntimeKeymap {
             ),
             ("chat.interrupt_turn", self.chat.interrupt_turn.as_slice()),
             (
+                "chat.cancel_pending_steers",
+                self.chat.cancel_pending_steers.as_slice(),
+            ),
+            (
                 "chat.decrease_reasoning_effort",
                 self.chat.decrease_reasoning_effort.as_slice(),
             ),
@@ -2191,6 +2203,10 @@ impl RuntimeKeymap {
                     self.chat.toggle_voice_mute.as_slice(),
                 ),
                 ("chat.interrupt_turn", self.chat.interrupt_turn.as_slice()),
+                (
+                    "chat.cancel_pending_steers",
+                    self.chat.cancel_pending_steers.as_slice(),
+                ),
                 (
                     "chat.decrease_reasoning_effort",
                     self.chat.decrease_reasoning_effort.as_slice(),
@@ -2938,6 +2954,7 @@ mod tests {
             runtime.chat.interrupt_turn,
             vec![key_hint::plain(KeyCode::Esc)]
         );
+        assert_eq!(runtime.chat.cancel_pending_steers, Vec::new());
         assert_eq!(
             runtime.chat.decrease_reasoning_effort,
             vec![

@@ -5160,6 +5160,44 @@ impl Session {
         }
     }
 
+    /// Remove pending user steers without emitting or persisting history events.
+    /// Returns requested IDs that were still pending at cancellation time.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "active turn checks and turn state updates must remain atomic"
+    )]
+    pub async fn cancel_pending_user_inputs(
+        &self,
+        expected_turn_id: &str,
+        client_user_message_ids: &[String],
+    ) -> CodexResult<Vec<String>> {
+        if client_user_message_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let active = self.active_turn.lock().await;
+        let Some(active_turn) = active.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let Some(task) = active_turn.task.as_ref() else {
+            return Ok(Vec::new());
+        };
+        if task.turn_context.sub_id != expected_turn_id
+            || task.cancellation_token.is_cancelled()
+            || task.kind != crate::state::TaskKind::Regular
+        {
+            return Ok(Vec::new());
+        }
+
+        let mut turn_state = active_turn.turn_state.lock().await;
+        let cancelled = turn_state
+            .pending_input
+            .remove_user_inputs(client_user_message_ids);
+        if !cancelled.is_empty() && !turn_state.pending_input.has_user_input() {
+            turn_state.clear_user_input_activity_observed();
+        }
+        Ok(cancelled)
+    }
+
     pub(crate) async fn begin_closing(&self) {
         self.closing
             .store(true, std::sync::atomic::Ordering::Release);
