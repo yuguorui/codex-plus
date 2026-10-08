@@ -5524,6 +5524,16 @@ class SleepThreadItem(BaseModel):
     type: Annotated[Literal["sleep"], Field(title="SleepThreadItemType")]
 
 
+class WorkflowInputAnalysisThreadItem(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: str
+    type: Annotated[
+        Literal["workflowInputAnalysis"], Field(title="WorkflowInputAnalysisThreadItemType")
+    ]
+
+
 class ImageGenerationThreadItem(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -6399,6 +6409,7 @@ class TokenUsageBreakdown(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    cache_creation_input_tokens: Annotated[int | None, Field(alias="cacheCreationInputTokens")] = 0
     cache_write_input_tokens: Annotated[int | None, Field(alias="cacheWriteInputTokens")] = 0
     cached_input_tokens: Annotated[int, Field(alias="cachedInputTokens")]
     input_tokens: Annotated[int, Field(alias="inputTokens")]
@@ -6492,6 +6503,36 @@ class TurnStatus(Enum):
     interrupted = "interrupted"
     failed = "failed"
     in_progress = "inProgress"
+
+
+class TurnSteerCancelParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    client_user_message_ids: Annotated[
+        list[str],
+        Field(
+            alias="clientUserMessageIds",
+            description="Pending user messages to remove. Core returns the subset that was still pending; already-consumed messages are omitted.",
+        ),
+    ]
+    expected_turn_id: Annotated[
+        str,
+        Field(
+            alias="expectedTurnId",
+            description="Required active turn id precondition. The request fails when it does not match the currently active turn.",
+        ),
+    ]
+    thread_id: Annotated[str, Field(alias="threadId")]
+
+
+class TurnSteerCancelResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    cancelled_client_user_message_ids: Annotated[
+        list[str], Field(alias="cancelledClientUserMessageIds")
+    ]
 
 
 class TurnSteerResponse(BaseModel):
@@ -6755,6 +6796,155 @@ class WindowsWorldWritableWarningNotification(BaseModel):
     extra_count: Annotated[int, Field(alias="extraCount", ge=0)]
     failed_scan: Annotated[bool, Field(alias="failedScan")]
     sample_paths: Annotated[list[str], Field(alias="samplePaths")]
+
+
+class WorkflowAgentActivity(RootModel[Literal["analyzing_inputs"]]):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: Literal["analyzing_inputs"]
+
+
+class WorkflowAgentState(Enum):
+    queued = "queued"
+    start = "start"
+    done = "done"
+    error = "error"
+
+
+class WorkflowIsolation(Enum):
+    worktree = "worktree"
+    remote = "remote"
+
+
+class WorkflowAgentWorkflowProgressItem(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    activity: WorkflowAgentActivity | None = None
+    agent_id: Annotated[str | None, Field(alias="agentId")] = None
+    attempt: Annotated[int, Field(ge=0)]
+    awaiting_decision: Annotated[
+        bool | None,
+        Field(
+            alias="awaitingDecision",
+            description="True while the workflow waits for the user to retry or skip this agent.",
+        ),
+    ] = False
+    blocked: bool
+    cached: bool
+    duration_ms: Annotated[int | None, Field(alias="durationMs", ge=0)] = None
+    error: str | None = None
+    fallback_model: Annotated[str | None, Field(alias="fallbackModel")] = None
+    index: Annotated[int, Field(ge=0)]
+    invocation_id: Annotated[
+        str,
+        Field(
+            alias="invocationId",
+            description="Stable invocation identity within one workflow definition.",
+        ),
+    ]
+    isolation: WorkflowIsolation | None = None
+    label: str
+    last_progress_at: Annotated[
+        int,
+        Field(
+            alias="lastProgressAt",
+            description="Unix timestamp in seconds when this progress item was last updated.",
+            ge=0,
+        ),
+    ]
+    model: str | None = None
+    phase_index: Annotated[int | None, Field(alias="phaseIndex", ge=0)] = None
+    phase_title: Annotated[str | None, Field(alias="phaseTitle")] = None
+    prompt_preview: Annotated[str, Field(alias="promptPreview")]
+    queued_at: Annotated[
+        int,
+        Field(
+            alias="queuedAt",
+            description="Unix timestamp in seconds when the call entered the workflow queue.",
+            ge=0,
+        ),
+    ]
+    result_preview: Annotated[str | None, Field(alias="resultPreview")] = None
+    skipped: bool
+    started_at: Annotated[
+        int | None,
+        Field(
+            alias="startedAt",
+            description="Unix timestamp in seconds when agent execution began.",
+            ge=0,
+        ),
+    ] = None
+    state: WorkflowAgentState
+    tokens: Annotated[int | None, Field(ge=0)] = None
+    tool_calls: Annotated[int | None, Field(alias="toolCalls", ge=0)] = None
+    type: Annotated[Literal["workflowAgent"], Field(title="WorkflowAgentWorkflowProgressItemType")]
+
+
+class WorkflowLogWorkflowProgressItem(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    message: str
+    type: Annotated[Literal["workflowLog"], Field(title="WorkflowLogWorkflowProgressItemType")]
+
+
+class WorkflowProgressKind(Enum):
+    declared = "declared"
+    active = "active"
+
+
+class WorkflowResultReadStatus(Enum):
+    in_progress = "inProgress"
+    completed = "completed"
+    failed = "failed"
+
+
+class WorkflowStartedNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    delivery_key: Annotated[
+        str,
+        Field(
+            alias="deliveryKey",
+            description="Stable identity for deduplicating online delivery retries.",
+        ),
+    ]
+    run_id: Annotated[str, Field(alias="runId")]
+    script_path: Annotated[LegacyAppPathString, Field(alias="scriptPath")]
+    started_at: Annotated[int, Field(alias="startedAt")]
+    summary: str
+    task_id: Annotated[str, Field(alias="taskId")]
+    thread_id: Annotated[str, Field(alias="threadId")]
+    title: str | None = None
+    transcript_dir: Annotated[LegacyAppPathString, Field(alias="transcriptDir")]
+    turn_id: Annotated[str, Field(alias="turnId")]
+    workflow_name: Annotated[str, Field(alias="workflowName")]
+
+
+class WorkflowStatus(Enum):
+    pending = "pending"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+    paused = "paused"
+    killed = "killed"
+
+
+class WorkflowUsage(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    agent_count: Annotated[int, Field(alias="agentCount", ge=0)]
+    duration_ms: Annotated[int, Field(alias="durationMs", ge=0)]
+    failed_agent_count: Annotated[int | None, Field(alias="failedAgentCount", ge=0)] = 0
+    null_agent_result_count: Annotated[int | None, Field(alias="nullAgentResultCount", ge=0)] = 0
+    skipped_agent_count: Annotated[int | None, Field(alias="skippedAgentCount", ge=0)] = 0
+    successful_agent_count: Annotated[int | None, Field(alias="successfulAgentCount", ge=0)] = 0
+    tool_uses: Annotated[int, Field(alias="toolUses", ge=0)]
+    total_tokens: Annotated[int, Field(alias="totalTokens", ge=0)]
 
 
 class WorkspaceMessageType(Enum):
@@ -7498,6 +7688,15 @@ class PluginUninstallRequest(BaseModel):
     id: RequestId
     method: Annotated[Literal["plugin/uninstall"], Field(title="Plugin/uninstallRequestMethod")]
     params: PluginUninstallParams
+
+
+class TurnSteerCancelRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[Literal["turn/steer/cancel"], Field(title="Turn/steer/cancelRequestMethod")]
+    params: TurnSteerCancelParams
 
 
 class TurnInterruptRequest(BaseModel):
@@ -9458,6 +9657,23 @@ class ThreadProjectUpdatedServerNotification(BaseModel):
     params: ThreadProjectUpdatedNotification
 
 
+class WorkflowStartedServerNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
+    method: Annotated[
+        Literal["workflow/started"], Field(title="Workflow/startedNotificationMethod")
+    ]
+    params: WorkflowStartedNotification
+
+
 class HookStartedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -10191,6 +10407,16 @@ class WebSearchThreadItem(BaseModel):
     type: Annotated[Literal["webSearch"], Field(title="WebSearchThreadItemType")]
 
 
+class WorkflowResultReadThreadItem(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: str
+    run_id: Annotated[str | None, Field(alias="runId")] = None
+    status: WorkflowResultReadStatus
+    type: Annotated[Literal["workflowResultRead"], Field(title="WorkflowResultReadThreadItemType")]
+
+
 class ThreadListParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -10633,6 +10859,113 @@ class WindowsSandboxSetupCompletedNotification(BaseModel):
     error: str | None = None
     mode: WindowsSandboxSetupMode
     success: bool
+
+
+class WorkflowCompletedNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    completed_at: Annotated[int, Field(alias="completedAt")]
+    delivery_key: Annotated[
+        str,
+        Field(
+            alias="deliveryKey",
+            description="Stable identity for deduplicating online delivery retries.",
+        ),
+    ]
+    error: str | None = None
+    failures: list[str]
+    output_file: Annotated[
+        LegacyAppPathString,
+        Field(
+            alias="outputFile",
+            description="Path to the persisted run snapshot, including the terminal result.",
+        ),
+    ]
+    progress_resync_required: Annotated[
+        bool,
+        Field(
+            alias="progressResyncRequired",
+            description="Indicates that clients should refresh progress from the persisted task.",
+        ),
+    ]
+    run_id: Annotated[str, Field(alias="runId")]
+    status: WorkflowStatus
+    summary: str
+    task_id: Annotated[str, Field(alias="taskId")]
+    thread_id: Annotated[str, Field(alias="threadId")]
+    turn_id: Annotated[str, Field(alias="turnId")]
+    usage: WorkflowUsage
+    workflow_name: Annotated[str, Field(alias="workflowName")]
+
+
+class WorkflowPhaseWorkflowProgressItem(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    index: Annotated[int, Field(ge=0)]
+    kind: WorkflowProgressKind
+    title: str
+    type: Annotated[Literal["workflowPhase"], Field(title="WorkflowPhaseWorkflowProgressItemType")]
+
+
+class WorkflowProgressItem(
+    RootModel[
+        WorkflowPhaseWorkflowProgressItem
+        | WorkflowAgentWorkflowProgressItem
+        | WorkflowLogWorkflowProgressItem
+    ]
+):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: (
+        WorkflowPhaseWorkflowProgressItem
+        | WorkflowAgentWorkflowProgressItem
+        | WorkflowLogWorkflowProgressItem
+    )
+
+
+class WorkflowProgressNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    progress: list[WorkflowProgressItem]
+    run_id: Annotated[str, Field(alias="runId")]
+    task_id: Annotated[str, Field(alias="taskId")]
+    thread_id: Annotated[str, Field(alias="threadId")]
+    turn_id: Annotated[str, Field(alias="turnId")]
+    usage: WorkflowUsage
+
+
+class WorkflowTask(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    completed_at: Annotated[int | None, Field(alias="completedAt")] = None
+    error: str | None = None
+    failures: list[str]
+    output_file: Annotated[
+        LegacyAppPathString,
+        Field(
+            alias="outputFile",
+            description="Path to the persisted run snapshot, including terminal result metadata.",
+        ),
+    ]
+    progress: list[WorkflowProgressItem]
+    progress_version: Annotated[int, Field(alias="progressVersion", ge=0)]
+    run_id: Annotated[str, Field(alias="runId")]
+    script_path: Annotated[LegacyAppPathString, Field(alias="scriptPath")]
+    started_at: Annotated[int, Field(alias="startedAt")]
+    status: WorkflowStatus
+    summary: str
+    task_id: Annotated[str, Field(alias="taskId")]
+    thread_id: Annotated[str, Field(alias="threadId")]
+    title: str | None = None
+    transcript_dir: Annotated[LegacyAppPathString, Field(alias="transcriptDir")]
+    turn_id: Annotated[str, Field(alias="turnId")]
+    usage: WorkflowUsage
+    workflow_name: Annotated[str, Field(alias="workflowName")]
 
 
 class WorkspaceMessage(BaseModel):
@@ -11394,6 +11727,40 @@ class ThreadGoalUpdatedServerNotification(BaseModel):
     params: ThreadGoalUpdatedNotification
 
 
+class WorkflowProgressServerNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
+    method: Annotated[
+        Literal["workflow/progress"], Field(title="Workflow/progressNotificationMethod")
+    ]
+    params: WorkflowProgressNotification
+
+
+class WorkflowCompletedServerNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
+    method: Annotated[
+        Literal["workflow/completed"], Field(title="Workflow/completedNotificationMethod")
+    ]
+    params: WorkflowCompletedNotification
+
+
 class ThreadSettingsUpdatedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -11647,6 +12014,8 @@ class ThreadItem(
         | WebSearchThreadItem
         | ImageViewThreadItem
         | SleepThreadItem
+        | WorkflowInputAnalysisThreadItem
+        | WorkflowResultReadThreadItem
         | ImageGenerationThreadItem
         | EnteredReviewModeThreadItem
         | ExitedReviewModeThreadItem
@@ -11672,6 +12041,8 @@ class ThreadItem(
         | WebSearchThreadItem
         | ImageViewThreadItem
         | SleepThreadItem
+        | WorkflowInputAnalysisThreadItem
+        | WorkflowResultReadThreadItem
         | ImageGenerationThreadItem
         | EnteredReviewModeThreadItem
         | ExitedReviewModeThreadItem
@@ -12849,6 +13220,7 @@ class ClientRequest(
         | PluginUninstallRequest
         | TurnStartRequest
         | TurnSteerRequest
+        | TurnSteerCancelRequest
         | TurnInterruptRequest
         | ReviewStartRequest
         | ModelListRequest
@@ -12960,6 +13332,7 @@ class ClientRequest(
         | PluginUninstallRequest
         | TurnStartRequest
         | TurnSteerRequest
+        | TurnSteerCancelRequest
         | TurnInterruptRequest
         | ReviewStartRequest
         | ModelListRequest
@@ -13195,6 +13568,9 @@ class ServerNotification(
         | ThreadQueueChangedServerNotification
         | ProjectChangedServerNotification
         | ThreadProjectUpdatedServerNotification
+        | WorkflowStartedServerNotification
+        | WorkflowProgressServerNotification
+        | WorkflowCompletedServerNotification
         | ThreadEnvironmentConnectedServerNotification
         | ThreadEnvironmentDisconnectedServerNotification
         | ThreadSettingsUpdatedServerNotification
@@ -13286,6 +13662,9 @@ class ServerNotification(
         | ThreadQueueChangedServerNotification
         | ProjectChangedServerNotification
         | ThreadProjectUpdatedServerNotification
+        | WorkflowStartedServerNotification
+        | WorkflowProgressServerNotification
+        | WorkflowCompletedServerNotification
         | ThreadEnvironmentConnectedServerNotification
         | ThreadEnvironmentDisconnectedServerNotification
         | ThreadSettingsUpdatedServerNotification

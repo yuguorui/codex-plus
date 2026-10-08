@@ -279,6 +279,13 @@ pub(super) fn next_submit_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op
     }
 }
 
+pub(super) fn expire_pending_steer_escape_cancel(chat: &mut ChatWidget) {
+    if let Some(state) = chat.pending_steer_escape_cancel.as_mut() {
+        state.expires_at = std::time::Instant::now() - std::time::Duration::from_millis(1);
+    }
+    chat.pre_draw_tick();
+}
+
 pub(super) fn next_interrupt_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) {
     loop {
         match op_rx.try_recv() {

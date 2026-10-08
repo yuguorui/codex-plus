@@ -561,9 +561,33 @@ impl BottomPane {
         let interrupt_binding = keymap.primary_hint(KeymapContext::Chat, "interrupt_turn");
         self.pending_input_preview
             .set_interrupt_binding(interrupt_binding);
+        let escape = key_hint::plain(KeyCode::Esc);
+        let double_interrupt =
+            keymap
+                .chat
+                .interrupt_turn
+                .first()
+                .map(|interrupt| key_hint::ShortcutHint::Chord {
+                    prefix: *interrupt,
+                    completion: *interrupt,
+                });
+        self.pending_input_preview.set_cancel_binding(
+            keymap
+                .primary_hint(KeymapContext::Chat, "cancel_pending_steers")
+                .or(double_interrupt)
+                .or(Some(key_hint::ShortcutHint::Chord {
+                    prefix: escape,
+                    completion: escape,
+                })),
+        );
         if let Some(status) = self.status.as_mut() {
             status.set_interrupt_binding(interrupt_binding);
         }
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_pending_steer_escape_cancel_armed(&mut self, armed: bool) {
+        self.pending_input_preview.set_escape_cancel_armed(armed);
         self.request_redraw();
     }
 
@@ -2589,6 +2613,29 @@ mod tests {
             network_approval_context: None,
             additional_permissions: None,
         })
+    }
+
+    #[test]
+    fn pending_steer_cancel_hint_follows_effective_bindings() {
+        let (tx, _rx) = unbounded_channel();
+        let mut pane = test_pane(AppEventSender::new(tx));
+        let mut keymap = RuntimeKeymap::defaults();
+        keymap.chat.interrupt_turn = vec![key_hint::plain(KeyCode::F(12))];
+        pane.set_keymap_bindings(&keymap);
+        assert_eq!(
+            pane.pending_input_preview.cancel_binding(),
+            Some(key_hint::ShortcutHint::Chord {
+                prefix: key_hint::plain(KeyCode::F(12)),
+                completion: key_hint::plain(KeyCode::F(12)),
+            })
+        );
+
+        keymap.chat.cancel_pending_steers = vec![key_hint::ctrl(KeyCode::Char('x'))];
+        pane.set_keymap_bindings(&keymap);
+        assert_eq!(
+            pane.pending_input_preview.cancel_binding(),
+            Some(key_hint::ctrl(KeyCode::Char('x')).into())
+        );
     }
 
     #[test]
