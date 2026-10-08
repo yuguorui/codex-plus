@@ -139,6 +139,8 @@ impl ChatWidget {
         if self.has_misalignment_policy_violation() {
             return (false, None);
         }
+        // A manual submission is an explicit retry after a pre-send validation failure.
+        self.input_queue.failed_before_send = false;
         self.empty_state_animation.borrow_mut().dismiss();
         if self.input_queue.rate_limit_recovery_pending || self.pending_image_submission.is_some() {
             let model_prompt = source == UserMessageSource::Prompt
