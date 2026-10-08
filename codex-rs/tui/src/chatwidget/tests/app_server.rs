@@ -2116,7 +2116,9 @@ async fn app_server_safety_access_errors_render_dedicated_notice() {
     let mut rendered_cases = Vec::new();
     for (case, message) in cases {
         let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-        chat.handle_non_retry_error(message, /*codex_error_info*/ None);
+        chat.handle_non_retry_error(
+            message, /*codex_error_info*/ None, /*from_replay*/ false,
+        );
 
         let cells = drain_insert_history(&mut rx);
         assert_eq!(cells.len(), 1);
