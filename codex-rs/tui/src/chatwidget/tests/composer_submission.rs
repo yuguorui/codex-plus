@@ -1830,6 +1830,55 @@ async fn pending_steer_esc_does_not_steal_vim_insert_escape() {
 }
 
 #[tokio::test]
+async fn shift_esc_requests_pending_steer_cancellation_without_recall() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.turn_lifecycle.last_turn_id = Some("turn-1".to_string());
+    chat.bottom_pane.set_task_running(/*running*/ true);
+    chat.input_queue
+        .pending_steers
+        .push_back(pending_steer("queued steer"));
+    while rx.try_recv().is_ok() {}
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::SHIFT));
+
+    match op_rx.try_recv() {
+        Ok(Op::CancelPendingSteer {
+            client_user_message_id,
+            expected_turn_id,
+        }) => {
+            assert_eq!(client_user_message_id, "test-submission");
+            assert_eq!(expected_turn_id, "turn-1");
+        }
+        other => panic!("expected pending steer cancellation, got {other:?}"),
+    }
+    assert_eq!(chat.input_queue.pending_steers.len(), 1);
+    assert!(chat.bottom_pane.composer_is_empty());
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn confirmed_steer_cancellation_restores_composer_without_history() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    let mut steer = pending_steer("recalled steer");
+    steer.client_id = "steer-to-recall".to_string();
+    chat.input_queue.pending_steers.push_back(steer);
+    while rx.try_recv().is_ok() {}
+
+    assert!(chat.recall_pending_steer("steer-to-recall"));
+
+    assert!(chat.input_queue.pending_steers.is_empty());
+    assert_eq!(chat.bottom_pane.composer_text(), "recalled steer");
+    while let Ok(event) = rx.try_recv() {
+        assert!(
+            !matches!(event, AppEvent::InsertHistoryCell(_)),
+            "cancellation inserted history: {event:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn pending_steer_interrupt_uses_remapped_binding() {
     let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let mut keymap = crate::keymap::RuntimeKeymap::defaults();

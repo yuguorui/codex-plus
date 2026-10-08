@@ -1772,6 +1772,30 @@
             },
             "method": {
               "enum": [
+                "turn/steer/cancel"
+              ],
+              "title": "Turn/steer/cancelRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/TurnSteerCancelParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Turn/steer/cancelRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "turn/interrupt"
               ],
               "title": "Turn/interruptRequestMethod",
@@ -26200,6 +26224,41 @@
           "inProgress"
         ],
         "type": "string"
+      },
+      "TurnSteerCancelParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "clientUserMessageId": {
+            "type": "string"
+          },
+          "expectedTurnId": {
+            "description": "Required active turn id precondition. The request fails when it does not match the currently active turn.",
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "clientUserMessageId",
+          "expectedTurnId",
+          "threadId"
+        ],
+        "title": "TurnSteerCancelParams",
+        "type": "object"
+      },
+      "TurnSteerCancelResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "cancelled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "cancelled"
+        ],
+        "title": "TurnSteerCancelResponse",
+        "type": "object"
       },
       "TurnSteerParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",

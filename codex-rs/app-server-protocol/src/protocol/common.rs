@@ -1089,6 +1089,12 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::TurnSteerResponse,
     },
+    TurnSteerCancel => "turn/steer/cancel" {
+        params: v2::TurnSteerCancelParams,
+        inspect_params: true,
+        serialization: thread_id(params.thread_id),
+        response: v2::TurnSteerCancelResponse,
+    },
     TurnInterrupt => "turn/interrupt" {
         params: v2::TurnInterruptParams,
         serialization: thread_id(params.thread_id),

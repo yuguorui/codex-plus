@@ -285,6 +285,53 @@ impl ChatWidget {
         }
     }
 
+    /// Ask Core to remove the latest pending steer, then recall it into the composer.
+    ///
+    /// The local pending entry is retained until Core confirms removal, so a steer
+    /// that has already been consumed cannot silently disappear from the preview.
+    pub(crate) fn request_recall_latest_pending_steer(&mut self) -> bool {
+        let Some(expected_turn_id) = self.turn_lifecycle.last_turn_id.clone() else {
+            return false;
+        };
+        let Some(client_user_message_id) = self
+            .input_queue
+            .pending_steers
+            .back()
+            .map(|steer| steer.client_id.clone())
+        else {
+            return false;
+        };
+        self.submit_op(AppCommand::cancel_pending_steer(
+            client_user_message_id,
+            expected_turn_id,
+        ))
+    }
+
+    /// Restore a steer after Core confirms it was removed before sampling.
+    /// This intentionally does not append a cancellation event to history.
+    pub(crate) fn recall_pending_steer(&mut self, client_user_message_id: &str) -> bool {
+        let position = self
+            .input_queue
+            .pending_steers
+            .iter()
+            .rposition(|steer| steer.client_id == client_user_message_id);
+        let Some(position) = position else {
+            return false;
+        };
+        let Some(pending) = self.input_queue.pending_steers.remove(position) else {
+            return false;
+        };
+        self.cancelled_pending_steer_ids
+            .insert(pending.client_id.clone());
+        self.refresh_pending_input_preview();
+        self.restore_user_message_to_composer(user_message_for_restore(
+            pending.user_message,
+            &pending.history_record,
+        ));
+        self.request_redraw();
+        true
+    }
+
     pub(crate) fn enqueue_rejected_steer(&mut self) -> bool {
         let Some(pending_steer) = self.input_queue.pending_steers.pop_front() else {
             tracing::warn!(

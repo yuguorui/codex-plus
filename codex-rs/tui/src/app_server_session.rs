@@ -129,6 +129,8 @@ use codex_app_server_protocol::TurnInterruptParams;
 use codex_app_server_protocol::TurnInterruptResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
+use codex_app_server_protocol::TurnSteerCancelParams;
+use codex_app_server_protocol::TurnSteerCancelResponse;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::TurnSteerResponse;
 use codex_app_server_protocol::UserInput;
@@ -1520,6 +1522,25 @@ impl AppServerSession {
                     responsesapi_client_metadata: None,
                     additional_context: None,
                     expected_turn_id: turn_id,
+                },
+            })
+            .await
+    }
+
+    pub(crate) async fn turn_steer_cancel(
+        &mut self,
+        thread_id: ThreadId,
+        expected_turn_id: String,
+        client_user_message_id: String,
+    ) -> std::result::Result<TurnSteerCancelResponse, TypedRequestError> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::TurnSteerCancel {
+                request_id,
+                params: TurnSteerCancelParams {
+                    thread_id: thread_id.to_string(),
+                    client_user_message_id,
+                    expected_turn_id,
                 },
             })
             .await

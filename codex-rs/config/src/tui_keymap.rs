@@ -175,6 +175,8 @@ pub struct TuiChatKeymap {
     pub toggle_voice_mute: Option<KeybindingsSpec>,
     /// Interrupt the active turn.
     pub interrupt_turn: Option<KeybindingsSpec>,
+    /// Cancel the most recent pending steer before the model consumes it.
+    pub recall_pending_steer: Option<KeybindingsSpec>,
     /// Decrease the active reasoning effort.
     pub decrease_reasoning_effort: Option<KeybindingsSpec>,
     /// Increase the active reasoning effort.

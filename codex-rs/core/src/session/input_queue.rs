@@ -93,6 +93,25 @@ pub(crate) struct TurnInputQueue {
     items: Vec<TurnInput>,
 }
 
+impl TurnInputQueue {
+    /// Remove one pending user input before it is drained into a model request.
+    pub(crate) fn remove_user_input(&mut self, client_id: &str) -> bool {
+        let position = self.items.iter().position(|input| {
+            matches!(input, TurnInput::UserInput { client_id: Some(id), .. } if id == client_id)
+        });
+        if let Some(position) = position {
+            self.items.remove(position);
+        }
+        position.is_some()
+    }
+
+    pub(crate) fn has_user_input(&self) -> bool {
+        self.items
+            .iter()
+            .any(|input| matches!(input, TurnInput::UserInput { .. }))
+    }
+}
+
 /// Session-scoped pending input storage and active-turn mailbox delivery coordination.
 pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
@@ -314,7 +333,11 @@ impl InputQueue {
         let mut activity = self.activity_tx.subscribe();
         Some(AbortOnDropHandle::new(tokio::spawn(async move {
             loop {
-                if turn_state.lock().await.pending_input.has_user_input() {
+                let should_cancel = {
+                    let mut turn_state = turn_state.lock().await;
+                    turn_state.begin_pending_user_input_preempt()
+                };
+                if should_cancel {
                     interrupt.cancel();
                     return;
                 }
@@ -486,12 +509,6 @@ impl InputQueue {
 }
 
 impl TurnInputQueue {
-    fn has_user_input(&self) -> bool {
-        self.items
-            .iter()
-            .any(|input| matches!(input, TurnInput::UserInput { .. }))
-    }
-
     pub(crate) fn is_empty(&self) -> bool {
         self.items.is_empty()
     }

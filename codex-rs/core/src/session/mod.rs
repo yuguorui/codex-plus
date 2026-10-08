@@ -5032,6 +5032,43 @@ impl Session {
         }
     }
 
+    /// Remove a pending user steer without emitting or persisting a history event.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "active turn checks and turn state updates must remain atomic"
+    )]
+    pub async fn cancel_pending_user_input(
+        &self,
+        expected_turn_id: &str,
+        client_user_message_id: &str,
+    ) -> CodexResult<bool> {
+        let active = self.active_turn.lock().await;
+        let Some(active_turn) = active.as_ref() else {
+            return Ok(false);
+        };
+        let Some(task) = active_turn.task.as_ref() else {
+            return Ok(false);
+        };
+        if task.turn_context.sub_id != expected_turn_id
+            || task.cancellation_token.is_cancelled()
+            || task.kind != crate::state::TaskKind::Regular
+        {
+            return Ok(false);
+        }
+
+        let mut turn_state = active_turn.turn_state.lock().await;
+        if turn_state.pending_user_input_preempting {
+            return Ok(false);
+        }
+        let removed = turn_state
+            .pending_input
+            .remove_user_input(client_user_message_id);
+        if removed && !turn_state.pending_input.has_user_input() {
+            turn_state.clear_user_input_activity_observed();
+        }
+        Ok(removed)
+    }
+
     pub(crate) async fn begin_closing(&self) {
         self.closing
             .store(true, std::sync::atomic::Ordering::Release);

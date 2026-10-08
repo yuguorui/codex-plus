@@ -5834,6 +5834,26 @@
       ],
       "type": "object"
     },
+    "TurnSteerCancelParams": {
+      "properties": {
+        "clientUserMessageId": {
+          "type": "string"
+        },
+        "expectedTurnId": {
+          "description": "Required active turn id precondition. The request fails when it does not match the currently active turn.",
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "clientUserMessageId",
+        "expectedTurnId",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "TurnSteerParams": {
       "properties": {
         "clientUserMessageId": {
@@ -7679,6 +7699,30 @@
         "params"
       ],
       "title": "Turn/steerRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "turn/steer/cancel"
+          ],
+          "title": "Turn/steer/cancelRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/TurnSteerCancelParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Turn/steer/cancelRequest",
       "type": "object"
     },
     {

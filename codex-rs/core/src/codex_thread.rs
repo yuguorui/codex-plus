@@ -688,6 +688,20 @@ impl CodexThread {
         }
     }
 
+    /// Removes a pending, not-yet-sampled user steer from the active regular turn.
+    ///
+    /// Returns `false` when the turn changed, is not steerable, or the input has
+    /// already been consumed. No history event is emitted for a successful cancel.
+    pub async fn cancel_pending_user_input(
+        &self,
+        expected_turn_id: &str,
+        client_user_message_id: &str,
+    ) -> CodexResult<bool> {
+        self.session
+            .cancel_pending_user_input(expected_turn_id, client_user_message_id)
+            .await
+    }
+
     async fn submit_turn_input_with_mode(
         &self,
         request: impl Into<WithTurnExtensionData<TurnInputRequest>>,

@@ -738,6 +738,38 @@ impl App {
                 });
                 Ok(true)
             }
+            AppCommand::CancelPendingSteer {
+                client_user_message_id,
+                expected_turn_id,
+            } => {
+                let cancelled = app_server
+                    .turn_steer_cancel(
+                        thread_id,
+                        expected_turn_id.clone(),
+                        client_user_message_id.clone(),
+                    )
+                    .await;
+                match cancelled {
+                    Ok(response) if response.cancelled => {
+                        if self.active_thread_id == Some(thread_id)
+                            && self.chat_widget.thread_id() == Some(thread_id)
+                        {
+                            self.chat_widget
+                                .recall_pending_steer(client_user_message_id);
+                        }
+                    }
+                    Ok(_) => tracing::debug!(
+                        client_user_message_id = %client_user_message_id,
+                        "pending steer was already consumed; cancellation ignored"
+                    ),
+                    Err(error) => tracing::warn!(
+                        error = %error,
+                        client_user_message_id = %client_user_message_id,
+                        "turn/steer/cancel failed"
+                    ),
+                }
+                Ok(true)
+            }
             AppCommand::UserTurn {
                 client_user_message_id,
                 items,

@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "clientUserMessageId": {
+      "type": "string"
+    },
+    "expectedTurnId": {
+      "description": "Required active turn id precondition. The request fails when it does not match the currently active turn.",
+      "type": "string"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "clientUserMessageId",
+    "expectedTurnId",
+    "threadId"
+  ],
+  "title": "TurnSteerCancelParams",
+  "type": "object"
+}
