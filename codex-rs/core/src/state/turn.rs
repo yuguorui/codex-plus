@@ -92,6 +92,10 @@ pub(crate) struct TurnState {
     pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
     pub(crate) pending_input: TurnInputQueue,
     user_input_activity_observed: bool,
+    /// Set when the sampler has already been preempted for pending user input.
+    /// Cancelling after this point would restart the in-flight request, so the
+    /// steer is treated as consumed.
+    pub(crate) pending_user_input_preempting: bool,
     mailbox_delivery_phase: MailboxDeliveryPhase,
     pub(crate) tool_calls: u64,
     pub(crate) has_memory_citation: bool,
@@ -128,6 +132,15 @@ impl TurnState {
 
     pub(crate) fn clear_user_input_activity_observed(&mut self) {
         self.user_input_activity_observed = false;
+        self.pending_user_input_preempting = false;
+    }
+
+    pub(crate) fn begin_pending_user_input_preempt(&mut self) -> bool {
+        if !self.pending_input.has_user_input() || self.pending_user_input_preempting {
+            return false;
+        }
+        self.pending_user_input_preempting = true;
+        true
     }
 
     pub(crate) fn insert_pending_approval(

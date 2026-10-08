@@ -339,6 +339,26 @@ pub struct TurnSteerResponse {
     pub turn_id: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS, ExperimentalApi)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TurnSteerCancelParams {
+    pub thread_id: String,
+    /// Pending user messages to remove. Core returns the subset that was still
+    /// pending; already-consumed messages are omitted.
+    pub client_user_message_ids: Vec<String>,
+    /// Required active turn id precondition. The request fails when it does not
+    /// match the currently active turn.
+    pub expected_turn_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TurnSteerCancelResponse {
+    pub cancelled_client_user_message_ids: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
