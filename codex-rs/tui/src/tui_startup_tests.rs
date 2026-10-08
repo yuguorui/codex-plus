@@ -298,10 +298,17 @@ async fn startup_typeahead_pty_child() {
         crossterm::event::poll(Duration::from_millis(/*millis*/ 250))
             .expect("poll the standalone escape")
     );
-    assert!(matches!(
-        crossterm::event::read().expect("read the standalone escape"),
-        Event::Key(key) if key.code == KeyCode::Esc
-    ));
+    let Event::Key(escape) = crossterm::event::read().expect("read the standalone escape") else {
+        panic!("standalone escape did not decode to a key event");
+    };
+    assert_eq!(escape.code, KeyCode::Esc);
+    assert_eq!(escape.modifiers, crossterm::event::KeyModifiers::NONE);
+    assert!(
+        crate::keymap::RuntimeKeymap::defaults()
+            .chat
+            .interrupt_turn
+            .contains(&crate::key_hint::plain(KeyCode::Esc))
+    );
     assert!(escape_started_at.elapsed() < Duration::from_millis(/*millis*/ 250));
 
     for suffix in ["y", "1"] {

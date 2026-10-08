@@ -14,6 +14,9 @@ pub(crate) enum KeyEventAction {
     PasteImage,
 }
 
+/// Window in which a second press of the pending-steer interrupt binding cancels all pending steers.
+const PENDING_STEER_DOUBLE_ESCAPE_WINDOW: Duration = Duration::from_millis(250);
+
 impl ChatWidget {
     pub(crate) fn clear_composer_selection(&mut self) {
         self.bottom_pane.clear_composer_selection();
@@ -72,6 +75,7 @@ impl ChatWidget {
         if self.handle_question_key(key_event) {
             return KeyEventAction::None;
         }
+        self.observe_pending_steer_escape_cancel(key_event);
         if self.bottom_pane.has_active_view()
             && !matches!(
                 key_event,
@@ -220,18 +224,24 @@ impl ChatWidget {
             return KeyEventAction::None;
         }
 
-        if self.chat_keymap.interrupt_turn.is_pressed(key_event)
+        if self.chat_keymap.cancel_pending_steers.is_pressed(key_event)
             && !self.input_queue.pending_steers.is_empty()
             && self.bottom_pane.is_task_running()
             && self.bottom_pane.no_modal_or_popup_active()
             && !self.should_handle_vim_insert_escape(key_event)
         {
-            self.input_queue.submit_pending_steers_after_interrupt = true;
-            if self.submit_op(AppCommand::interrupt()) {
-                self.pause_active_goal_for_interrupt();
-            } else {
-                self.input_queue.submit_pending_steers_after_interrupt = false;
-            }
+            self.request_cancel_all_pending_steers();
+            return KeyEventAction::None;
+        }
+
+        if key_event.kind == KeyEventKind::Press
+            && self.chat_keymap.interrupt_turn.is_pressed(key_event)
+            && !self.input_queue.pending_steers.is_empty()
+            && self.bottom_pane.is_task_running()
+            && self.bottom_pane.no_modal_or_popup_active()
+            && !self.should_handle_vim_insert_escape(key_event)
+            && self.handle_pending_steer_double_escape(key_event)
+        {
             return KeyEventAction::None;
         }
 
@@ -274,6 +284,98 @@ impl ChatWidget {
             }
         }
         KeyEventAction::None
+    }
+
+    fn pending_steer_interrupt_context_active(&self) -> bool {
+        !self.input_queue.pending_steers.is_empty()
+            && self.bottom_pane.is_task_running()
+            && self.bottom_pane.no_modal_or_popup_active()
+            && !self.review.is_review_mode
+    }
+
+    fn clear_pending_steer_escape_cancel(&mut self) {
+        if self.pending_steer_escape_cancel.take().is_some() {
+            self.bottom_pane
+                .set_pending_steer_escape_cancel_armed(/*armed*/ false);
+        }
+    }
+
+    fn observe_pending_steer_escape_cancel(&mut self, key_event: KeyEvent) {
+        let Some(state) = self.pending_steer_escape_cancel else {
+            return;
+        };
+        if key_event.kind != KeyEventKind::Press {
+            return;
+        }
+        let completes = state.interrupt_key.is_press(key_event)
+            && self.pending_steer_interrupt_context_active();
+        if !completes {
+            self.clear_pending_steer_escape_cancel();
+        }
+    }
+
+    fn handle_pending_steer_double_escape(&mut self, key_event: KeyEvent) -> bool {
+        let now = Instant::now();
+        if let Some(state) = self.pending_steer_escape_cancel.take() {
+            let within_window = now < state.expires_at;
+            if within_window && state.interrupt_key.is_press(key_event) {
+                self.bottom_pane
+                    .set_pending_steer_escape_cancel_armed(/*armed*/ false);
+                self.request_cancel_all_pending_steers();
+                return true;
+            }
+
+            self.bottom_pane
+                .set_pending_steer_escape_cancel_armed(/*armed*/ false);
+            if !within_window && self.pending_steer_interrupt_context_active() {
+                self.interrupt_and_send_pending_steers();
+                return true;
+            }
+        }
+
+        let expires_at = now + PENDING_STEER_DOUBLE_ESCAPE_WINDOW;
+        self.pending_steer_escape_cancel = Some(PendingSteerEscapeCancel {
+            interrupt_key: KeyBinding::from_event(key_event),
+            expires_at,
+        });
+        self.bottom_pane
+            .set_pending_steer_escape_cancel_armed(/*armed*/ true);
+        self.frame_requester
+            .schedule_frame_in(PENDING_STEER_DOUBLE_ESCAPE_WINDOW);
+        true
+    }
+
+    fn interrupt_and_send_pending_steers(&mut self) {
+        self.input_queue.submit_pending_steers_after_interrupt = true;
+        if self.submit_op(AppCommand::interrupt()) {
+            self.pause_active_goal_for_interrupt();
+        } else {
+            self.input_queue.submit_pending_steers_after_interrupt = false;
+        }
+        self.request_redraw();
+    }
+
+    pub(super) fn handle_pending_steer_escape_cancel_tick(&mut self) {
+        let Some(state) = self.pending_steer_escape_cancel else {
+            return;
+        };
+        if !self.pending_steer_interrupt_context_active() {
+            self.clear_pending_steer_escape_cancel();
+            return;
+        }
+        let now = Instant::now();
+        if now < state.expires_at {
+            self.frame_requester
+                .schedule_frame_in(state.expires_at - now);
+            return;
+        }
+
+        self.pending_steer_escape_cancel = None;
+        self.bottom_pane
+            .set_pending_steer_escape_cancel_armed(/*armed*/ false);
+        if self.pending_steer_interrupt_context_active() {
+            self.interrupt_and_send_pending_steers();
+        }
     }
 
     /// Attach a local image to the composer when the active model supports image inputs.
