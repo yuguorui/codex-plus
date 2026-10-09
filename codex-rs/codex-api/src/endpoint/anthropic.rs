@@ -31,6 +31,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use tracing::instrument;
@@ -449,6 +450,7 @@ fn anthropic_body_from_responses_request(
     )?;
     let has_tools = !tools.is_empty();
     let (system, messages) = anthropic_messages_from_items(request.input)?;
+    validate_tool_use_results(&messages)?;
     let extra_body = request.extra_body;
     let metadata = session_id
         .map(|sid| {
@@ -765,6 +767,83 @@ fn flush_pending_tool_results(
     });
 }
 
+/// Enforces the Messages API pairing rule before the request leaves the process.
+///
+/// Anthropic rejects a `tool_use` whose `tool_result` is missing from the user message that
+/// immediately follows, and a `tool_result` that names an unknown `tool_use`. Catching both
+/// locally turns a remote 400 into an actionable local error and guarantees the converter
+/// never emits `assistant(tool_use) -> user(text) -> user(tool_result)`.
+fn validate_tool_use_results(messages: &[AnthropicMessage]) -> Result<(), ApiError> {
+    let mut tool_use_ids: HashSet<&str> = HashSet::new();
+    let mut expected_results: Vec<String> = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        match message.role {
+            AnthropicRole::Assistant => {
+                if !expected_results.is_empty() {
+                    return Err(invalid_anthropic_tool_history(format!(
+                        "tool_use blocks at message index {index} are not immediately followed by their tool_result"
+                    )));
+                }
+                for block in &message.content {
+                    let AnthropicContentBlock::ToolUse { id, .. } = block else {
+                        continue;
+                    };
+                    if !tool_use_ids.insert(id.as_str()) {
+                        return Err(invalid_anthropic_tool_history(format!(
+                            "duplicate tool_use id '{id}' at message index {index}"
+                        )));
+                    }
+                    expected_results.push(id.clone());
+                }
+            }
+            AnthropicRole::User => {
+                for block in &message.content {
+                    let AnthropicContentBlock::ToolResult { tool_use_id, .. } = block else {
+                        continue;
+                    };
+                    if !tool_use_ids.contains(tool_use_id.as_str()) {
+                        return Err(invalid_anthropic_tool_history(format!(
+                            "tool_result '{tool_use_id}' at message index {index} references an unknown tool_use"
+                        )));
+                    }
+                    if !expected_results.iter().any(|id| id == tool_use_id) {
+                        return Err(invalid_anthropic_tool_history(format!(
+                            "tool_result '{tool_use_id}' at message index {index} is not in the user message immediately following its tool_use"
+                        )));
+                    }
+                }
+                // This user message is the direct successor of the tool_use turn; every
+                // paired tool_use must be answered here.
+                if let Some(missing) = expected_results
+                    .iter()
+                    .find(|id| {
+                        !message.content.iter().any(|block| {
+                            matches!(block, AnthropicContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == *id)
+                        })
+                    })
+                {
+                    return Err(invalid_anthropic_tool_history(format!(
+                        "tool_use '{missing}' at message index {index} has no immediately following tool_result"
+                    )));
+                }
+                expected_results.clear();
+            }
+        }
+    }
+    if let Some(open) = expected_results.first() {
+        return Err(invalid_anthropic_tool_history(format!(
+            "tool_use '{open}' has no following tool_result"
+        )));
+    }
+    Ok(())
+}
+
+fn invalid_anthropic_tool_history(message: String) -> ApiError {
+    ApiError::InvalidRequest {
+        message: format!("invalid anthropic tool history: {message}"),
+    }
+}
+
 fn function_output_to_anthropic_content(output: FunctionCallOutputBody) -> Value {
     match output {
         FunctionCallOutputBody::Text(text) => Value::String(text),
@@ -1038,6 +1117,14 @@ mod tests {
             .body
     }
 
+    fn anthropic_body_error(input: Vec<ResponseItem>) -> String {
+        match anthropic_body_from_responses_request(request(input, Vec::new()), None) {
+            Ok(_) => panic!("Anthropic body should fail"),
+            Err(ApiError::InvalidRequest { message }) => message,
+            Err(err) => panic!("unexpected error: {err}"),
+        }
+    }
+
     #[test]
     fn converts_text_messages_and_tool_results() {
         let body = body_from(request(
@@ -1292,29 +1379,48 @@ mod tests {
     #[test]
     fn preserves_custom_tool_call_history_as_function_input() {
         let body = body_from(request(
-            vec![ResponseItem::CustomToolCall {
-                id: None,
-                status: None,
-                call_id: "call-custom".to_string(),
-                name: "apply_patch".to_string(),
-                input: "*** Begin Patch\n*** End Patch".to_string(),
-                internal_chat_message_metadata_passthrough: None,
-                namespace: None,
-            }],
+            vec![
+                ResponseItem::CustomToolCall {
+                    id: None,
+                    status: None,
+                    call_id: "call-custom".to_string(),
+                    name: "apply_patch".to_string(),
+                    input: "*** Begin Patch\n*** End Patch".to_string(),
+                    internal_chat_message_metadata_passthrough: None,
+                    namespace: None,
+                },
+                ResponseItem::CustomToolCallOutput {
+                    id: None,
+                    call_id: "call-custom".to_string(),
+                    name: None,
+                    output: FunctionCallOutputPayload::from_text("applied".to_string()),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+            ],
             Vec::new(),
         ));
 
         assert_eq!(
             body["messages"],
-            json!([{
-                "role": "assistant",
-                "content": [{
-                    "type": "tool_use",
-                    "id": "call-custom",
-                    "name": "apply_patch",
-                    "input": {"input": "*** Begin Patch\n*** End Patch"}
-                }]
-            }])
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "call-custom",
+                        "name": "apply_patch",
+                        "input": {"input": "*** Begin Patch\n*** End Patch"}
+                    }]
+                },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "call-custom",
+                        "content": "applied"
+                    }]
+                },
+            ])
         );
     }
 
@@ -1625,5 +1731,224 @@ mod tests {
         let content = messages[0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "thinking");
         assert_eq!(content[1]["type"], "text");
+    }
+
+    #[test]
+    fn accepts_repaired_call_result_before_user_context() {
+        // The core history normalize moves a delayed tool output directly after its call; the
+        // Anthropic message list must then be assistant(tool_use) -> user(tool_result) ->
+        // user(text), never tool_use followed by a plain user message.
+        let body = body_from(request(
+            vec![
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "hello".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::FunctionCall {
+                    id: None,
+                    name: "shell".to_string(),
+                    namespace: None,
+                    arguments: "{\"cmd\":\"ls\"}".to_string(),
+                    encrypted_function_args: None,
+                    call_id: "call-1".to_string(),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::FunctionCallOutput {
+                    call_id: Some("call-1".to_string()),
+                    name: None,
+                    namespace: None,
+                    output: FunctionCallOutputPayload::from_text("ok".to_string()),
+                    internal_chat_message_metadata_passthrough: None,
+                    id: None,
+                },
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "steer".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+            ],
+            Vec::new(),
+        ));
+
+        assert_eq!(
+            body["messages"],
+            json!([
+                {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+                {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "call-1",
+                        "name": "shell",
+                        "input": {"cmd": "ls"}
+                    }]
+                },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "call-1",
+                        "content": "ok",
+                        "cache_control": {"type": "ephemeral"}
+                    }]
+                },
+                {"role": "user", "content": [{"type": "text", "text": "steer"}]},
+            ])
+        );
+    }
+
+    #[test]
+    fn accepts_parallel_tool_results_in_one_user_message() {
+        let body = body_from(request(
+            vec![
+                ResponseItem::FunctionCall {
+                    id: None,
+                    name: "shell".to_string(),
+                    namespace: None,
+                    arguments: "{}".to_string(),
+                    encrypted_function_args: None,
+                    call_id: "call-a".to_string(),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::FunctionCall {
+                    id: None,
+                    name: "shell".to_string(),
+                    namespace: None,
+                    arguments: "{}".to_string(),
+                    encrypted_function_args: None,
+                    call_id: "call-b".to_string(),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::FunctionCallOutput {
+                    call_id: Some("call-a".to_string()),
+                    name: None,
+                    namespace: None,
+                    output: FunctionCallOutputPayload::from_text("a".to_string()),
+                    internal_chat_message_metadata_passthrough: None,
+                    id: None,
+                },
+                ResponseItem::FunctionCallOutput {
+                    call_id: Some("call-b".to_string()),
+                    name: None,
+                    namespace: None,
+                    output: FunctionCallOutputPayload::from_text("b".to_string()),
+                    internal_chat_message_metadata_passthrough: None,
+                    id: None,
+                },
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "steer".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+            ],
+            Vec::new(),
+        ));
+
+        assert_eq!(
+            body["messages"],
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "call-a", "name": "shell", "input": {}},
+                        {"type": "tool_use", "id": "call-b", "name": "shell", "input": {}}
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "call-a", "content": "a"},
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call-b",
+                            "content": "b",
+                            "cache_control": {"type": "ephemeral"}
+                        }
+                    ]
+                },
+                {"role": "user", "content": [{"type": "text", "text": "steer"}]},
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_tool_use_without_direct_tool_result() {
+        let message = anthropic_body_error(vec![
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "shell".to_string(),
+                namespace: None,
+                arguments: "{}".to_string(),
+                encrypted_function_args: None,
+                call_id: "call-1".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "interleaved".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ]);
+
+        assert_eq!(
+            message,
+            "invalid anthropic tool history: tool_use 'call-1' at message index 1 has no immediately following tool_result"
+        );
+    }
+
+    #[test]
+    fn rejects_parallel_tool_use_batch_whose_first_result_is_missing() {
+        // Two tool_use blocks in one assistant turn, but the following user message only
+        // answers the second one.
+        let message = anthropic_body_error(vec![
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "shell".to_string(),
+                namespace: None,
+                arguments: "{}".to_string(),
+                encrypted_function_args: None,
+                call_id: "call-open".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "shell".to_string(),
+                namespace: None,
+                arguments: "{}".to_string(),
+                encrypted_function_args: None,
+                call_id: "call-other".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::FunctionCallOutput {
+                call_id: Some("call-other".to_string()),
+                name: None,
+                namespace: None,
+                output: FunctionCallOutputPayload::from_text("late".to_string()),
+                internal_chat_message_metadata_passthrough: None,
+                id: None,
+            },
+        ]);
+
+        assert_eq!(
+            message,
+            "invalid anthropic tool history: tool_use 'call-open' at message index 1 has no immediately following tool_result"
+        );
     }
 }

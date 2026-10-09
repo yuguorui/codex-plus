@@ -2440,4 +2440,119 @@ mod tests {
         );
         assert!(assistant.get("tool_calls").is_some());
     }
+
+    #[test]
+    fn accepts_repaired_call_output_before_user_context() {
+        // The core history normalize moves a delayed tool output directly after its call;
+        // the chat history must then lay out assistant(tool_calls) -> tool -> user.
+        let body = body_from(request(
+            vec![
+                ResponseItem::FunctionCall {
+                    id: None,
+                    name: "shell".to_string(),
+                    namespace: None,
+                    arguments: "{\"cmd\":\"ls\"}".to_string(),
+                    encrypted_function_args: None,
+                    call_id: "call-1".to_string(),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::FunctionCallOutput {
+                    call_id: Some("call-1".to_string()),
+                    name: None,
+                    namespace: None,
+                    output: FunctionCallOutputPayload::from_text("ok".to_string()),
+                    internal_chat_message_metadata_passthrough: None,
+                    id: None,
+                },
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "steer".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+            ],
+            Vec::new(),
+        ));
+
+        assert_eq!(
+            body["messages"],
+            json!([
+                {"role": "system", "content": "system prompt"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "shell", "arguments": "{\"cmd\":\"ls\"}"}
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+                {"role": "user", "content": "steer"},
+            ])
+        );
+    }
+
+    #[test]
+    fn accepts_repaired_parallel_outputs_before_user_context() {
+        let body = body_from(request(
+            vec![
+                ResponseItem::FunctionCall {
+                    id: None,
+                    name: "shell".to_string(),
+                    namespace: None,
+                    arguments: "{}".to_string(),
+                    encrypted_function_args: None,
+                    call_id: "call-a".to_string(),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::FunctionCall {
+                    id: None,
+                    name: "shell".to_string(),
+                    namespace: None,
+                    arguments: "{}".to_string(),
+                    encrypted_function_args: None,
+                    call_id: "call-b".to_string(),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::FunctionCallOutput {
+                    call_id: Some("call-a".to_string()),
+                    name: None,
+                    namespace: None,
+                    output: FunctionCallOutputPayload::from_text("a".to_string()),
+                    internal_chat_message_metadata_passthrough: None,
+                    id: None,
+                },
+                ResponseItem::FunctionCallOutput {
+                    call_id: Some("call-b".to_string()),
+                    name: None,
+                    namespace: None,
+                    output: FunctionCallOutputPayload::from_text("b".to_string()),
+                    internal_chat_message_metadata_passthrough: None,
+                    id: None,
+                },
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "steer".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+            ],
+            Vec::new(),
+        ));
+
+        let messages = body["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 5, "system, assistant, tool a, tool b, user");
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["tool_call_id"], "call-a");
+        assert_eq!(messages[3]["role"], "tool");
+        assert_eq!(messages[3]["tool_call_id"], "call-b");
+        assert_eq!(messages[4]["role"], "user");
+    }
 }
