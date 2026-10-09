@@ -347,6 +347,8 @@ impl Session {
         let mut active = self.active_turn.lock().await;
         let turn = active.get_or_insert_with(ActiveTurn::default);
         debug_assert!(turn.task.is_none());
+        self.turn_active
+            .store(true, std::sync::atomic::Ordering::Release);
         // Record lineage only when the task starts: settings changes can invalidate a reservation.
         self.record_started_turn(
             &turn_context.sub_id,
@@ -619,6 +621,9 @@ impl Session {
             return false;
         };
 
+        // The abort marker must be recorded while the turn still counts as active so the
+        // tool-pair write barrier can flush it behind synthesized tool outputs;
+        // `finish_turn_abort` clears the flag once that marker is durable.
         self.finish_turn_abort(active_turn, reason, error).await;
         true
     }
@@ -637,6 +642,12 @@ impl Session {
         // Let interrupted tasks observe cancellation before dropping pending approvals, or an
         // in-flight approval wait can surface as a model-visible rejection before TurnAborted.
         self.input_queue.clear_pending(&active_turn).await;
+
+        // The abort marker above was recorded while this turn still counted as active. Clear the
+        // flag now, before pending work can start a fresh turn, so the new turn owns the barrier
+        // state instead of being silently disabled by a late clear.
+        self.turn_active
+            .store(false, std::sync::atomic::Ordering::Release);
 
         if reason == TurnAbortReason::Interrupted {
             self.maybe_start_turn_for_pending_work().await;
@@ -887,6 +898,8 @@ impl Session {
                 && Arc::ptr_eq(&active_turn.turn_state, &turn_state)
             {
                 *active = None;
+                self.turn_active
+                    .store(false, std::sync::atomic::Ordering::Release);
                 true
             } else {
                 false
@@ -986,6 +999,13 @@ impl Session {
 
         session_task
             .abort(Arc::clone(self), Arc::clone(&task.turn_context))
+            .await;
+
+        // The aborted turn may have died mid-drain with tool calls still open. Close them with
+        // synthetic results before recording user-visible context so the tool-pair ordering
+        // invariant holds in the rollout and in the next request.
+        let _ = self
+            .flush_tool_pair_barrier(task.turn_context.as_ref())
             .await;
 
         if reason == TurnAbortReason::Interrupted
