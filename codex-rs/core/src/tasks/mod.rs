@@ -347,6 +347,8 @@ impl Session {
         }
         let turn = active.get_or_insert_with(ActiveTurn::default);
         debug_assert!(turn.task.is_none());
+        self.turn_active
+            .store(true, std::sync::atomic::Ordering::Release);
         let agent_execution_guard = self.services.agent_control.admit_turn(
             turn_context.multi_agent_version,
             &turn_context.session_source,
@@ -583,6 +585,9 @@ impl Session {
             // in-flight approval wait can surface as a model-visible rejection before TurnAborted.
             self.input_queue.clear_pending(&active_turn).await;
         }
+        // Cleared after the abort handler so its marker records under the turn's barrier.
+        self.turn_active
+            .store(false, std::sync::atomic::Ordering::Release);
         if reason == TurnAbortReason::Interrupted && aborted_turn {
             self.maybe_start_turn_for_pending_work().await;
         }
@@ -616,7 +621,11 @@ impl Session {
             return false;
         };
 
+        // The abort marker must be recorded while the turn still counts as active so the
+        // tool-pair write barrier can flush it behind synthesized tool outputs.
         self.finish_turn_abort(active_turn, reason, error).await;
+        self.turn_active
+            .store(false, std::sync::atomic::Ordering::Release);
         true
     }
 
@@ -881,6 +890,8 @@ impl Session {
                 && Arc::ptr_eq(&active_turn.turn_state, &turn_state)
             {
                 *active = None;
+                self.turn_active
+                    .store(false, std::sync::atomic::Ordering::Release);
                 true
             } else {
                 false
@@ -998,6 +1009,13 @@ impl Session {
 
         session_task
             .abort(Arc::clone(self), Arc::clone(&task.turn_context))
+            .await;
+
+        // The aborted turn may have died mid-drain with tool calls still open. Close them with
+        // synthetic results before recording user-visible context so the tool-pair ordering
+        // invariant holds in the rollout and in the next request.
+        let _ = self
+            .flush_tool_pair_barrier(task.turn_context.as_ref())
             .await;
 
         if reason == TurnAbortReason::Interrupted

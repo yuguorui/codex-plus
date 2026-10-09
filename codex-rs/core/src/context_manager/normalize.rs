@@ -7,6 +7,7 @@ use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::InputModality;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use uuid::Uuid;
 
@@ -143,13 +144,185 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
 /// outputs, so the namespace and name format must remain stable across retries
 /// and resumes to preserve prompt-cache reuse. Returning `None` when the source
 /// call has no ID preserves the legacy behavior for older history items.
-fn synthetic_output_id(prefix: &str, item_id: Option<&str>) -> Option<ResponseItemId> {
+pub(crate) fn synthetic_output_id(prefix: &str, item_id: Option<&str>) -> Option<ResponseItemId> {
     let source_id = item_id.filter(|id| !id.is_empty())?;
     let name = format!("{prefix}:{source_id}");
     Some(ResponseItemId::with_suffix(
         prefix,
         Uuid::new_v5(&SYNTHETIC_OUTPUT_ID_NAMESPACE, name.as_bytes()),
     ))
+}
+
+/// Repair histories where a user-context item landed between a call and its recorded output.
+///
+/// Sessions written before the tool-pair write barrier existed (and races it could not cover)
+/// can contain `FunctionCall(call-1), Message(user), FunctionCallOutput(call-1)`. Chat and
+/// Anthropic tool protocols require a result to follow its call immediately, so normalization
+/// relocates already-recorded outputs back to their call's block instead of dropping or
+/// duplicating them:
+/// - an output moves directly after its call block when its call id matches the block,
+/// - a call batch keeps its original call order, and outputs keep their original relative order,
+/// - already-adjacent pairs and the context after them are untouched, so unchanged prompt
+///   prefixes keep their cache hit,
+/// - duplicate outputs for one call id collapse to the first occurrence,
+/// - calls without any output and outputs without any call are left to
+///   `ensure_call_outputs_present` / `remove_orphan_outputs`.
+///
+/// Runs before `ensure_call_outputs_present` so a call whose only output was relocated is not
+/// given a second synthetic result.
+pub(crate) fn reorder_delayed_tool_outputs_after_calls(items: &mut Vec<ResponseItemEnvelope>) {
+    let mut call_index_by_id: HashMap<String, usize> = HashMap::new();
+    for (index, envelope) in items.iter().enumerate() {
+        if let Some(call_id) = tool_call_id(&envelope.item) {
+            call_index_by_id.entry(call_id.to_string()).or_insert(index);
+        }
+    }
+    if call_index_by_id.is_empty() {
+        return;
+    }
+
+    // For each output, the index of the call it matches; `None` when the call is missing
+    // (orphan removal handles those).
+    let mut output_positions: Vec<Option<usize>> = vec![None; items.len()];
+    for (index, envelope) in items.iter().enumerate() {
+        let Some(call_id) = output_call_id(&envelope.item) else {
+            continue;
+        };
+        if let Some(call_index) = call_index_by_id.get(call_id).copied() {
+            output_positions[index] = Some(call_index);
+        }
+    }
+
+    // The end of the contiguous call run that starts at each call index. A parallel batch is
+    // a run of adjacent calls, and every result of the batch belongs after its last call so
+    // the wire keeps call A, call B, output A, output B rather than interleaving results.
+    let mut batch_end: Vec<usize> = vec![0; items.len()];
+    for index in 0..items.len() {
+        if tool_call_id(&items[index].item).is_none() {
+            continue;
+        }
+        let mut end = index;
+        while end + 1 < items.len() && tool_call_id(&items[end + 1].item).is_some() {
+            end += 1;
+        }
+        batch_end[index] = end;
+    }
+
+    // An output must move when it sits before the end of its call batch, or when a non-call
+    // item (leaked user context) sits between its call and the output. Outputs already at the
+    // end of their batch with only call/output neighbors are in wire order.
+    let mut move_target: HashMap<usize, usize> = HashMap::new();
+    for (index, target) in output_positions.iter().enumerate() {
+        let Some(call_index) = *target else {
+            continue;
+        };
+        if index <= call_index {
+            continue;
+        }
+        let end = batch_end
+            .get(call_index)
+            .copied()
+            .filter(|end| *end > call_index)
+            .unwrap_or(call_index);
+        let before_batch_end = index < end;
+        let leaked_context = !(call_index + 1..index).all(|slot| {
+            tool_call_id(&items[slot].item).is_some() || output_positions[slot].is_some()
+        });
+        if before_batch_end || leaked_context {
+            move_target.insert(index, call_index);
+        }
+    }
+
+    // A duplicate output is dropped whether or not its call survives (orphan removal keeps
+    // only one copy, and `ensure_call_outputs_present` counts ids by presence), so track the
+    // first kept occurrence for every output.
+    let mut dropped_positions: HashSet<usize> = HashSet::new();
+    let mut first_seen_outputs: HashMap<String, usize> = HashMap::new();
+    let mut movable: Vec<(usize, usize)> = Vec::new();
+    for (index, envelope) in items.iter().enumerate() {
+        let Some(output_id) = output_call_id(&envelope.item) else {
+            continue;
+        };
+        let output_id = output_id.to_string();
+        if first_seen_outputs.insert(output_id, index).is_some() {
+            dropped_positions.insert(index);
+            continue;
+        }
+        let Some(call_index) = output_positions[index] else {
+            continue;
+        };
+        if move_target.get(&index) == Some(&call_index) {
+            movable.push((index, call_index));
+        }
+    }
+    if movable.is_empty() && dropped_positions.is_empty() {
+        return;
+    }
+
+    // Group every moved output after its batch's last call, keeping original output order.
+    let mut moved_positions: HashSet<usize> = movable.iter().map(|(index, _)| *index).collect();
+    let mut outputs_after_call: HashMap<usize, Vec<ResponseItemEnvelope>> = HashMap::new();
+    for (index, call_index) in &movable {
+        let end = batch_end
+            .get(*call_index)
+            .copied()
+            .filter(|end| *end > *call_index)
+            .unwrap_or(*call_index);
+        outputs_after_call
+            .entry(end)
+            .or_default()
+            .push(items[*index].clone());
+    }
+
+    let original = std::mem::take(items);
+    let mut rebuilt: Vec<ResponseItemEnvelope> = Vec::with_capacity(original.len());
+    for (index, envelope) in original.into_iter().enumerate() {
+        if moved_positions.remove(&index) || dropped_positions.remove(&index) {
+            continue;
+        }
+        let is_call = tool_call_id(&envelope.item).is_some();
+        rebuilt.push(envelope);
+        if is_call && let Some(outputs) = outputs_after_call.remove(&index) {
+            rebuilt.extend(outputs);
+        }
+    }
+    // Defensive: a call block that never matched keeps its outputs at the end rather than
+    // dropping them; orphan removal and output synthesis still run afterwards.
+    for (_, outputs) in outputs_after_call {
+        rebuilt.extend(outputs);
+    }
+    *items = rebuilt;
+}
+
+fn tool_call_id(item: &ResponseItem) -> Option<&str> {
+    match item {
+        ResponseItem::FunctionCall { call_id, .. }
+        | ResponseItem::CustomToolCall { call_id, .. }
+        | ResponseItem::ToolSearchCall {
+            call_id: Some(call_id),
+            ..
+        }
+        | ResponseItem::LocalShellCall {
+            call_id: Some(call_id),
+            ..
+        } => Some(call_id.as_str()),
+        _ => None,
+    }
+}
+
+fn output_call_id(item: &ResponseItem) -> Option<&str> {
+    match item {
+        ResponseItem::FunctionCallOutput {
+            call_id: Some(call_id),
+            ..
+        }
+        | ResponseItem::ToolSearchOutput {
+            call_id: Some(call_id),
+            ..
+        }
+        | ResponseItem::CustomToolCallOutput { call_id, .. } => Some(call_id.as_str()),
+        _ => None,
+    }
 }
 
 pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItemEnvelope>) {

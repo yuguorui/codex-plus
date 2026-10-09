@@ -92,6 +92,8 @@ impl Session {
                 /*error*/ None,
             )
             .await;
+            self.turn_active
+                .store(false, std::sync::atomic::Ordering::Release);
         }
     }
 

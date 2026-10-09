@@ -173,6 +173,10 @@ pub(crate) async fn run_turn(
     if crate::guardian::is_basic_session_source(&turn_context.session_source) {
         crate::guardian::check_pending_guardian_input(&sess, &turn_context).await?;
     }
+    // A previous turn can be aborted without draining its in-flight tools. Close those calls
+    // with synthetic results before this turn records input, so user context admitted during
+    // the interrupted call cannot be stranded behind the tool-pair write barrier.
+    let _ = sess.flush_tool_pair_barrier(&turn_context).await;
     // Record results from hooks that finished after the previous turn before this turn's user prompt.
     drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
 

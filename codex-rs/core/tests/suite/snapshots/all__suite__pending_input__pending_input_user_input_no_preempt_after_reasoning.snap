@@ -17,8 +17,8 @@ Scenario: /responses POST bodies with pending input
 -- request 2 (request; Second request) --
 04:reasoning:summary=thinking:encrypted=true
 05:function_call/shell:{"command":"echo preserved tool call"}
-06:message/assistant:
+06:function_call_output:unsupported call: shell
+07:message/assistant:
     first answer
-07:function_call_output:unsupported call: shell
 08:message/user:
     second prompt
