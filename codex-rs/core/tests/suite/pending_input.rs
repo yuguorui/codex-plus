@@ -2653,3 +2653,123 @@ async fn steered_user_input_waits_when_tool_output_triggers_compact_before_next_
 
     server.shutdown().await;
 }
+
+/// Regression test for the tool-pair write barrier: user context admitted while a tool call
+/// is in flight (here a goal update, which writes history directly) must land *after* the
+/// tool output, never between the call and its result.
+#[tokio::test]
+async fn goal_update_during_in_flight_tool_persists_call_output_before_user_context() {
+    const TOOL_CALL_ID: &str = "held-goal-tool";
+    let first_chunks = vec![
+        chunk(ev_response_created("resp-1")),
+        chunk(ev_function_call(TOOL_CALL_ID, "held_goal_tool", "{}")),
+        chunk(ev_completed("resp-1")),
+    ];
+    let (server, _) =
+        start_streaming_sse_server(vec![first_chunks, response_completed_chunks("resp-2")]).await;
+    let test = test_codex()
+        .with_model("gpt-5.4")
+        .build_with_streaming_server(&server)
+        .await
+        .expect("build Codex test session");
+    let codex = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            dynamic_tools: vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                name: "held_goal_tool".to_string(),
+                description: "A tool held by the test while goal context is recorded.".to_string(),
+                input_schema: json!({"type": "object", "properties": {}}),
+                defer_loading: false,
+            })],
+            ..StartThreadOptions::new(test.config.clone())
+        })
+        .await
+        .expect("start thread with dynamic tool")
+        .thread;
+
+    submit_user_input(&codex, "first prompt").await;
+    let EventMsg::DynamicToolCallRequest(tool_request) = wait_for_event(&codex, |event| {
+        matches!(event, EventMsg::DynamicToolCallRequest(request) if request.call_id == TOOL_CALL_ID)
+    })
+    .await
+    else {
+        unreachable!("predicate guarantees tool request");
+    };
+
+    // Goal updates go straight into model-visible history, unlike steers that wait in the
+    // pending-input queue. This is the writer that used to land between call and output.
+    codex
+        .record_user_goal_update(codex_core::context::UserGoalUpdate::Set {
+            objective: Some("ship the barrier".to_string()),
+            status: None,
+        })
+        .await
+        .expect("record goal update");
+
+    codex
+        .submit(Op::DynamicToolResponse {
+            id: tool_request.call_id,
+            response: DynamicToolResponse {
+                content_items: vec![DynamicToolCallOutputContentItem::InputText {
+                    text: "held tool result".to_string(),
+                }],
+                success: true,
+            },
+        })
+        .await
+        .expect("complete dynamic tool");
+    wait_for_event(&codex, |event| {
+        assert!(!matches!(
+            event,
+            EventMsg::TurnAborted(_) | EventMsg::StreamError(_)
+        ));
+        matches!(event, EventMsg::TurnComplete(completed) if completed.error.is_none())
+    })
+    .await;
+
+    // Inspect the persisted model-visible order on disk, not just the wire request.
+    codex.flush_rollout().await.expect("flush rollout");
+    let rollout_path = codex.rollout_path().expect("local rollout path");
+    let (items, _, parse_errors) =
+        codex_rollout::RolloutRecorder::load_rollout_items(&rollout_path)
+            .await
+            .expect("load rollout items");
+    assert_eq!(parse_errors, 0);
+    let shape = items
+        .into_iter()
+        .filter_map(|item| match item {
+            codex_rollout::RolloutItem::ResponseItem(envelope) => {
+                let item = serde_json::to_value(&envelope.item).expect("serialize item");
+                let call_id = item["call_id"].as_str();
+                match item["type"].as_str() {
+                    Some("function_call") if call_id == Some(TOOL_CALL_ID) => {
+                        Some(format!("call:{TOOL_CALL_ID}"))
+                    }
+                    Some("function_call_output") if call_id == Some(TOOL_CALL_ID) => {
+                        Some(format!("out:{TOOL_CALL_ID}"))
+                    }
+                    Some("message") if item["role"] == "user" => {
+                        let text = item["content"][0]["text"].as_str().unwrap_or_default();
+                        text.contains("User set the goal")
+                            .then(|| "goal".to_string())
+                    }
+                    Some("function_call") | Some("function_call_output") => None,
+                    Some(_) => None,
+                    None => None,
+                }
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        shape,
+        vec![
+            format!("call:{TOOL_CALL_ID}"),
+            format!("out:{TOOL_CALL_ID}"),
+            "goal".to_string(),
+        ],
+        "the tool output must be persisted directly after its call and before the goal update"
+    );
+
+    server.shutdown().await;
+}

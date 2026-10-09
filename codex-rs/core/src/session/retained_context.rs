@@ -18,6 +18,7 @@ use codex_history::RetainedContextEvent;
 use codex_history::RetainedUserMessage;
 use codex_history::RolloutItem;
 use codex_protocol::models::ResponseItem;
+use codex_rollout::should_persist_response_item;
 use codex_thread_store::PersistContext;
 use tokio::sync::Semaphore;
 use tokio::sync::watch;
@@ -94,33 +95,47 @@ impl Session {
         let mut item = ContextualUserFragment::into(update);
         Self::stamp_response_item_for_history(&mut item, &context.sub_id);
         Self::assign_missing_response_item_id(&mut item);
-        let mut item = ResponseItemEnvelope {
+        let item = ResponseItemEnvelope {
             item,
             metadata: Some(CodexHarnessMetadata {
                 user_input_order: Some(user_input_order),
                 ..Default::default()
             }),
         };
+        // A live tool call can still be in flight; the tool-pair write barrier queues model-
+        // visible goal context until its output lands so the protocol pairing stays valid.
+        let outcome = self
+            .record_prepared_items_through_barrier(
+                &context,
+                std::slice::from_ref(&item),
+                context.model_info().truncation_policy.into(),
+            )
+            .await;
+        let recorded = outcome.sealed;
         if let Some(live_thread) = self.live_thread() {
             // Capture settings under the same permit as the instruction, including when a
             // goal creates the rollout. No fallible settings catch-up runs after publication.
+            let mut items = vec![RolloutItem::EventMsg(
+                thread_settings::applied_event(self).await,
+            )];
+            items.extend(
+                recorded
+                    .iter()
+                    .filter(|envelope| should_persist_response_item(&envelope.item))
+                    .cloned()
+                    .map(RolloutItem::ResponseItem),
+            );
             live_thread
-                .append_items(&[
-                    RolloutItem::EventMsg(thread_settings::applied_event(self).await),
-                    RolloutItem::ResponseItem(item.clone()),
-                ])
+                .append_items(&items)
                 .await
                 .map_err(std::io::Error::other)?;
         }
         // A failed append or checkpoint must not change live authorization or its revision.
         self.try_ensure_rollout_materialized(PersistContext::ThreadPreparation)
             .await?;
-        self.state.lock().await.history.record_annotated_items(
-            std::slice::from_mut(&mut item),
-            context.model_info().truncation_policy.into(),
-        );
-        self.send_raw_response_items(&context, std::slice::from_ref(&item.item))
-            .await;
+        let observed: Vec<ResponseItem> =
+            recorded.into_iter().map(|envelope| envelope.item).collect();
+        self.send_raw_response_items(&context, &observed).await;
         Ok(())
     }
 
