@@ -3642,52 +3642,10 @@ impl Session {
                 }
                 Some(revision)
             });
-        let response_items = items
-            .iter()
-            .map(|envelope| envelope.item.clone())
-            .collect::<Vec<_>>();
-        {
-            let mut state = self.state.lock().await;
-            state
-                .current_time_reminder
-                .note_recorded_items(&response_items);
-            let pending_orders = turn_context
-                .extension_data
-                .get::<retained_context::PendingAssistantMessageOrders>();
-            for envelope in &mut items {
-                if envelope
-                    .metadata
-                    .as_ref()
-                    .is_some_and(|metadata| metadata.compaction_output)
-                {
-                    continue;
-                }
-                if matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "assistant")
-                    || matches!(&envelope.item, ResponseItem::FunctionCall { .. })
-                    || crate::context::is_user_authorization_message(&envelope.item)
-                {
-                    let message_order = pending_orders.as_ref().and_then(|orders| {
-                        orders
-                            .0
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .remove(envelope.item.id()?.as_str())
-                    });
-                    // Preserve input acceptance and source-message start order.
-                    // Synthetic messages still receive their order here.
-                    envelope
-                        .metadata
-                        .get_or_insert_default()
-                        .user_input_order
-                        .get_or_insert_with(|| {
-                            message_order.unwrap_or_else(|| state.history.reserve_input_order())
-                        });
-                }
-            }
-            state
-                .history
-                .record_annotated_items(&mut items, model_info.truncation_policy.into());
-        }
+        let sealed_items = self
+            .record_prepared_items_through_barrier(turn_context, &items, policy)
+            .await
+            .sealed;
         for image in image_preparations {
             self.services
                 .analytics_events_client
@@ -3696,24 +3654,173 @@ impl Session {
                     metadata: image,
                 });
         }
-        let rollout_items: Vec<RolloutItem> =
-            items.into_iter().map(RolloutItem::ResponseItem).collect();
-        if self.persist_rollout_items(&rollout_items).await
+        // Only recorded items reach the rollout; items the barrier queued persist when a later
+        // call closes the barrier and flushes them.
+        let rollout_items: Vec<RolloutItem> = sealed_items
+            .iter()
+            .cloned()
+            .map(RolloutItem::ResponseItem)
+            .collect();
+        // A fully deferred batch persists nothing, so its attribution checkpoint is not durable
+        // yet; keep it dirty and let the batch that actually writes it mark the revision.
+        if !rollout_items.is_empty()
+            && self.persist_rollout_items(&rollout_items).await
             && let Some(revision) = mcp_revision
         {
             self.services
                 .executed_tool_calls
                 .mark_mcp_attribution_persisted(revision);
         }
+        let recorded_response_items = sealed_items
+            .iter()
+            .filter(|envelope| should_persist_response_item(&envelope.item))
+            .map(|envelope| envelope.item.clone())
+            .collect::<Vec<_>>();
         if turn_context.config.memories.disable_on_external_context
-            && let Some(item) = response_items
+            && let Some(item) = recorded_response_items
                 .iter()
                 .find(|item| matches!(item, ResponseItem::FunctionCallOutput { call_id: None, .. }))
         {
             mark_thread_memory_mode_polluted_if_external_context(self, turn_context, item).await;
         }
+        self.send_raw_response_items(turn_context, &recorded_response_items)
+            .await;
+    }
+
+    /// Records prepared items through the tool-pair write barrier and returns what was recorded.
+    ///
+    /// Returns `(everything recorded, including already-deferred items that this batch
+    /// flushed)`. Callers persist the first list and surface the second to observers.
+    async fn record_prepared_items_through_barrier(
+        &self,
+        turn_context: &TurnContext,
+        items: &[ResponseItemEnvelope],
+        policy: codex_utils_output_truncation::TruncationPolicy,
+    ) -> crate::context_manager::BarrierAwareRecordOutcome {
+        let mut slots: Vec<Option<ResponseItemEnvelope>> =
+            items.iter().cloned().map(Some).collect();
+        // The barrier is turn state: it only holds user context that arrives while a turn's
+        // tool calls are in flight. Out-of-turn writes (resume replay, standalone injections,
+        // tests that drive the record APIs directly) keep their natural order.
+        let turn_active = self.turn_active.load(std::sync::atomic::Ordering::Acquire);
+        if !turn_active {
+            let mut state = self.state.lock().await;
+            let mut recorded = Vec::new();
+            for slot in slots.iter_mut().flatten() {
+                state
+                    .current_time_reminder
+                    .note_recorded_items(std::slice::from_ref(&slot.item));
+                self.assign_user_input_order_locked(turn_context, &mut state, slot);
+                state
+                    .history
+                    .record_annotated_items(std::slice::from_mut(slot), policy);
+                recorded.push(slot.clone());
+            }
+            return crate::context_manager::BarrierAwareRecordOutcome {
+                sealed: recorded,
+                flushed: Vec::new(),
+            };
+        }
+        let mut state = self.state.lock().await;
+        {
+            for envelope in slots.iter_mut().flatten() {
+                self.assign_user_input_order_locked(turn_context, &mut state, envelope);
+            }
+        }
+        let outcome = state
+            .history
+            .record_annotated_items_with_barrier(&mut slots, policy);
+        // Only items that reached the model window count as recorded for reminder dedup;
+        // deferred items are noted when their flush records them.
+        let recorded_response_items: Vec<ResponseItem> = outcome
+            .sealed
+            .iter()
+            .map(|envelope| envelope.item.clone())
+            .collect();
+        state
+            .current_time_reminder
+            .note_recorded_items(&recorded_response_items);
+        outcome
+    }
+
+    /// Stamps `user_input_order` on assistant messages, tool calls and user authorization
+    /// messages so resume keeps acceptance order. Shared by the barrier and passthrough paths.
+    fn assign_user_input_order_locked(
+        &self,
+        turn_context: &TurnContext,
+        state: &mut crate::state::SessionState,
+        envelope: &mut ResponseItemEnvelope,
+    ) {
+        if envelope
+            .metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.compaction_output)
+        {
+            return;
+        }
+        if !(matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "assistant")
+            || matches!(&envelope.item, ResponseItem::FunctionCall { .. })
+            || crate::context::is_user_authorization_message(&envelope.item))
+        {
+            return;
+        }
+        let pending_orders = turn_context
+            .extension_data
+            .get::<retained_context::PendingAssistantMessageOrders>();
+        let message_order = pending_orders.as_ref().and_then(|orders| {
+            orders
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(envelope.item.id()?.as_str())
+        });
+        // Preserve input acceptance and source-message start order.
+        // Synthetic messages still receive their order here.
+        envelope
+            .metadata
+            .get_or_insert_default()
+            .user_input_order
+            .get_or_insert_with(|| {
+                message_order.unwrap_or_else(|| state.history.reserve_input_order())
+            });
+    }
+
+    /// Closes abandoned tool calls and flushes deferred context, persisting the result.
+    ///
+    /// Called at boundaries that tool outputs cannot cross (start of a turn, interrupt
+    /// handling) so user context admitted during a stuck or aborted tool call is never lost.
+    /// Returns the number of recorded items, or zero when nothing was pending.
+    pub(super) async fn flush_tool_pair_barrier(&self, turn_context: &TurnContext) -> u64 {
+        let policy: codex_utils_output_truncation::TruncationPolicy =
+            turn_context.model_info().truncation_policy.into();
+        let flushed = {
+            let mut state = self.state.lock().await;
+            if !state.history.has_open_tool_calls() && !state.history.has_deferred_user_context() {
+                return 0;
+            }
+            let flushed = state.history.flush_tool_pair_barrier(policy).recorded;
+            let items: Vec<ResponseItem> = flushed
+                .iter()
+                .map(|envelope| envelope.item.clone())
+                .collect();
+            state.current_time_reminder.note_recorded_items(&items);
+            flushed
+        };
+        let rollout_items: Vec<RolloutItem> = flushed
+            .iter()
+            .filter(|envelope| should_persist_response_item(&envelope.item))
+            .cloned()
+            .map(RolloutItem::ResponseItem)
+            .collect();
+        self.persist_rollout_items(&rollout_items).await;
+        let response_items: Vec<ResponseItem> = flushed
+            .iter()
+            .filter(|envelope| should_persist_response_item(&envelope.item))
+            .map(|envelope| envelope.item.clone())
+            .collect();
         self.send_raw_response_items(turn_context, &response_items)
             .await;
+        response_items.len() as u64
     }
 
     pub(crate) async fn record_step_world_state_if_changed(
@@ -4032,23 +4139,45 @@ impl Session {
         for mut recording in pending {
             let _ = recording.changed().await;
         }
-        {
-            let mut state = self.state.lock().await;
-            state.current_time_reminder.note_recorded_items(items);
-            state.history.record_annotated_items(
-                std::slice::from_mut(&mut response_item),
+        let outcome = self
+            .record_prepared_items_through_barrier(
+                turn_context,
+                std::slice::from_ref(&response_item),
                 model_info.truncation_policy.into(),
-            );
+            )
+            .await;
+        // Items the barrier released were admitted before this message, so they must stay
+        // physically earlier in the rollout than the communication boundary they precede.
+        // A single-message batch can only flush from its prefix, never from the middle.
+        let (flushed_items, sealed_items) = outcome.sealed.split_at(outcome.flushed.len());
+        if !flushed_items.is_empty() {
+            let flushed_rollout: Vec<RolloutItem> = flushed_items
+                .iter()
+                .filter(|envelope| should_persist_response_item(&envelope.item))
+                .cloned()
+                .map(RolloutItem::ResponseItem)
+                .collect();
+            self.persist_rollout_items(&flushed_rollout).await;
         }
-        self.persist_rollout_items(&[
-            RolloutItem::InterAgentCommunicationMetadata {
-                trigger_turn: communication.trigger_turn,
-            },
-            RolloutItem::ResponseItem(response_item),
-        ])
-        .await;
+        let mut rollout_items = vec![RolloutItem::InterAgentCommunicationMetadata {
+            trigger_turn: communication.trigger_turn,
+        }];
+        rollout_items.extend(
+            sealed_items
+                .iter()
+                .filter(|envelope| should_persist_response_item(&envelope.item))
+                .cloned()
+                .map(RolloutItem::ResponseItem),
+        );
+        self.persist_rollout_items(&rollout_items).await;
         drop(boundary);
-        self.send_raw_response_items(turn_context, items).await;
+        let sealed_response_items: Vec<ResponseItem> = flushed_items
+            .iter()
+            .chain(sealed_items)
+            .map(|envelope| envelope.item.clone())
+            .collect();
+        self.send_raw_response_items(turn_context, &sealed_response_items)
+            .await;
     }
 
     async fn maybe_warn_on_server_model_mismatch(

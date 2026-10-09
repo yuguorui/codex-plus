@@ -51,6 +51,7 @@ use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
@@ -70,6 +71,7 @@ use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
 use codex_utils_output_truncation::truncate_function_output_payload;
 use codex_utils_output_truncation::with_serialization_allowance;
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -124,6 +126,107 @@ pub(crate) struct ContextManager {
     /// World-state comparison checkpoint. After compaction this may contain only
     /// extension metadata, with model-visible context still awaiting reinjection.
     world_state_baseline: Option<WorldStateSnapshot>,
+    /// Call ids whose call item is recorded but whose output has not been recorded yet.
+    ///
+    /// Tool protocols require the result to land directly after its call. While a call is
+    /// open, model-visible user context (steers, goal updates, workflow notifications,
+    /// interrupt markers) is queued in `deferred_user_context` instead of being appended
+    /// between the call and its output.
+    open_tool_calls: Vec<String>,
+    /// Model-visible user context ordered at admission but held back until the write barrier
+    /// drains. Flushed in FIFO order by the output that closes the last open call.
+    deferred_user_context: Vec<DeferredUserContext>,
+    /// Calls closed by a force-flush with a synthetic "aborted" output. A late real output
+    /// for one of these must be dropped rather than duplicated after the synthetic result.
+    synthesized_tool_calls: HashSet<String>,
+}
+
+/// One model-visible user-context item held back by the tool-pair write barrier.
+///
+/// Both the recorded representation and the truncation policy travel with the entry because
+/// nothing is appended to the model window until the barrier drains.
+#[derive(Debug, Clone)]
+struct DeferredUserContext {
+    envelope: ResponseItemEnvelope,
+    policy: TruncationPolicy,
+}
+
+/// Result of recording a batch through the tool-pair write barrier.
+pub(crate) struct BarrierAwareRecordOutcome {
+    /// Items actually appended to the model window, in append order.
+    pub(crate) sealed: Vec<ResponseItemEnvelope>,
+    /// Items this batch released from the barrier, in append order. They are also part of
+    /// `sealed`; the separate list lets callers order them relative to a boundary marker
+    /// without persisting them twice.
+    pub(crate) flushed: Vec<ResponseItemEnvelope>,
+}
+
+/// Items flushed by a force-flush, including synthetic outputs for abandoned calls.
+pub(crate) struct ToolPairBarrierFlush {
+    /// Items recorded by the flush, in append order.
+    pub(crate) recorded: Vec<ResponseItemEnvelope>,
+}
+
+/// Whether `item` is model-visible user context rather than assistant output or a tool result.
+///
+/// The barrier only holds items that are illegal between an open call and its output: user
+/// turns (`Message` role `user`) and inter-agent mail (`AgentMessage`). Contextual fragments
+/// also render as `Message` role `user`, but they are only emitted at turn boundaries, so
+/// treating them uniformly keeps the invariant simple. Developer/system context stays
+/// unguarded so environment updates can never be starved by a pending call.
+fn is_barrier_gated_user_context(item: &ResponseItem) -> bool {
+    match item {
+        ResponseItem::Message { role, .. } => role == "user",
+        ResponseItem::AgentMessage { .. } => true,
+        _ => false,
+    }
+}
+
+/// Extracts the call id of a tool call or tool output for barrier bookkeeping.
+fn tool_pair_call_id(item: &ResponseItem) -> Option<&str> {
+    match item {
+        ResponseItem::FunctionCall { call_id, .. }
+        | ResponseItem::CustomToolCall { call_id, .. }
+        | ResponseItem::ToolSearchCall {
+            call_id: Some(call_id),
+            ..
+        }
+        | ResponseItem::LocalShellCall {
+            call_id: Some(call_id),
+            ..
+        } => Some(call_id.as_str()),
+        ResponseItem::FunctionCallOutput {
+            call_id: Some(call_id),
+            ..
+        }
+        | ResponseItem::ToolSearchOutput {
+            call_id: Some(call_id),
+            ..
+        }
+        | ResponseItem::CustomToolCallOutput { call_id, .. } => Some(call_id.as_str()),
+        _ => None,
+    }
+}
+
+/// Whether `item` is a tool call that opens a barrier slot.
+fn is_tool_call_item(item: &ResponseItem) -> bool {
+    matches!(
+        item,
+        ResponseItem::FunctionCall { .. }
+            | ResponseItem::CustomToolCall { .. }
+            | ResponseItem::ToolSearchCall { .. }
+            | ResponseItem::LocalShellCall { .. }
+    )
+}
+
+/// Whether `item` is a tool result that closes a barrier slot.
+fn is_tool_output_item(item: &ResponseItem) -> bool {
+    matches!(
+        item,
+        ResponseItem::FunctionCallOutput { .. }
+            | ResponseItem::ToolSearchOutput { .. }
+            | ResponseItem::CustomToolCallOutput { .. }
+    )
 }
 
 struct SharedConversationHistory {
@@ -249,6 +352,9 @@ impl ContextManager {
             ),
             reference_context_item: None,
             world_state_baseline: None,
+            open_tool_calls: Vec::new(),
+            deferred_user_context: Vec::new(),
+            synthesized_tool_calls: HashSet::new(),
         }
     }
 
@@ -528,6 +634,242 @@ impl ContextManager {
         }
     }
 
+    /// Records a call/output/user-context batch through the tool-pair write barrier.
+    ///
+    /// Policy: a tool call is appended as soon as it exists (tools may have side effects, so
+    /// the call must be crash-recoverable), its output is appended when the tool settles, and
+    /// any model-visible user context admitted while a call is open waits in
+    /// `deferred_user_context`. Once the batch records the output that closes the last open
+    /// call, the deferred queue is flushed directly after it.
+    ///
+    /// On return, a `None` entry in `items` means the barrier queued that item instead of
+    /// recording it. The outcome lists what was appended so callers persist exactly the rollout
+    /// they observed.
+    pub(crate) fn record_annotated_items_with_barrier(
+        &mut self,
+        items: &mut [Option<ResponseItemEnvelope>],
+        policy: TruncationPolicy,
+    ) -> BarrierAwareRecordOutcome {
+        let mut sealed = Vec::new();
+        let mut deferred_now = Vec::new();
+        let mut flushed = Vec::new();
+        // Nothing is open, so context an earlier batch queued is immediately releasable. Record
+        // it before this batch so a later-admitted item cannot precede an earlier-admitted one.
+        if self.open_tool_calls.is_empty() && !self.deferred_user_context.is_empty() {
+            for entry in std::mem::take(&mut self.deferred_user_context) {
+                let mut envelope = entry.envelope;
+                self.record_barrier_item(&mut envelope, entry.policy);
+                sealed.push(envelope.clone());
+                flushed.push(envelope);
+            }
+        }
+        for slot in items.iter_mut() {
+            let Some(envelope) = slot.as_mut() else {
+                continue;
+            };
+            // An output for a call already closed by a synthetic result is a late duplicate.
+            // Dropping it keeps the window free of repeated call ids.
+            if is_tool_output_item(&envelope.item)
+                && let Some(call_id) = tool_pair_call_id(&envelope.item)
+                && self.synthesized_tool_calls.contains(call_id)
+            {
+                // Expected when an aborted tool settles after its call was closed with a
+                // synthetic result; keep only the first result so the wire stays valid.
+                tracing::info!(
+                    "dropping late tool output for call id already closed by a synthetic result: {call_id}"
+                );
+                slot.take();
+                continue;
+            }
+
+            if is_barrier_gated_user_context(&envelope.item) && !self.open_tool_calls.is_empty() {
+                deferred_now.push(DeferredUserContext {
+                    envelope: envelope.clone(),
+                    policy,
+                });
+                slot.take();
+                continue;
+            }
+
+            self.record_barrier_item(envelope, policy);
+            sealed.push(envelope.clone());
+
+            if let Some(call_id) = tool_pair_call_id(&envelope.item) {
+                if is_tool_call_item(&envelope.item) {
+                    self.open_tool_calls.push(call_id.to_string());
+                } else if is_tool_output_item(&envelope.item) {
+                    if call_id.is_empty() {
+                        // Answers recorded for a tool request that was never dispatched
+                        // (`RespondToModel`) carry no call id; they close the oldest open call.
+                        if !self.open_tool_calls.is_empty() {
+                            self.open_tool_calls.remove(0);
+                        }
+                    } else if let Some(position) =
+                        self.open_tool_calls.iter().position(|open| open == call_id)
+                    {
+                        self.open_tool_calls.remove(position);
+                    }
+                    if self.open_tool_calls.is_empty() && !self.deferred_user_context.is_empty() {
+                        // Flush immediately so context admitted earlier cannot be recorded
+                        // after context admitted later in the same batch.
+                        for entry in std::mem::take(&mut self.deferred_user_context) {
+                            let mut envelope = entry.envelope;
+                            self.record_barrier_item(&mut envelope, entry.policy);
+                            sealed.push(envelope.clone());
+                            flushed.push(envelope);
+                        }
+                    }
+                }
+            }
+        }
+
+        self.deferred_user_context.append(&mut deferred_now);
+        if self.open_tool_calls.is_empty() && !self.deferred_user_context.is_empty() {
+            let entries = std::mem::take(&mut self.deferred_user_context);
+            for entry in entries {
+                let mut envelope = entry.envelope;
+                self.record_barrier_item(&mut envelope, entry.policy);
+                sealed.push(envelope.clone());
+                flushed.push(envelope);
+            }
+        }
+
+        BarrierAwareRecordOutcome { sealed, flushed }
+    }
+
+    /// Appends one item to the model window, preserving captured provenance metadata.
+    fn record_barrier_item(
+        &mut self,
+        envelope: &mut ResponseItemEnvelope,
+        policy: TruncationPolicy,
+    ) {
+        if let Some(source) =
+            self.record_item_with_metadata(&envelope.item, envelope.metadata.as_ref(), policy)
+        {
+            envelope.metadata.get_or_insert_default().retained_source = Some(source);
+        }
+    }
+
+    /// Whether the barrier still holds user context that no recorded call blocks.
+    pub(crate) fn has_deferred_user_context(&self) -> bool {
+        !self.deferred_user_context.is_empty()
+    }
+
+    /// Whether the tool-pair write barrier currently holds open calls.
+    pub(crate) fn has_open_tool_calls(&self) -> bool {
+        !self.open_tool_calls.is_empty()
+    }
+
+    /// Closes every open call with a synthetic `aborted` output and flushes deferred context.
+    ///
+    /// Used at boundaries that cannot be crossed by a tool output (turn start after an aborted
+    /// turn, interrupt handling). Without this the barrier could hold user context forever.
+    /// Returns the recorded items in append order so callers can persist and observe them.
+    pub(crate) fn flush_tool_pair_barrier(
+        &mut self,
+        policy: TruncationPolicy,
+    ) -> ToolPairBarrierFlush {
+        let mut recorded = Vec::new();
+        // A new boundary starts: ids synthesized by an earlier boundary can no longer see a
+        // late real output (their futures were dropped with their turn), so recycle the set.
+        self.synthesized_tool_calls.clear();
+        let open: Vec<String> = self.open_tool_calls.drain(..).collect();
+        for call_id in open {
+            let synthetic = self.synthetic_output_for_call(&call_id);
+            self.synthesized_tool_calls.insert(call_id);
+            if let Some(mut envelope) = synthetic {
+                // Use the session policy: a zero-token policy would let the recorder replace
+                // the abort text with a truncation marker in the recorded copy.
+                self.record_barrier_item(&mut envelope, policy);
+                recorded.push(envelope);
+            }
+        }
+        let entries = std::mem::take(&mut self.deferred_user_context);
+        for entry in entries {
+            let mut envelope = entry.envelope;
+            self.record_barrier_item(&mut envelope, entry.policy);
+            recorded.push(envelope);
+        }
+        ToolPairBarrierFlush { recorded }
+    }
+
+    /// Builds the `aborted` output used to close a call abandoned without a tool result.
+    ///
+    /// Mirrors `normalize::ensure_call_outputs_present`: the synthetic id derives from the
+    /// source call so prompt caches stay stable, and the payload is the canonical abort text.
+    fn synthetic_output_for_call(&self, call_id: &str) -> Option<ResponseItemEnvelope> {
+        let mut output = None;
+        for envelope in self.items.iter() {
+            match &envelope.item {
+                ResponseItem::FunctionCall {
+                    id,
+                    call_id: existing,
+                    ..
+                } if existing == call_id => {
+                    output = Some(ResponseItem::FunctionCallOutput {
+                        id: normalize::synthetic_output_id("fco", id.as_deref()),
+                        call_id: Some(call_id.to_string()),
+                        name: None,
+                        namespace: None,
+                        output: FunctionCallOutputPayload::from_text("aborted".to_string()),
+                        internal_chat_message_metadata_passthrough: None,
+                    });
+                    break;
+                }
+                ResponseItem::LocalShellCall {
+                    id: Some(_),
+                    call_id: Some(existing),
+                    ..
+                } if existing == call_id => {
+                    let id = match &envelope.item {
+                        ResponseItem::LocalShellCall { id, .. } => id.clone(),
+                        _ => unreachable!(),
+                    };
+                    output = Some(ResponseItem::FunctionCallOutput {
+                        id: normalize::synthetic_output_id("fco", id.as_deref()),
+                        call_id: Some(call_id.to_string()),
+                        name: None,
+                        namespace: None,
+                        output: FunctionCallOutputPayload::from_text("aborted".to_string()),
+                        internal_chat_message_metadata_passthrough: None,
+                    });
+                    break;
+                }
+                ResponseItem::ToolSearchCall {
+                    id,
+                    call_id: Some(existing),
+                    ..
+                } if existing == call_id => {
+                    output = Some(ResponseItem::ToolSearchOutput {
+                        id: normalize::synthetic_output_id("tso", id.as_deref()),
+                        call_id: Some(call_id.to_string()),
+                        status: "completed".to_string(),
+                        execution: "client".to_string(),
+                        tools: Vec::new(),
+                        internal_chat_message_metadata_passthrough: None,
+                    });
+                    break;
+                }
+                ResponseItem::CustomToolCall {
+                    id,
+                    call_id: existing,
+                    ..
+                } if existing == call_id => {
+                    output = Some(ResponseItem::CustomToolCallOutput {
+                        id: normalize::synthetic_output_id("ctco", id.as_deref()),
+                        call_id: call_id.to_string(),
+                        name: None,
+                        output: FunctionCallOutputPayload::from_text("aborted".to_string()),
+                        internal_chat_message_metadata_passthrough: None,
+                    });
+                    break;
+                }
+                _ => {}
+            }
+        }
+        output.map(ResponseItemEnvelope::new)
+    }
+
     /// Replays persisted originals without assigning new identities to known versions.
     pub(crate) fn replay_annotated_item(
         &mut self,
@@ -711,6 +1053,16 @@ impl ContextManager {
         self.history_version = self.history_version.saturating_add(1);
         self.reset_version = self.history_version;
         self.world_state_baseline = None;
+        // The replaced window no longer contains the calls the barrier tracked. Deferred user
+        // context is kept: it is accepted input that still needs to reach the model, and it
+        // flushes on the next opportunity now that no call is open.
+        self.clear_open_tool_calls();
+    }
+
+    /// Drops call bookkeeping that can no longer match the model window.
+    fn clear_open_tool_calls(&mut self) {
+        self.open_tool_calls.clear();
+        self.synthesized_tool_calls.clear();
     }
 
     /// Returns whether compaction changed Guardian's evidence policy, invalidating older reviews.
@@ -751,6 +1103,7 @@ impl ContextManager {
             self.reset_version = self.history_version;
         }
         self.world_state_baseline = None;
+        self.clear_open_tool_calls();
         promoted
     }
 
@@ -963,6 +1316,10 @@ impl ContextManager {
     /// 3. unsupported image and audio content is stripped from messages and tool outputs
     fn normalize_history(&mut self, input_modalities: &[InputModality]) {
         let items = Arc::make_mut(&mut self.items);
+
+        // Tool protocols require each recorded output to follow its call before any other
+        // content; move outputs that older sessions left behind a user-context item.
+        normalize::reorder_delayed_tool_outputs_after_calls(items);
 
         // all function/tool calls must have a corresponding output
         normalize::ensure_call_outputs_present(items);

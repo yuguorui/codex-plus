@@ -90,6 +90,10 @@ pub(crate) struct Session {
     pub(crate) conversation: Arc<RealtimeConversationManager>,
     pub(crate) realtime_history: Option<Mutex<crate::realtime_history::RealtimeHistoryState>>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
+    /// Lock-free view of `active_turn.is_some()` for record paths that must not acquire the
+    /// turn mutex (callers such as identified injection already hold it while recording).
+    /// The tool-pair write barrier only engages while a turn is active.
+    pub(crate) turn_active: AtomicBool,
     pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
     pub(crate) input_queue: InputQueue,
     pub(crate) services: SessionServices,
@@ -1834,6 +1838,7 @@ impl Session {
                     && services.live_thread.is_some())
                 .then(|| Mutex::new(Default::default())),
                 active_turn: Mutex::new(None),
+                turn_active: AtomicBool::new(false),
                 async_hook_results,
                 input_queue: InputQueue::with_controller(
                     thread_id,
