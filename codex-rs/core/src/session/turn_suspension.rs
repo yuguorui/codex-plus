@@ -97,6 +97,18 @@ pub(super) async fn suspend_turn_and_shutdown(
     // intentionally drops that state; persisting or replaying it needs a separate protocol.
     session.input_queue.clear_pending(&turn).await;
 
+    // The suspended task may have stopped mid-drain with tool calls still open. Close them and
+    // flush deferred user context before the final writer flush, so context the client was
+    // already told was accepted lands in the rollout instead of being lost with the handoff.
+    let _ = session
+        .flush_tool_pair_barrier(task.turn_context.as_ref())
+        .await;
+    // The turn no longer owns barrier state; a recovery worker must not inherit a stale flag.
+    // Clear it only after the flush so records racing the teardown still take the barrier path.
+    session
+        .turn_active
+        .store(false, std::sync::atomic::Ordering::Release);
+
     // Stop all producers before flushing their final history and closing its writer.
     // If either persistence step fails, do not report success: the current worker
     // retains ownership until worker-failure recovery can take responsibility.
