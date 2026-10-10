@@ -2032,10 +2032,14 @@ async fn run_sampling_request(
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<String>)> {
     let turn_context = Arc::clone(&step_context.turn);
-    let preempt = step_context.preempt.clone().unwrap_or_default();
-    let _input_watch = if let Some(preempt) = &step_context.preempt {
+    let input_preempt = step_context.preempt.clone().unwrap_or_default();
+    let _input_watch = if let Some(input_preempt) = &step_context.preempt {
         sess.input_queue
-            .watch_user_input(&sess.active_turn, &turn_context.sub_id, preempt.clone())
+            .watch_user_input(
+                &sess.active_turn,
+                &turn_context.sub_id,
+                input_preempt.clone(),
+            )
             .await
     } else {
         None
@@ -2232,7 +2236,7 @@ async fn run_sampling_request(
             &step_context,
             ResponsesStreamRequest::Sampling,
         )
-        .or_cancel(&preempt)
+        .or_cancel(&input_preempt)
         .or_cancel(&cancellation_token)
         .await?;
         if cancellation_token.is_cancelled() {
@@ -2240,7 +2244,7 @@ async fn run_sampling_request(
         }
         // Recover typed errors (including filter guidance) before handing queued mail back
         // to the turn loop. Terminal errors and exhausted retries must still propagate.
-        if preempt.is_cancelled() || (draining_for_mailbox && matches!(retry, Ok(Ok(())))) {
+        if input_preempt.is_cancelled() || (draining_for_mailbox && matches!(retry, Ok(Ok(())))) {
             return Ok((
                 SamplingRequestResult {
                     needs_follow_up: true,
@@ -3102,7 +3106,7 @@ async fn try_run_sampling_request(
         .features
         .enabled(Feature::ConcurrentReasoningSummaries)
         && turn_context.provider.info().is_openai();
-    let mut preempt = step_context.preempt.clone().unwrap_or_default();
+    let input_preempt = step_context.preempt.clone().unwrap_or_default();
     let effort = sess
         .reasoning_effort_for_request(&step_context.settings, super::RequestEffortUsage::Sampling)
         .await;
@@ -3172,12 +3176,18 @@ async fn try_run_sampling_request(
             return Err(error);
         }
     };
+    let supports_native_stream_interrupt =
+        stream.interrupt.is_some() && step_context.settings.model_info.use_responses_lite;
     let can_interrupt = turn_context
         .config
         .features
         .enabled(Feature::InterruptOnCancel)
-        && step_context.settings.model_info.use_responses_lite
-        && stream.interrupt.is_some();
+        && supports_native_stream_interrupt;
+    let mut stream_preempt = if supports_native_stream_interrupt {
+        input_preempt.clone()
+    } else {
+        CancellationToken::new()
+    };
     if cancellation_token.is_cancelled() && !can_interrupt {
         return Err(CodexErr::TurnAborted);
     }
@@ -3249,7 +3259,7 @@ async fn try_run_sampling_request(
         let receive = resampling
             .next(&mut stream)
             .instrument(trace_span!(parent: &handle_responses, "receiving"))
-            .or_cancel(&preempt)
+            .or_cancel(&stream_preempt)
             .or_cancel(&cancellation_token);
         let event = tokio::select! {
             biased;
@@ -3276,7 +3286,7 @@ async fn try_run_sampling_request(
                 if *draining_for_mailbox
                     || (interrupt_at_boundary && tool_cancellation.is_cancelled())
                 {
-                    preempt = CancellationToken::new();
+                    stream_preempt = CancellationToken::new();
                     continue;
                 }
                 if stream.interrupt.is_none() {
@@ -3292,7 +3302,7 @@ async fn try_run_sampling_request(
                     let _ = interrupt.send(codex_api::ResponseInterrupt::Drain);
                 }
                 // A steer cannot start another request before the accounting owner returns its decision.
-                preempt = CancellationToken::new();
+                stream_preempt = CancellationToken::new();
                 needs_follow_up = true;
                 continue;
             }
