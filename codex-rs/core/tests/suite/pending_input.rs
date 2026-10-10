@@ -14,6 +14,7 @@ use codex_extension_items::sleep::SleepItem;
 use codex_features::Feature;
 use codex_history::RolloutItem;
 use codex_login::CodexAuth;
+use codex_model_provider_info::WireApi;
 use codex_protocol::AgentPath;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
@@ -51,8 +52,10 @@ use core_test_support::responses::ev_reasoning_item;
 use core_test_support::responses::ev_reasoning_item_added;
 use core_test_support::responses::ev_response_created;
 use core_test_support::streaming_sse::StreamingSseChunk;
+use core_test_support::streaming_sse::StreamingSseRoutes;
 use core_test_support::streaming_sse::StreamingSseServer;
 use core_test_support::streaming_sse::start_streaming_sse_server;
+use core_test_support::streaming_sse::start_streaming_sse_server_with_routes;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
@@ -1453,6 +1456,7 @@ async fn steers_during_tool_drain_preserve_tool_output_and_each_input() {
         })
         .await
         .expect("complete dynamic tool");
+    let _ = release_response.send(());
     wait_for_event(&codex, |event| {
         assert!(!matches!(
             event,
@@ -1491,8 +1495,6 @@ async fn steers_during_tool_drain_preserve_tool_output_and_each_input() {
         "the direct tool result should be recorded exactly once"
     );
 
-    // The replacement request completed while the original response was still gated.
-    drop(release_response);
     server.shutdown().await;
 }
 
@@ -1965,10 +1967,7 @@ async fn user_input_does_not_preempt_after_reasoning_item() {
         start_streaming_sse_server(vec![first_chunks, response_completed_chunks("resp-2")]).await;
 
     let codex = test_codex()
-        .with_config(|config| {
-            config.update_plan_enabled = true;
-            config.features.disable(Feature::InstantInterrupt).unwrap();
-        })
+        .with_config(|config| config.update_plan_enabled = true)
         .with_model("gpt-5.4")
         .build_with_streaming_server(&server)
         .await
@@ -1980,6 +1979,7 @@ async fn user_input_does_not_preempt_after_reasoning_item() {
     wait_for_reasoning_item_started(&codex).await;
 
     steer_user_input(&codex, "second prompt").await;
+    assert_eq!(server.requests().await.len(), 1);
 
     let _ = gate_reasoning_done_tx.send(());
 
@@ -1988,12 +1988,169 @@ async fn user_input_does_not_preempt_after_reasoning_item() {
     wait_for_turn_complete(&codex).await;
 
     let requests = server.requests().await;
+    assert_eq!(requests.len(), 2);
+    let first: Value = from_slice(&requests[0]).expect("parse first request");
+    let second: Value = from_slice(&requests[1]).expect("parse second request");
+    assert_eq!(
+        message_input_texts(&first, "user")
+            .into_iter()
+            .filter(|text| text == "first prompt" || text == "second prompt")
+            .collect::<Vec<_>>(),
+        vec!["first prompt"]
+    );
+    assert_eq!(
+        message_input_texts(&second, "user")
+            .into_iter()
+            .filter(|text| text == "first prompt" || text == "second prompt")
+            .collect::<Vec<_>>(),
+        vec!["first prompt", "second prompt"]
+    );
     assert_two_responses_input_snapshot(
         "pending_input_user_input_no_preempt_after_reasoning",
         &requests,
     );
 
     server.shutdown().await;
+}
+
+#[test_case(WireApi::Chat; "chat_completions_sse")]
+#[test_case(WireApi::Anthropic; "anthropic_messages_sse")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steer_waits_for_non_native_sse_response_to_complete(wire_api: WireApi) {
+    let (release_first_response_tx, release_first_response_rx) = oneshot::channel();
+
+    let response_for = |wire_api: WireApi, response_id: &str, text: &str| match wire_api {
+        WireApi::Chat => {
+            let event = json!({
+                "id": response_id,
+                "choices": [{
+                    "delta": {"content": text},
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2
+                }
+            });
+            format!("data: {event}\n\ndata: [DONE]\n\n")
+        }
+        WireApi::Anthropic => {
+            let events = vec![
+                json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": response_id,
+                        "usage": {"input_tokens": 1, "output_tokens": 1}
+                    }
+                }),
+                json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""}
+                }),
+                json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": text}
+                }),
+                json!({
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 2}
+                }),
+                json!({"type": "message_stop"}),
+            ];
+            events
+                .into_iter()
+                .map(|event| format!("data: {event}\n\n"))
+                .collect()
+        }
+        WireApi::Responses => unreachable!("Responses is not a non-native interrupt wire API"),
+    };
+
+    let routes = match wire_api {
+        WireApi::Chat => StreamingSseRoutes::CHAT_COMPLETIONS,
+        WireApi::Anthropic => StreamingSseRoutes::ANTHROPIC_MESSAGES,
+        WireApi::Responses => unreachable!("Responses is not a non-native interrupt wire API"),
+    };
+    let (server, _) = start_streaming_sse_server_with_routes(
+        vec![
+            vec![StreamingSseChunk {
+                gate: Some(release_first_response_rx),
+                body: response_for(wire_api, "non-native-1", "first answer"),
+            }],
+            vec![StreamingSseChunk {
+                gate: None,
+                body: response_for(wire_api, "non-native-2", "second answer"),
+            }],
+        ],
+        routes,
+    )
+    .await;
+
+    let test = test_codex()
+        .with_config(move |config| {
+            config.update_plan_enabled = true;
+            config
+                .features
+                .enable(Feature::InstantInterrupt)
+                .expect("enable InstantInterrupt feature");
+            config.model_provider.wire_api = wire_api;
+            config.model_provider.supports_websockets = false;
+        })
+        .with_model("gpt-5.4")
+        .build_with_streaming_server(&server)
+        .await
+        .expect("build streaming Codex test session");
+    let codex = &test.codex;
+
+    submit_user_input(codex, "first prompt").await;
+    server.wait_for_request_count(1).await;
+
+    steer_user_input(codex, "second prompt").await;
+    assert_eq!(server.requests().await.len(), 1);
+
+    let _ = release_first_response_tx.send(());
+    wait_for_agent_message(codex, "first answer").await;
+    wait_for_turn_complete(codex).await;
+
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 2);
+    let first: Value = from_slice(&requests[0]).expect("parse first request");
+    let second: Value = from_slice(&requests[1]).expect("parse second request");
+    let first_user_prompts = request_user_message_texts(&first)
+        .into_iter()
+        .filter(|text| text == "first prompt" || text == "second prompt")
+        .collect::<Vec<_>>();
+    assert_eq!(first_user_prompts, vec!["first prompt"]);
+    let second_user_prompts = request_user_message_texts(&second)
+        .into_iter()
+        .filter(|text| text == "first prompt" || text == "second prompt")
+        .collect::<Vec<_>>();
+    assert_eq!(second_user_prompts, vec!["first prompt", "second prompt"]);
+
+    server.shutdown().await;
+}
+
+fn request_user_message_texts(body: &Value) -> Vec<String> {
+    body["messages"]
+        .as_array()
+        .expect("request should contain messages")
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .filter_map(|message| match &message["content"] {
+            Value::String(text) => Some(vec![text.clone()]),
+            Value::Array(items) => Some(
+                items
+                    .iter()
+                    .filter_map(|item| item["text"].as_str().map(str::to_string))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect()
 }
 
 #[derive(Clone, Copy)]
