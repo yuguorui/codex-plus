@@ -50,15 +50,59 @@ impl StreamingSseServer {
     }
 }
 
+/// Selects the model routes served by a streaming SSE test server.
+#[derive(Clone, Copy)]
+pub struct StreamingSseRoutes {
+    post_paths: &'static [&'static str],
+    responses_paths: &'static [&'static str],
+}
+
+impl StreamingSseRoutes {
+    pub const RESPONSES_AND_GUARDIAN: Self = Self {
+        post_paths: &[
+            "/v1/responses",
+            "/backend-api/codex/responses",
+            "/backend-api/codex/guardian",
+        ],
+        responses_paths: &["/v1/responses", "/backend-api/codex/responses"],
+    };
+
+    pub const CHAT_COMPLETIONS: Self = Self {
+        post_paths: &["/v1/chat/completions"],
+        responses_paths: &[],
+    };
+
+    pub const ANTHROPIC_MESSAGES: Self = Self {
+        post_paths: &["/v1/messages"],
+        responses_paths: &[],
+    };
+
+    fn handles_post(&self, path: &str) -> bool {
+        self.post_paths.contains(&path)
+    }
+
+    fn is_responses(&self, path: &str) -> bool {
+        self.responses_paths.contains(&path)
+    }
+}
+
 /// Starts a lightweight HTTP server that supports:
 /// - GET /v1/models -> empty models response
-/// - GET responses routes -> 426 to select the HTTP fallback
-/// - POST responses and Guardian routes -> SSE stream gated per-chunk, served in order
+/// - GET configured Responses routes -> 426 to select the HTTP fallback
+/// - POST configured routes -> SSE stream gated per-chunk, served in order
 ///
 /// Returns the server handle and a list of receivers that fire when each
 /// response stream finishes sending its final chunk.
 pub async fn start_streaming_sse_server(
     responses: Vec<Vec<StreamingSseChunk>>,
+) -> (StreamingSseServer, Vec<oneshot::Receiver<i64>>) {
+    start_streaming_sse_server_with_routes(responses, StreamingSseRoutes::RESPONSES_AND_GUARDIAN)
+        .await
+}
+
+pub async fn start_streaming_sse_server_with_routes(
+    responses: Vec<Vec<StreamingSseChunk>>,
+    routes: StreamingSseRoutes,
 ) -> (StreamingSseServer, Vec<oneshot::Receiver<i64>>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -117,13 +161,13 @@ pub async fn start_streaming_sse_server(
                             return;
                         }
 
-                        let responses_route = matches!(path, "/v1/responses" | "/backend-api/codex/responses");
+                        let responses_route = routes.is_responses(path);
                         if method == "GET" && responses_route {
                             let _ = write_http_response(&mut stream, /*status*/ 426, "websockets unsupported", "text/plain").await;
                             return;
                         }
 
-                        if method == "POST" && (responses_route || path == "/backend-api/codex/guardian") {
+                        if method == "POST" && routes.handles_post(path) {
                             let body = match read_request_body(&mut stream, &request, body_prefix)
                                 .await
                             {
