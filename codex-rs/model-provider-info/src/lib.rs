@@ -396,6 +396,15 @@ fn default_aws_auth_refresh_timeout_ms() -> NonZeroU64 {
 }
 
 impl ModelProviderInfo {
+    /// Whether the Responses endpoint accepts arbitrary OpenAI `custom` tools.
+    /// Providers that only support `function` tools (optionally with a custom
+    /// `apply_patch`) must set `capabilities.supports_custom_exec_tool = false`.
+    pub fn supports_custom_exec_tool(&self) -> bool {
+        self.capabilities
+            .and_then(|capabilities| capabilities.supports_custom_exec_tool)
+            .unwrap_or(true)
+    }
+
     /// Output-token ceiling configured for wires that require an explicit cap,
     /// such as Anthropic Messages `max_tokens`. `None` keeps the wire default.
     pub fn max_output_tokens(&self) -> Option<u32> {

@@ -11,6 +11,7 @@ use crate::ResponsesApiTool;
 use crate::create_tools_json_for_responses_api;
 use crate::create_tools_json_for_responses_lite;
 use crate::create_tools_raw_json_for_responses_api;
+use crate::create_tools_raw_json_for_responses_api_with_function_exec;
 use codex_protocol::config_types::WebSearchContextSize;
 use codex_protocol::config_types::WebSearchFilters as ConfigWebSearchFilters;
 use codex_protocol::config_types::WebSearchUserLocation as ConfigWebSearchUserLocation;
@@ -144,6 +145,50 @@ fn create_tools_json_for_responses_api_includes_top_level_name() {
             },
         })]
     );
+}
+
+#[test]
+fn function_exec_transport_rewrites_exec_and_keeps_apply_patch_custom() {
+    let raw = create_tools_raw_json_for_responses_api_with_function_exec(&[
+        ToolSpec::Freeform(FreeformTool {
+            name: "exec".to_string(),
+            description: "Run code".to_string(),
+            defer_loading: Some(true),
+            format: FreeformToolFormat {
+                r#type: "grammar".to_string(),
+                syntax: "lark".to_string(),
+                definition: "start: /.+/".to_string(),
+            },
+        }),
+        ToolSpec::Freeform(FreeformTool {
+            name: "apply_patch".to_string(),
+            description: "Apply a patch".to_string(),
+            defer_loading: None,
+            format: FreeformToolFormat {
+                r#type: "grammar".to_string(),
+                syntax: "lark".to_string(),
+                definition: "start: /.+/".to_string(),
+            },
+        }),
+        ToolSpec::Function(responses_lite_function("lookup_order")),
+    ])
+    .expect("serialize function-backed responses tools");
+    let tools: Vec<serde_json::Value> =
+        serde_json::from_str(raw.get()).expect("parse serialized tools");
+
+    assert_eq!(tools[0]["type"], "function");
+    assert_eq!(tools[0]["name"], "exec");
+    assert_eq!(tools[0]["strict"], true);
+    assert_eq!(tools[0]["defer_loading"], true);
+    assert_eq!(
+        tools[0]["parameters"]["properties"]["input"]["type"],
+        "string"
+    );
+    assert_eq!(tools[0]["parameters"]["required"], json!(["input"]));
+    assert_eq!(tools[1]["type"], "custom");
+    assert_eq!(tools[1]["name"], "apply_patch");
+    assert_eq!(tools[2]["type"], "function");
+    assert_eq!(tools[2]["name"], "lookup_order");
 }
 
 fn responses_lite_function(name: &str) -> ResponsesApiTool {
