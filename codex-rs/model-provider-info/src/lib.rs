@@ -350,6 +350,15 @@ fn default_aws_auth_refresh_timeout_ms() -> NonZeroU64 {
 }
 
 impl ModelProviderInfo {
+    /// Whether the Responses endpoint accepts arbitrary OpenAI `custom` tools.
+    /// Providers that only support `function` tools (optionally with a custom
+    /// `apply_patch`) must set `capabilities.supports_custom_exec_tool = false`.
+    pub fn supports_custom_exec_tool(&self) -> bool {
+        self.capabilities
+            .and_then(|capabilities| capabilities.supports_custom_exec_tool)
+            .unwrap_or(true)
+    }
+
     /// Checks that a configured Bedrock entry only customizes supported fields.
     /// Call this on the override before merging it with the built-in provider.
     pub fn validate_bedrock_override(&self) -> Result<(), String> {
