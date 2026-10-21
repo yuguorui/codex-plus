@@ -110,6 +110,7 @@ use codex_rollout_trace::InferenceTraceContext;
 use codex_tools::ToolSpec;
 use codex_tools::create_tools_json_for_responses_lite;
 use codex_tools::create_tools_raw_json_for_responses_api;
+use codex_tools::create_tools_raw_json_for_responses_api_with_function_exec;
 use eventsource_stream::Event;
 use eventsource_stream::EventStreamError;
 use futures::StreamExt;
@@ -1062,7 +1063,12 @@ impl ModelClient {
             }
             None
         } else {
-            Some(create_tools_raw_json_for_responses_api(&prompt.tools)?.into())
+            let tools = if self.state.provider.info().supports_custom_exec_tool() {
+                create_tools_raw_json_for_responses_api(&prompt.tools)?
+            } else {
+                create_tools_raw_json_for_responses_api_with_function_exec(&prompt.tools)?
+            };
+            Some(tools.into())
         };
         if !prompt.base_instructions.text.is_empty() {
             let mut instructions = ContextualUserFragment::into(BaseInstructionsFragment(

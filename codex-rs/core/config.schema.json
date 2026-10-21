@@ -2868,6 +2868,10 @@
             }
           ],
           "description": "Remote context-compaction protocol; omission preserves provider defaults."
+        },
+        "supports_custom_exec_tool": {
+          "description": "Whether the Responses endpoint accepts arbitrary OpenAI `custom` tools.\n\nDeepSeek only accepts `custom` for `apply_patch`; Code Mode's `exec` therefore has to travel as a function tool when this is `false`.",
+          "type": "boolean"
         }
       },
       "type": "object"
