@@ -6,6 +6,20 @@ use std::num::NonZeroU64;
 use tempfile::tempdir;
 
 #[test]
+fn custom_exec_tool_support_defaults_true_and_can_be_disabled() {
+    assert!(ModelProviderInfo::default().supports_custom_exec_tool());
+
+    let info = ModelProviderInfo {
+        capabilities: Some(ModelProviderCapabilities {
+            supports_custom_exec_tool: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(!info.supports_custom_exec_tool());
+}
+
+#[test]
 fn runtime_internal_metadata_opt_in_is_not_serialized_or_configurable() {
     let trusted = ModelProviderInfo {
         include_internal_metadata: true,

@@ -148,6 +148,64 @@ pub fn create_tools_raw_json_for_responses_api(
     serde_json::value::to_raw_value(tools).map(Arc::from)
 }
 
+/// Returns raw Responses tools with Code Mode's `custom exec` rewritten as a
+/// `function` tool.
+///
+/// Providers such as DeepSeek reject custom tools other than `apply_patch`.
+/// The function schema carries the same raw JavaScript in `input`, and the
+/// Code Mode handler accepts that payload. `apply_patch` stays custom because
+/// DeepSeek explicitly supports that one custom tool.
+pub fn create_tools_raw_json_for_responses_api_with_function_exec(
+    tools: &[ToolSpec],
+) -> Result<Arc<RawValue>, serde_json::Error> {
+    let mut tools = serde_json::to_value(tools)?;
+    if let Some(tools) = tools.as_array_mut() {
+        for tool in tools {
+            if tool.get("type").and_then(Value::as_str) != Some("custom") {
+                continue;
+            }
+            let Some(name) = tool.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let name = name.to_string();
+            if name == "apply_patch" {
+                continue;
+            }
+            let description = tool
+                .get("description")
+                .cloned()
+                .unwrap_or_else(|| Value::String(String::new()));
+            let input_description = if name == "exec" {
+                "Raw JavaScript source for the exec tool. Put the source in this `input` string; do not send a {\"cmd\": ...} object."
+            } else {
+                "Raw input for the custom tool."
+            };
+            let mut function = serde_json::json!({
+                "type": "function",
+                "name": name,
+                "description": description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "input": {
+                            "type": "string",
+                            "description": input_description
+                        }
+                    },
+                    "required": ["input"],
+                    "additionalProperties": false
+                },
+                "strict": true
+            });
+            if let Some(defer_loading) = tool.get("defer_loading") {
+                function["defer_loading"] = defer_loading.clone();
+            }
+            *tool = function;
+        }
+    }
+    serde_json::value::to_raw_value(&tools).map(Arc::from)
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ResponsesApiWebSearchFilters {
     #[serde(skip_serializing_if = "Option::is_none")]
