@@ -133,3 +133,4 @@ pub use tool_spec::ToolSpec;
 pub use tool_spec::create_tools_json_for_responses_api;
 pub use tool_spec::create_tools_json_for_responses_lite;
 pub use tool_spec::create_tools_raw_json_for_responses_api;
+pub use tool_spec::create_tools_raw_json_for_responses_api_with_function_exec;
