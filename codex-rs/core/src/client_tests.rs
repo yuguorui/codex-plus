@@ -41,6 +41,7 @@ use codex_model_provider::ProviderUnauthorizedRecovery;
 use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
+use codex_model_provider_info::ModelProviderCapabilities;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
@@ -80,6 +81,8 @@ use codex_runtime_agent_instance::AgentHostAuthorization;
 use codex_runtime_agent_instance::RuntimeAuthManager;
 use codex_runtime_agent_instance::RuntimeRegistrationMetadata;
 use codex_runtime_agent_instance::RuntimeRole;
+use codex_tools::FreeformTool;
+use codex_tools::FreeformToolFormat;
 use codex_tools::JsonSchema;
 use codex_tools::ResponsesApiTool;
 use codex_tools::ToolSpec;
@@ -123,7 +126,18 @@ fn test_model_client_with_thread_id(
     thread_id: ThreadId,
     session_source: SessionSource,
 ) -> ModelClient {
-    let provider = create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses);
+    test_model_client_with_provider(
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses),
+        thread_id,
+        session_source,
+    )
+}
+
+fn test_model_client_with_provider(
+    provider: ModelProviderInfo,
+    thread_id: ThreadId,
+    session_source: SessionSource,
+) -> ModelClient {
     ModelClient::new(
         /*auth_manager*/ None,
         AgentIdentityAuthPolicy::JwtOnly,
@@ -1694,6 +1708,78 @@ fn responses_request_carries_model_extra_body() {
         .expect("request should build");
 
     assert_eq!(request.extra_body, model_info.extra_body.unwrap());
+}
+
+#[test]
+fn responses_request_uses_function_exec_when_provider_rejects_custom_exec() {
+    let mut provider =
+        create_oss_provider_with_base_url("https://api.deepseek.com", WireApi::Responses);
+    provider.capabilities = Some(ModelProviderCapabilities {
+        supports_custom_exec_tool: Some(false),
+        ..Default::default()
+    });
+    let client = test_model_client_with_provider(provider, ThreadId::new(), SessionSource::Cli);
+    let prompt = crate::client_common::Prompt {
+        base_instructions: BaseInstructions {
+            text: "base instructions".to_string(),
+            provenance: None,
+        },
+        tools: vec![
+            ToolSpec::Freeform(FreeformTool {
+                name: "exec".to_string(),
+                description: "Run code".to_string(),
+                defer_loading: None,
+                format: FreeformToolFormat {
+                    r#type: "grammar".to_string(),
+                    syntax: "lark".to_string(),
+                    definition: "start: /.+/".to_string(),
+                },
+            }),
+            ToolSpec::Freeform(FreeformTool {
+                name: "apply_patch".to_string(),
+                description: "Apply a patch".to_string(),
+                defer_loading: None,
+                format: FreeformToolFormat {
+                    r#type: "grammar".to_string(),
+                    syntax: "lark".to_string(),
+                    definition: "start: /.+/".to_string(),
+                },
+            }),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        Some("turn-function-exec"),
+        "test-window".to_string(),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+
+    let request = client
+        .build_responses_request(
+            &prompt,
+            &test_model_info(),
+            /*effort*/ None,
+            codex_protocol::config_types::ReasoningSummary::Auto,
+            /*service_tier*/ None,
+            &responses_metadata,
+            /*include_internal*/ true,
+        )
+        .expect("request should build");
+    let tools =
+        serde_json::to_value(request.tools.expect("tools")).expect("serialize responses tools");
+    let tools = tools.as_array().expect("tools array");
+
+    assert_eq!(tools[0]["type"], "function");
+    assert_eq!(tools[0]["name"], "exec");
+    assert_eq!(
+        tools[0]["parameters"]["properties"]["input"]["type"],
+        "string"
+    );
+    assert_eq!(tools[1]["type"], "custom");
+    assert_eq!(tools[1]["name"], "apply_patch");
 }
 
 #[tokio::test]

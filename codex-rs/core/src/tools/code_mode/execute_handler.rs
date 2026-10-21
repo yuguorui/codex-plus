@@ -248,6 +248,19 @@ impl CodeModeExecuteHandler {
                 )
                 .await
                 .map(boxed_tool_output),
+            ToolPayload::Function { arguments } if is_exec_tool_name(&tool_name) => {
+                let input = exec_input_from_function_arguments(&arguments)?;
+                self.execute(
+                    session,
+                    step_context,
+                    call_id,
+                    originating_call,
+                    input,
+                    &mut telemetry,
+                )
+                .await
+                .map(boxed_tool_output)
+            }
             _ => Err(FunctionCallError::RespondToModel(format!(
                 "{PUBLIC_TOOL_NAME} expects raw JavaScript source text"
             ))),
@@ -263,8 +276,28 @@ impl CodeModeExecuteHandler {
 
 impl CoreToolRuntime for CodeModeExecuteHandler {
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
-        matches!(payload, ToolPayload::Custom { .. })
+        matches!(
+            payload,
+            ToolPayload::Custom { .. } | ToolPayload::Function { .. }
+        )
     }
+}
+
+#[derive(serde::Deserialize)]
+struct ExecFunctionInput {
+    input: String,
+}
+
+/// Parse the function-backed `exec` transport used by providers that reject
+/// OpenAI custom tools. The payload is the JSON object the model sees in the
+/// function schema, never raw JavaScript.
+fn exec_input_from_function_arguments(arguments: &str) -> Result<String, FunctionCallError> {
+    let parsed: ExecFunctionInput = serde_json::from_str(arguments).map_err(|err| {
+        FunctionCallError::RespondToModel(format!(
+            "exec expects a JSON object with an `input` string: {err}"
+        ))
+    })?;
+    Ok(parsed.input)
 }
 
 fn is_command_shaped_exec_input(code: &str) -> bool {
@@ -280,6 +313,7 @@ fn is_command_shaped_exec_input(code: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::CodeModeExecuteHandler;
+    use super::exec_input_from_function_arguments;
     use super::is_command_shaped_exec_input;
     use crate::tools::context::ToolPayload;
     use crate::tools::registry::CoreToolRuntime;
@@ -301,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn code_mode_handler_accepts_only_custom_payloads() {
+    fn code_mode_handler_accepts_custom_and_function_payloads() {
         let handler = CodeModeExecuteHandler::new(
             super::super::execute_spec::create_code_mode_tool("test".to_string()),
             Vec::new(),
@@ -310,8 +344,22 @@ mod tests {
         assert!(handler.matches_kind(&ToolPayload::Custom {
             input: "return 1".to_string(),
         }));
-        assert!(!handler.matches_kind(&ToolPayload::Function {
-            arguments: "{}".to_string(),
+        assert!(handler.matches_kind(&ToolPayload::Function {
+            arguments: "{\"input\":\"return 1\"}".to_string(),
         }));
+    }
+
+    #[test]
+    fn function_transport_extracts_raw_javascript() {
+        assert_eq!(
+            exec_input_from_function_arguments("{\"input\":\"text('ok')\"}").unwrap(),
+            "text('ok')"
+        );
+    }
+
+    #[test]
+    fn function_transport_rejects_malformed_arguments() {
+        assert!(exec_input_from_function_arguments("{\"cmd\":\"ls\"}").is_err());
+        assert!(exec_input_from_function_arguments("not json").is_err());
     }
 }

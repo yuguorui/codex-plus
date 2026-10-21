@@ -17,6 +17,11 @@ pub struct ModelProviderCapabilities {
     pub cyber_access_programs: Option<bool>,
     /// Whether hosted web search may access the live web.
     pub external_web_access: Option<bool>,
+    /// Whether the Responses endpoint accepts arbitrary OpenAI `custom` tools.
+    ///
+    /// DeepSeek only accepts `custom` for `apply_patch`; Code Mode's `exec`
+    /// therefore has to travel as a function tool when this is `false`.
+    pub supports_custom_exec_tool: Option<bool>,
     /// Remote context-compaction protocol; omission preserves provider defaults.
     pub remote_compaction: Option<RemoteCompactionSupport>,
 }
