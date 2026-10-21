@@ -6,6 +6,20 @@ use std::num::NonZeroU64;
 use tempfile::tempdir;
 
 #[test]
+fn custom_exec_tool_support_defaults_true_and_can_be_disabled() {
+    assert!(ModelProviderInfo::default().supports_custom_exec_tool());
+
+    let info = ModelProviderInfo {
+        capabilities: Some(ModelProviderCapabilities {
+            supports_custom_exec_tool: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(!info.supports_custom_exec_tool());
+}
+
+#[test]
 fn max_output_tokens_defaults_none_and_reads_capability_override() {
     assert_eq!(ModelProviderInfo::default().max_output_tokens(), None);
 
