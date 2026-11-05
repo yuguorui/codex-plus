@@ -404,6 +404,24 @@ impl ModelProviderInfo {
             .unwrap_or(true)
     }
 
+    /// Whether the provider's wire endpoint natively supports the Responses
+    /// `tool_search` tool type and `tool_search_call` output items.
+    ///
+    /// Non-Responses wires (`chat`, `anthropic`) never have native Responses
+    /// `tool_search`, so they always use the function-backed transport and
+    /// client-side re-declaration. Responses gateways that accept the native
+    /// tool definition without exposing it to the model (such as BigModel)
+    /// must set `capabilities.supports_native_tool_search = false` to opt into
+    /// the same client-side path.
+    pub fn supports_native_tool_search(&self) -> bool {
+        if !matches!(self.wire_api, WireApi::Responses) {
+            return false;
+        }
+        self.capabilities
+            .and_then(|capabilities| capabilities.supports_native_tool_search)
+            .unwrap_or(true)
+    }
+
     /// Output-token ceiling configured for wires that require an explicit cap,
     /// such as Anthropic Messages `max_tokens`. `None` keeps the wire default.
     pub fn max_output_tokens(&self) -> Option<u32> {

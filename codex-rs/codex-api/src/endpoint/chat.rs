@@ -193,8 +193,15 @@ enum ResponsesTool {
     Function(ResponsesFunctionTool),
     Namespace(ResponsesNamespaceTool),
     Custom(ResponsesCustomTool),
+    ToolSearch(ResponsesToolSearchTool),
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesToolSearchTool {
+    description: Option<String>,
+    parameters: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -971,6 +978,20 @@ fn chat_tools_from_responses_tools(
             }
             Ok(ResponsesTool::Custom(tool)) => {
                 converted.push(chat_custom_tool(tool, tool_names)?);
+            }
+            Ok(ResponsesTool::ToolSearch(tool)) => {
+                converted.push(chat_function_tool(
+                    ResponsesFunctionTool {
+                        name: "tool_search".to_string(),
+                        description: tool.description,
+                        parameters: tool.parameters.or_else(|| {
+                            Some(serde_json::json!({"type": "object", "properties": {}}))
+                        }),
+                        strict: None,
+                    },
+                    None,
+                    tool_names,
+                )?);
             }
             Ok(ResponsesTool::Unknown) => {}
             Err(err) => {
@@ -3254,6 +3275,45 @@ mod tests {
                 },
                 {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
             ])
+        );
+    }
+
+    #[test]
+    fn converts_raw_tool_search_spec_into_chat_function_tool() {
+        let body = body_from(request(
+            Vec::new(),
+            vec![json!({
+                "type": "tool_search",
+                "execution": "client",
+                "description": "Search deferred tools.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"}
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                }
+            })],
+        ));
+
+        assert_eq!(
+            body["tools"],
+            json!([{
+                "type": "function",
+                "function": {
+                    "name": "tool_search",
+                    "description": "Search deferred tools.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"}
+                        },
+                        "required": ["query"],
+                        "additionalProperties": false
+                    }
+                }
+            }])
         );
     }
 }
