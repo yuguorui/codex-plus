@@ -20,7 +20,11 @@ fn cancelling_the_first_search_preserves_the_pending_build() {
                 .search_info()
                 .unwrap();
             let expected = vec![info.entry.to_loadable_spec()];
-            let handler = ToolSearchHandler::new(vec![info], ToolSearchSourceListing::Include);
+            let handler = ToolSearchHandler::new(
+                vec![info],
+                ToolSearchSourceListing::Include,
+                std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new())),
+            );
 
             // Occupy the sole blocking worker until both searches have tried to get the index.
             let (release, wait) = std::sync::mpsc::channel::<()>();
