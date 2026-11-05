@@ -20,6 +20,20 @@ fn custom_exec_tool_support_defaults_true_and_can_be_disabled() {
 }
 
 #[test]
+fn native_tool_search_support_defaults_true_and_can_be_disabled() {
+    assert!(ModelProviderInfo::default().supports_native_tool_search());
+
+    let info = ModelProviderInfo {
+        capabilities: Some(ModelProviderCapabilities {
+            supports_native_tool_search: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(!info.supports_native_tool_search());
+}
+
+#[test]
 fn runtime_internal_metadata_opt_in_is_not_serialized_or_configurable() {
     let trusted = ModelProviderInfo {
         include_internal_metadata: true,
