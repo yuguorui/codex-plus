@@ -114,7 +114,7 @@ fn tool_dispatch_payload(payload: &ToolPayload) -> ToolDispatchPayload {
         ToolPayload::Function { arguments } => ToolDispatchPayload::Function {
             arguments: arguments.clone(),
         },
-        ToolPayload::ToolSearch { arguments } => ToolDispatchPayload::ToolSearch {
+        ToolPayload::ToolSearch { arguments, .. } => ToolDispatchPayload::ToolSearch {
             arguments: arguments.clone(),
         },
         ToolPayload::Custom { input } => ToolDispatchPayload::Custom {

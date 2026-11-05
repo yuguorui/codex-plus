@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::config::Config;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
+use crate::session::tests::update_turn_settings_for_test;
 use crate::tools::context::ToolPayload;
 use crate::tools::handlers::McpHandler;
 use crate::tools::registry::CoreToolRuntime;
@@ -295,6 +296,135 @@ async fn build_tool_call_uses_namespace_for_registry_name() -> anyhow::Result<()
         }
         other => panic!("expected function payload, got {other:?}"),
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn build_tool_call_routes_function_tool_search_to_search_payload() -> anyhow::Result<()> {
+    let (_session, mut turn) = make_session_and_context().await;
+    update_turn_settings_for_test(&mut turn, |settings| {
+        Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
+    });
+    let turn = Arc::new(turn);
+    let step_context = StepContext::for_test(Arc::clone(&turn));
+    // A deferred searchable MCP tool is required for the router to expose the
+    // discovery tool at all.
+    let router = test_tool_router(
+        step_context.as_ref(),
+        vec![mcp_runtime(mcp_tool_info(
+            "calendar",
+            /*supports_parallel_tool_calls*/ false,
+            "mcp__calendar",
+            "create_event",
+        ))],
+        Vec::new(),
+        &[],
+    );
+
+    let call_item = ResponseItem::FunctionCall {
+        status: None,
+        encrypted_content: None,
+        id: None,
+        name: "tool_search".to_string(),
+        namespace: None,
+        arguments: r#"{"query":"calendar tools","limit":3}"#.to_string(),
+        encrypted_function_args: None,
+        call_id: "call-search".to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let call = router
+        .build_tool_call(call_item)?
+        .expect("function tool_search should produce a tool call");
+
+    assert_eq!(
+        call.tool_name,
+        ToolName::plain("tool_search").with_default_namespace()
+    );
+    assert_eq!(call.call_id, "call-search");
+    match call.payload {
+        ToolPayload::ToolSearch {
+            arguments,
+            transport,
+        } => {
+            assert_eq!(arguments.query, "calendar tools");
+            assert_eq!(arguments.limit, Some(3));
+            assert_eq!(transport, codex_tools::ToolSearchTransport::Function);
+        }
+        other => panic!("expected tool_search payload, got {other:?}"),
+    }
+
+    // Without an exposed discovery tool the same call must stay a plain
+    // function call so a user tool named tool_search keeps working.
+    let unexposed_turn = Arc::new({
+        let (_session, mut plain) = make_session_and_context().await;
+        update_turn_settings_for_test(&mut plain, |settings| {
+            Arc::make_mut(&mut settings.model_info).supports_search_tool = false;
+        });
+        plain
+    });
+    let unexposed_step = StepContext::for_test(unexposed_turn);
+    let unexposed_router = test_tool_router(unexposed_step.as_ref(), Vec::new(), Vec::new(), &[]);
+    let passthrough = unexposed_router
+        .build_tool_call(ResponseItem::FunctionCall {
+            status: None,
+            encrypted_content: None,
+            id: None,
+            name: "tool_search".to_string(),
+            namespace: None,
+            arguments: r#"{"query":"calendar tools"}"#.to_string(),
+            encrypted_function_args: None,
+            call_id: "call-passthrough".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        })?
+        .expect("plain function call should pass through");
+    assert!(
+        matches!(passthrough.payload, ToolPayload::Function { .. }),
+        "unexposed tool_search name must not be hijacked, got {:?}",
+        passthrough.payload
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn build_tool_call_rejects_malformed_function_tool_search_arguments() -> anyhow::Result<()> {
+    let (_session, mut turn) = make_session_and_context().await;
+    update_turn_settings_for_test(&mut turn, |settings| {
+        Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
+    });
+    let turn = Arc::new(turn);
+    let step_context = StepContext::for_test(Arc::clone(&turn));
+    let router = test_tool_router(
+        step_context.as_ref(),
+        vec![mcp_runtime(mcp_tool_info(
+            "calendar",
+            /*supports_parallel_tool_calls*/ false,
+            "mcp__calendar",
+            "create_event",
+        ))],
+        Vec::new(),
+        &[],
+    );
+
+    let call_item = ResponseItem::FunctionCall {
+        status: None,
+        encrypted_content: None,
+        id: None,
+        name: "tool_search".to_string(),
+        namespace: None,
+        arguments: "not json".to_string(),
+        encrypted_function_args: None,
+        call_id: "call-search-bad".to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let error = router
+        .build_tool_call(call_item)
+        .expect_err("malformed tool_search arguments should fail");
+    assert!(
+        matches!(error, codex_tools::FunctionCallError::RespondToModel(_)),
+        "expected a respond-to-model error, got {error:?}"
+    );
 
     Ok(())
 }

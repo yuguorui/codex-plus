@@ -402,6 +402,17 @@ impl ModelProviderInfo {
             .unwrap_or(true)
     }
 
+    /// Whether the Responses endpoint natively supports the `tool_search` tool
+    /// type and `tool_search_call` output items. Gateways that accept the tool
+    /// definition but never expose it to the model must set
+    /// `capabilities.supports_native_tool_search = false`; Codex then transports
+    /// `tool_search` as a plain function tool and re-declares discovered tools.
+    pub fn supports_native_tool_search(&self) -> bool {
+        self.capabilities
+            .and_then(|capabilities| capabilities.supports_native_tool_search)
+            .unwrap_or(true)
+    }
+
     /// Checks that a configured Bedrock entry only customizes supported fields.
     /// Call this on the override before merging it with the built-in provider.
     pub fn validate_bedrock_override(&self) -> Result<(), String> {

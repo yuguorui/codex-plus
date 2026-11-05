@@ -3202,6 +3202,10 @@
         "supports_custom_exec_tool": {
           "description": "Whether the Responses endpoint accepts arbitrary OpenAI `custom` tools.\n\nDeepSeek only accepts `custom` for `apply_patch`; Code Mode's `exec` therefore has to travel as a function tool when this is `false`.",
           "type": "boolean"
+        },
+        "supports_native_tool_search": {
+          "description": "Whether the Responses endpoint natively supports the `tool_search` tool type and `tool_search_call` output items.\n\nProviders whose gateway accepts the request but never exposes the tool to the model (such as BigModel) must set this to `false`; Codex then transports `tool_search` as a plain function tool and re-declares the discovered tools itself. Only the full Responses tools path consults this capability; Responses Lite and chat-wire transports are unchanged.",
+          "type": "boolean"
         }
       },
       "type": "object"

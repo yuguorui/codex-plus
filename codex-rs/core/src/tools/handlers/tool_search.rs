@@ -19,15 +19,18 @@ use codex_prompts::ResolvedModelMessages;
 use codex_tools::IndirectNamespacePrefixes;
 use codex_tools::JsonToolOutput;
 use codex_tools::LoadableToolSpec;
+use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::TOOL_SEARCH_DEFAULT_LIMIT;
 use codex_tools::TOOL_SEARCH_TOOL_NAME;
 use codex_tools::ToolName;
 use codex_tools::ToolSearchEntry;
 use codex_tools::ToolSearchInfo;
+use codex_tools::ToolSearchTransport;
 use codex_tools::ToolSpec;
 use codex_tools::coalesce_loadable_tool_specs;
 use serde::Serialize;
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
@@ -45,11 +48,22 @@ pub struct ToolSearchHandler {
     spec: ToolSpec,
     search_embedder: Embedder,
     search_scorer: Scorer<usize>,
+    activated_tools: Arc<Mutex<BTreeSet<ToolName>>>,
 }
 
 #[derive(Default)]
 pub(crate) struct ToolSearchHandlerCache {
     cached: Mutex<Option<CachedToolSearchHandler>>,
+    /// Tools surfaced by a top-level tool_search call on this thread.
+    ///
+    /// Providers without native `tool_search` support load discovered tools
+    /// client-side: the spec planner re-declares these tools on the next
+    /// request so the model can actually call them. The set grows
+    /// monotonically for the lifetime of the session, mirroring how a native
+    /// provider's server-side loaded-tool state accumulates; resumed and
+    /// forked sessions re-derive it from their initial history via
+    /// [`Self::recover_activations`].
+    activated_tools: Arc<Mutex<BTreeSet<ToolName>>>,
 }
 
 struct CachedToolSearchHandler {
@@ -104,7 +118,11 @@ impl ToolSearchHandlerCache {
             })
             .collect();
 
-        let handler = Arc::new(ToolSearchHandler::new(search_infos, source_listing));
+        let handler = Arc::new(ToolSearchHandler::new(
+            search_infos,
+            source_listing,
+            Arc::clone(&self.activated_tools),
+        ));
         let mut cached = self.cached();
         if let Some(cached) = cached.as_ref()
             && cached.handler.source_listing == source_listing
@@ -142,6 +160,125 @@ impl ToolSearchHandlerCache {
             Err(poisoned) => poisoned.into_inner(),
         }
     }
+
+    /// Tools already surfaced to the model by a top-level tool_search call.
+    pub(crate) fn activated_deferred_tools(&self) -> BTreeSet<ToolName> {
+        match self.activated_tools.lock() {
+            Ok(activated) => activated.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// Records tools surfaced by a top-level tool_search call.
+    ///
+    /// Test seam for the production path in
+    /// [`ToolSearchHandler::record_activated_tools`], which shares this set
+    /// through the handler's `Arc` clone.
+    #[cfg(test)]
+    pub(crate) fn activate_tools(&self, names: impl IntoIterator<Item = ToolName>) {
+        let mut activated = match self.activated_tools.lock() {
+            Ok(activated) => activated,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        activated.extend(names.into_iter().map(|name| name.with_default_namespace()));
+    }
+
+    /// Re-derives the activation set from a resumed or forked thread's history.
+    ///
+    /// The function-backed transport records `tool_search` as a function call
+    /// whose output carries the discovered tool specifications as JSON. New
+    /// sessions for the same thread start with an empty in-memory set, so
+    /// replaying those pairs keeps previously discovered tools callable.
+    pub(crate) fn recover_activations<'a>(
+        &self,
+        items: impl IntoIterator<Item = &'a codex_history::RolloutItem>,
+    ) {
+        use codex_history::RolloutItem;
+        use codex_protocol::models::ResponseItem;
+
+        let mut search_call_ids = std::collections::BTreeSet::new();
+        let mut discovered = Vec::<ToolName>::new();
+        for item in items {
+            let RolloutItem::ResponseItem(envelope) = item else {
+                continue;
+            };
+            match &envelope.item {
+                ResponseItem::FunctionCall {
+                    name,
+                    namespace,
+                    call_id,
+                    ..
+                } if name == TOOL_SEARCH_TOOL_NAME
+                    && ToolName::new(namespace.clone(), name.clone())
+                        .with_default_namespace()
+                        .is_default_namespace() =>
+                {
+                    search_call_ids.insert(call_id.clone());
+                }
+                ResponseItem::FunctionCallOutput {
+                    call_id, output, ..
+                } => {
+                    let Some(call_id) = call_id.as_ref() else {
+                        continue;
+                    };
+                    if !search_call_ids.contains(call_id) {
+                        continue;
+                    }
+                    let Some(text) = output.text_content() else {
+                        continue;
+                    };
+                    let Ok(specs) = serde_json::from_str::<serde_json::Value>(text) else {
+                        continue;
+                    };
+                    let Some(specs) = specs.as_array() else {
+                        continue;
+                    };
+                    for spec in specs {
+                        discovered.extend(parse_discovered_tool_names(spec));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if discovered.is_empty() {
+            return;
+        }
+        self.activate_tools_for_recovery(discovered);
+    }
+
+    fn activate_tools_for_recovery(&self, names: Vec<ToolName>) {
+        let mut activated = match self.activated_tools.lock() {
+            Ok(activated) => activated,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        activated.extend(names.into_iter().map(|name| name.with_default_namespace()));
+    }
+}
+
+/// Extracts tool identities from one serialized [`LoadableToolSpec`] entry.
+fn parse_discovered_tool_names(spec: &serde_json::Value) -> impl Iterator<Item = ToolName> + '_ {
+    let mut names = Vec::new();
+    match spec.get("type").and_then(serde_json::Value::as_str) {
+        Some("namespace") => {
+            let Some(namespace) = spec.get("name").and_then(serde_json::Value::as_str) else {
+                return names.into_iter();
+            };
+            if let Some(tools) = spec.get("tools").and_then(serde_json::Value::as_array) {
+                for tool in tools {
+                    if let Some(name) = tool.get("name").and_then(serde_json::Value::as_str) {
+                        names.push(ToolName::namespaced(namespace, name));
+                    }
+                }
+            }
+        }
+        Some("function") | Some("custom") => {
+            if let Some(name) = spec.get("name").and_then(serde_json::Value::as_str) {
+                names.push(ToolName::plain(name));
+            }
+        }
+        _ => {}
+    }
+    names.into_iter()
 }
 
 impl ToolSearchHandler {
@@ -153,6 +290,7 @@ impl ToolSearchHandler {
     pub(crate) fn new(
         search_infos: Vec<ToolSearchInfo>,
         source_listing: ToolSearchSourceListing,
+        activated_tools: Arc<Mutex<BTreeSet<ToolName>>>,
     ) -> Self {
         let search_source_infos = search_infos
             .iter()
@@ -180,6 +318,7 @@ impl ToolSearchHandler {
             spec,
             search_embedder,
             search_scorer,
+            activated_tools,
         }
     }
 }
@@ -218,9 +357,19 @@ impl ToolSearchHandler {
         } = invocation;
         let nested = matches!(source, ToolCallSource::CodeMode { .. });
 
-        let args = match payload {
-            ToolPayload::ToolSearch { arguments } => arguments,
-            ToolPayload::Function { arguments } if nested => super::parse_arguments(&arguments)?,
+        let (args, transport) = match payload {
+            ToolPayload::ToolSearch {
+                arguments,
+                transport,
+            } => (arguments, transport),
+            ToolPayload::Function { arguments } if nested => {
+                // Nested Code Mode searches always run client-side and their
+                // results return through the code-mode result channel.
+                (
+                    super::parse_arguments(&arguments)?,
+                    ToolSearchTransport::Native,
+                )
+            }
             _ => {
                 return Err(FunctionCallError::Fatal(format!(
                     "{TOOL_SEARCH_TOOL_NAME} handler received unsupported payload"
@@ -267,14 +416,82 @@ impl ToolSearchHandler {
         }
 
         if self.search_infos.is_empty() {
-            return Ok(boxed_tool_output(ToolSearchOutput { tools: Vec::new() }));
+            return Ok(self.top_level_output(Vec::new(), transport));
         }
 
-        let mut tools = self.search(query, limit);
+        let matched = self.search_entries(query).take(limit).collect::<Vec<_>>();
+        let mut tools = coalesce_loadable_tool_specs(
+            matched.into_iter().map(ToolSearchEntry::to_loadable_spec),
+        );
         indirect_prefixes.apply_search(&mut tools);
 
-        Ok(boxed_tool_output(ToolSearchOutput { tools }))
+        self.record_activated_tools(loadable_tool_names(&tools));
+        Ok(self.top_level_output(tools, transport))
     }
+
+    /// Shapes a top-level search result for the transport that declared
+    /// `tool_search` to the model.
+    ///
+    /// Native transports pair a `tool_search_call` with a `tool_search_output`
+    /// item. Function-backed transports declared `tool_search` as a plain
+    /// function, so the model's history contains a `function_call` and the
+    /// result must travel as the matching `function_call_output` (the same
+    /// mapping the chat endpoint applies in
+    /// `codex-api/src/endpoint/chat.rs`).
+    fn top_level_output(
+        &self,
+        tools: Vec<LoadableToolSpec>,
+        transport: ToolSearchTransport,
+    ) -> Box<dyn crate::tools::context::ToolOutput> {
+        match transport {
+            ToolSearchTransport::Native => boxed_tool_output(ToolSearchOutput { tools }),
+            ToolSearchTransport::Function => {
+                let tools = tools
+                    .into_iter()
+                    .map(|tool| {
+                        serde_json::to_value(tool).unwrap_or_else(|error| {
+                            tracing::error!(
+                                error = %error,
+                                "failed to serialize tool_search result"
+                            );
+                            serde_json::json!({})
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                boxed_tool_output(JsonToolOutput::new(serde_json::Value::Array(tools)))
+            }
+        }
+    }
+
+    /// Remembers which deferred tools a top-level search surfaced so the spec
+    /// planner can re-declare them for providers without native loading.
+    fn record_activated_tools<'a>(&self, names: impl Iterator<Item = ToolName> + 'a) {
+        let mut activated = match self.activated_tools.lock() {
+            Ok(activated) => activated,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        activated.extend(names.map(|name| name.with_default_namespace()));
+    }
+}
+
+/// Enumerates the tool identities in finalized search results.
+fn loadable_tool_names(specs: &[LoadableToolSpec]) -> impl Iterator<Item = ToolName> + '_ {
+    specs.iter().flat_map(|spec| match spec {
+        LoadableToolSpec::Function(tool) => vec![ToolName::plain(&tool.name)],
+        LoadableToolSpec::Namespace(namespace) => namespace
+            .tools
+            .iter()
+            .map(|tool| {
+                ToolName::namespaced(
+                    &namespace.name,
+                    match tool {
+                        ResponsesApiNamespaceTool::Function(tool) => &tool.name,
+                        ResponsesApiNamespaceTool::Custom(tool) => &tool.name,
+                    },
+                )
+            })
+            .collect::<Vec<_>>(),
+    })
 }
 
 impl CoreToolRuntime for ToolSearchHandler {}
@@ -331,6 +548,9 @@ impl ToolSearchHandler {
         tools
     }
 
+    /// Search helper retained for tests; production paths fold ranking and
+    /// result collection into a single pass over [`Self::search_entries`].
+    #[cfg(test)]
     fn search(&self, query: &str, limit: usize) -> Vec<LoadableToolSpec> {
         coalesce_loadable_tool_specs(
             self.search_entries(query)
@@ -430,6 +650,148 @@ mod tests {
     }
 
     #[test]
+    fn top_level_search_bookkeeping_records_activated_tools_in_cache() {
+        let cache = ToolSearchHandlerCache::default();
+        let runtime: Arc<dyn CoreToolRuntime> = Arc::new(
+            McpHandler::new(tool_info("calendar", "create_event", "Create events"))
+                .expect("MCP tool should convert"),
+        );
+        let mut registry = ToolRegistry::default();
+        registry.register_trusted_with_exposure(runtime, ToolExposure::Deferred);
+
+        let handler = cache.get_or_build(&registry, ToolSearchSourceListing::Include);
+        assert!(
+            cache.activated_deferred_tools().is_empty(),
+            "nothing is activated before a search"
+        );
+
+        handler.record_activated_tools(
+            handler
+                .search_entries("Create events")
+                .flat_map(|entry| entry.tool_names()),
+        );
+        let activated = cache.activated_deferred_tools();
+        assert!(
+            activated.iter().any(|name| name.name == "create_event"),
+            "expected create_event in activated set, got {activated:?}"
+        );
+
+        // Cache-level activation writes to the same thread-scoped set.
+        cache.activate_tools([ToolName::plain("another_tool")]);
+        assert!(
+            cache
+                .activated_deferred_tools()
+                .contains(&ToolName::plain("another_tool").with_default_namespace())
+        );
+    }
+
+    #[test]
+    fn top_level_output_pairs_with_the_transport_that_declared_tool_search() {
+        use codex_protocol::models::ResponseInputItem;
+        use codex_protocol::models::SearchToolCallParams;
+
+        let cache = ToolSearchHandlerCache::default();
+        let runtime: Arc<dyn CoreToolRuntime> = Arc::new(
+            McpHandler::new(tool_info("calendar", "create_event", "Create events"))
+                .expect("MCP tool should convert"),
+        );
+        let mut registry = ToolRegistry::default();
+        registry.register_trusted_with_exposure(runtime, ToolExposure::Deferred);
+        let handler = cache.get_or_build(&registry, ToolSearchSourceListing::Include);
+        let tools = handler.search("Create events", /*limit*/ 1);
+        assert!(!tools.is_empty());
+        let payload = ToolPayload::ToolSearch {
+            arguments: SearchToolCallParams {
+                query: "calendar".to_string(),
+                limit: None,
+            },
+            transport: ToolSearchTransport::Native,
+        };
+
+        let native_item = handler
+            .top_level_output(tools.clone(), ToolSearchTransport::Native)
+            .to_response_item("call-1", &payload);
+        assert!(
+            matches!(native_item, ResponseInputItem::ToolSearchOutput { .. }),
+            "native transport keeps tool_search_output, got {native_item:?}"
+        );
+
+        let shim_item = handler
+            .top_level_output(tools, ToolSearchTransport::Function)
+            .to_response_item("call-1", &payload);
+        let ResponseInputItem::FunctionCallOutput { call_id, output } = shim_item else {
+            panic!("function transport should pair a function_call_output")
+        };
+        assert_eq!(call_id, "call-1");
+        let payload_text = serde_json::to_value(&output)
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            payload_text.contains("create_event"),
+            "function output should carry the discovered tool specs: {payload_text}"
+        );
+    }
+
+    #[test]
+    fn recover_activations_replays_function_transport_search_results() {
+        use codex_history::ResponseItemEnvelope;
+        use codex_history::RolloutItem;
+        use codex_protocol::models::FunctionCallOutputPayload;
+        use codex_protocol::models::ResponseItem;
+
+        let cache = ToolSearchHandlerCache::default();
+        let items = vec![
+            RolloutItem::ResponseItem(ResponseItemEnvelope::new(ResponseItem::FunctionCall {
+                status: None,
+                encrypted_content: None,
+                id: None,
+                name: "tool_search".to_string(),
+                namespace: None,
+                arguments: r#"{"query":"github repo"}"#.to_string(),
+                encrypted_function_args: None,
+                call_id: "call-search".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            })),
+            RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+                ResponseItem::FunctionCallOutput {
+                    id: None,
+                    call_id: Some("call-search".to_string()),
+                    name: Some("tool_search".to_string()),
+                    namespace: None,
+                    output: FunctionCallOutputPayload::from_text(
+                        r#"[{"type":"namespace","name":"mcp__zread","tools":[{"type":"function","name":"get_repo_structure"},{"type":"function","name":"read_file"}]}]"#
+                            .to_string(),
+                    ),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+            )),
+            // An unrelated function output must not activate anything.
+            RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+                ResponseItem::FunctionCallOutput {
+                    id: None,
+                    call_id: Some("call-other".to_string()),
+                    name: None,
+                    namespace: None,
+                    output: FunctionCallOutputPayload::from_text(
+                        r#"[{"type":"namespace","name":"mcp__hidden","tools":[{"type":"function","name":"secret"}]}]"#
+                            .to_string(),
+                    ),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+            )),
+        ];
+
+        cache.recover_activations(items.iter());
+        let activated = cache.activated_deferred_tools();
+        assert!(
+            activated.contains(&ToolName::namespaced("mcp__zread", "get_repo_structure")),
+            "expected recovered zread tools, got {activated:?}"
+        );
+        assert!(activated.contains(&ToolName::namespaced("mcp__zread", "read_file")));
+        assert!(!activated.contains(&ToolName::namespaced("mcp__hidden", "secret")));
+    }
+
+    #[test]
     fn cache_rechecks_dynamic_tool_metadata_while_reusing_immutable_mcp_handlers() {
         let cache = ToolSearchHandlerCache::default();
         let mcp_runtime: Arc<dyn CoreToolRuntime> = Arc::new(
@@ -518,7 +880,11 @@ mod tests {
                 .search_info()
                 .expect("dynamic handler should return search info")
         }));
-        let handler = ToolSearchHandler::new(search_infos, ToolSearchSourceListing::Include);
+        let handler = ToolSearchHandler::new(
+            search_infos,
+            ToolSearchSourceListing::Include,
+            Arc::new(Mutex::new(BTreeSet::new())),
+        );
         let results = [
             &handler.search_infos[0].entry,
             &handler.search_infos[2].entry,
