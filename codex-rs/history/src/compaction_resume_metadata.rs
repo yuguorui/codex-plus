@@ -2,6 +2,7 @@
 
 use crate::RolloutItem;
 use codex_protocol::ThreadId;
+use codex_protocol::ToolName;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::turn_input::CyberAccessProgram;
@@ -38,6 +39,13 @@ pub struct CompactionResumeMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_attribution: Option<TurnAttribution>,
     pub previous_turn_settings: Option<PreviousTurnSettings>,
+    /// Tools surfaced by function-backed tool_search before this checkpoint.
+    ///
+    /// Compaction drops the search call/output pairs from the replacement
+    /// history, and bounded resume scans stop at the newest compaction, so
+    /// the activation set must survive here to keep discovered tools callable.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tool_search_activated_tools: BTreeSet<ToolName>,
 }
 
 /// A thread's dynamic-tool catalog, including an empty catalog after a clear.
