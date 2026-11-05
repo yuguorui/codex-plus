@@ -460,12 +460,13 @@ impl ToolCallRuntime {
     fn failure_response(call: ToolCall, err: FunctionCallError) -> ResponseInputItem {
         let message = err.to_string();
         match call.payload {
-            ToolPayload::ToolSearch { .. } => ResponseInputItem::ToolSearchOutput {
-                call_id: call.call_id,
-                status: "completed".to_string(),
-                execution: "client".to_string(),
-                tools: Vec::new(),
-            },
+            ToolPayload::ToolSearch { transport, .. } => {
+                crate::tools::context::tool_search_terminal_response_item(
+                    &call.call_id,
+                    &message,
+                    transport,
+                )
+            }
             ToolPayload::Custom { .. } => ResponseInputItem::CustomToolCallOutput {
                 call_id: call.call_id,
                 name: None,

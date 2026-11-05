@@ -2061,7 +2061,23 @@ impl Session {
                     &config.code_mode,
                     executed_tool_calls,
                 ),
-                tool_search_handler_cache: Default::default(),
+                tool_search_handler_cache: {
+                    // Resumed/forked threads keep their tool_search-discovered
+                    // tools callable by replaying the function-backed search
+                    // results from the initial history.
+                    let cache = crate::tools::handlers::ToolSearchHandlerCache::default();
+                    match &initial_history {
+                        codex_history::InitialHistory::New
+                        | codex_history::InitialHistory::Cleared => {}
+                        codex_history::InitialHistory::Resumed(resumed) => {
+                            cache.recover_activations(resumed.history.iter());
+                        }
+                        codex_history::InitialHistory::Forked(items) => {
+                            cache.recover_activations(items.iter());
+                        }
+                    }
+                    cache
+                },
                 turn_environments: Arc::clone(&turn_environments),
             };
             let (mcp_prewarm_tx, mcp_prewarm_rx) = async_channel::bounded(1);

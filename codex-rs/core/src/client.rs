@@ -109,7 +109,7 @@ use codex_rollout_trace::InferenceTraceContext;
 use codex_tools::ToolSpec;
 use codex_tools::create_tools_json_for_responses_lite;
 use codex_tools::create_tools_raw_json_for_responses_api;
-use codex_tools::create_tools_raw_json_for_responses_api_with_function_exec;
+use codex_tools::create_tools_raw_json_for_responses_api_for_capabilities;
 use eventsource_stream::Event;
 use eventsource_stream::EventStreamError;
 use futures::StreamExt;
@@ -1242,10 +1242,17 @@ impl ModelClient {
             }
             None
         } else {
-            let tools = if self.state.provider.info().supports_custom_exec_tool() {
+            let provider_info = self.state.provider.info();
+            let supports_custom_exec_tool = provider_info.supports_custom_exec_tool();
+            let supports_native_tool_search = provider_info.supports_native_tool_search();
+            let tools = if supports_custom_exec_tool && supports_native_tool_search {
                 create_tools_raw_json_for_responses_api(&prompt.tools)?
             } else {
-                create_tools_raw_json_for_responses_api_with_function_exec(&prompt.tools)?
+                create_tools_raw_json_for_responses_api_for_capabilities(
+                    &prompt.tools,
+                    supports_custom_exec_tool,
+                    supports_native_tool_search,
+                )?
             };
             Some(tools.into())
         };
