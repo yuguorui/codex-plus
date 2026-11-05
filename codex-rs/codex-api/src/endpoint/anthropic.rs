@@ -242,8 +242,15 @@ enum ResponsesTool {
     Function(ResponsesFunctionTool),
     Namespace(ResponsesNamespaceTool),
     Custom(ResponsesCustomTool),
+    ToolSearch(ResponsesToolSearchTool),
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesToolSearchTool {
+    description: Option<String>,
+    parameters: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -614,6 +621,41 @@ fn anthropic_messages_from_items(
                     id: call_id,
                     name,
                     input: serde_json::json!({ "input": input }),
+                    cache_control: None,
+                });
+            }
+            ResponseItem::ToolSearchCall {
+                call_id: Some(call_id),
+                arguments,
+                ..
+            } => {
+                flush_pending_tool_results(&mut messages, &mut pending_tool_results);
+                let input = if arguments.is_object() {
+                    arguments
+                } else {
+                    serde_json::json!({ "arguments": arguments })
+                };
+                pending_assistant_content.push(AnthropicContentBlock::ToolUse {
+                    id: call_id,
+                    name: "tool_search".to_string(),
+                    input,
+                    cache_control: None,
+                });
+            }
+            ResponseItem::ToolSearchOutput {
+                call_id: Some(call_id),
+                execution,
+                tools,
+                ..
+            } if execution == "client" => {
+                flush_pending_assistant_content(&mut messages, &mut pending_assistant_content);
+                drain_invalid_tool_results(&mut pending_tool_results, &mut invalid_tool_calls);
+                pending_tool_results.push(AnthropicContentBlock::ToolResult {
+                    tool_use_id: call_id,
+                    content: Value::String(
+                        serde_json::to_string(&tools).unwrap_or_else(|_| "[]".to_string()),
+                    ),
+                    is_error: None,
                     cache_control: None,
                 });
             }
@@ -1087,6 +1129,19 @@ fn anthropic_tools_from_responses_tools(
             }
             Ok(ResponsesTool::Custom(tool)) => {
                 converted.push(anthropic_custom_tool(tool, tool_names)?);
+            }
+            Ok(ResponsesTool::ToolSearch(tool)) => {
+                converted.push(anthropic_function_tool(
+                    ResponsesFunctionTool {
+                        name: "tool_search".to_string(),
+                        description: tool.description,
+                        parameters: tool.parameters.or_else(|| {
+                            Some(serde_json::json!({"type": "object", "properties": {}}))
+                        }),
+                    },
+                    None,
+                    tool_names,
+                )?);
             }
             Ok(ResponsesTool::Unknown) => {}
             Err(err) => {
@@ -2497,6 +2552,83 @@ mod tests {
         assert_eq!(
             message,
             "invalid anthropic tool history: tool_use 'call-open' at message index 1 has no immediately following tool_result"
+        );
+    }
+
+    #[test]
+    fn converts_tool_search_spec_and_history_items_for_anthropic() {
+        let body = body_from(request(
+            vec![
+                ResponseItem::ToolSearchCall {
+                    id: None,
+                    call_id: Some("call-search".to_string()),
+                    status: None,
+                    execution: "client".to_string(),
+                    arguments: json!({"query": "calendar"}),
+                    encrypted_content: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::ToolSearchOutput {
+                    id: None,
+                    call_id: Some("call-search".to_string()),
+                    status: "completed".to_string(),
+                    execution: "client".to_string(),
+                    tools: vec![json!({"type": "function", "name": "lookup"})],
+                    internal_chat_message_metadata_passthrough: None,
+                },
+            ],
+            vec![json!({
+                "type": "tool_search",
+                "execution": "client",
+                "description": "Search deferred tools.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"}
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                }
+            })],
+        ));
+
+        assert_eq!(
+            body["tools"],
+            json!([{
+                "name": "tool_search",
+                "description": "Search deferred tools.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"}
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                },
+                "cache_control": {"type": "ephemeral"}
+            }])
+        );
+        assert_eq!(
+            body["messages"],
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "call-search",
+                        "name": "tool_search",
+                        "input": {"query": "calendar"}
+                    }]
+                },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "call-search",
+                        "content": "[{\"type\":\"function\",\"name\":\"lookup\"}]"
+                    }]
+                }
+            ])
         );
     }
 }
