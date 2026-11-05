@@ -1079,7 +1079,7 @@ fn recorded_call(call: &ToolCall) -> (ExecutedToolCall, usize) {
     let original_bytes = match &call.payload {
         ToolPayload::Function { arguments } => arguments.len(),
         ToolPayload::Custom { input } => serialized_json_bytes(input).unwrap_or(usize::MAX),
-        ToolPayload::ToolSearch { arguments } => {
+        ToolPayload::ToolSearch { arguments, .. } => {
             serialized_json_bytes(arguments).unwrap_or(usize::MAX)
         }
     };
@@ -1089,7 +1089,7 @@ fn recorded_call(call: &ToolCall) -> (ExecutedToolCall, usize) {
             serde_json::from_str(arguments).unwrap_or_else(|_| JsonValue::String(arguments.clone()))
         }
         ToolPayload::Custom { input } => JsonValue::String(input.clone()),
-        ToolPayload::ToolSearch { arguments } => {
+        ToolPayload::ToolSearch { arguments, .. } => {
             serde_json::to_value(arguments).unwrap_or_default()
         }
     };
