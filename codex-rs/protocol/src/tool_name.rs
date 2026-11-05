@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use std::cmp::Ordering;
@@ -8,7 +9,7 @@ pub const DEFAULT_FUNCTION_NAMESPACE: &str = "functions";
 
 /// Identifies a callable tool, preserving the namespace split when the model
 /// provides one.
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize)]
 pub struct ToolName {
     pub name: String,
     pub namespace: Option<String>,
