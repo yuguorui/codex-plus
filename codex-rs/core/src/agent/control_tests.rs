@@ -2718,6 +2718,12 @@ async fn spawn_agent_fork_sanitizes_inherited_compaction_metadata() {
             cyber_access_program: None,
             realtime_active: None,
         }),
+        tool_search_activated_tools: [codex_protocol::ToolName::namespaced(
+            "mcp__searchable",
+            "lookup",
+        )]
+        .into_iter()
+        .collect(),
     };
     let parent_usage = TokenUsage {
         total_tokens: 120,
@@ -3873,6 +3879,7 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
                         cyber_access_program: None,
                         realtime_active: None,
                     }),
+                    tool_search_activated_tools: Default::default(),
                 }),
             })),
         ];
@@ -4006,6 +4013,7 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
                 last_started_turn_id: None,
                 turn_attribution: None,
                 previous_turn_settings: None,
+                tool_search_activated_tools: Default::default(),
             })
         );
         while child_thread
