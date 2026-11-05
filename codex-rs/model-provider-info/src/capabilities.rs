@@ -22,6 +22,15 @@ pub struct ModelProviderCapabilities {
     /// DeepSeek only accepts `custom` for `apply_patch`; Code Mode's `exec`
     /// therefore has to travel as a function tool when this is `false`.
     pub supports_custom_exec_tool: Option<bool>,
+    /// Whether the Responses endpoint natively supports the `tool_search` tool
+    /// type and `tool_search_call` output items.
+    ///
+    /// Providers whose gateway accepts the request but never exposes the tool
+    /// to the model (such as BigModel) must set this to `false`; Codex then
+    /// transports `tool_search` as a plain function tool and re-declares the
+    /// discovered tools itself. Only the full Responses tools path consults
+    /// this capability; Responses Lite and chat-wire transports are unchanged.
+    pub supports_native_tool_search: Option<bool>,
     /// Remote context-compaction protocol; omission preserves provider defaults.
     pub remote_compaction: Option<RemoteCompactionSupport>,
 }
