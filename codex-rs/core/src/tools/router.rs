@@ -28,7 +28,9 @@ use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ToolMode;
 use codex_tools::DiscoverableTool;
 use codex_tools::ResponsesApiNamespaceTool;
+use codex_tools::TOOL_SEARCH_TOOL_NAME;
 use codex_tools::ToolName;
+use codex_tools::ToolSearchTransport;
 use codex_tools::ToolSpec;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -290,6 +292,33 @@ impl ToolRouter {
             } => {
                 let tool_name =
                     ToolName::new(namespace.clone(), name.clone()).with_default_namespace();
+                if tool_name.name == TOOL_SEARCH_TOOL_NAME
+                    && tool_name.is_default_namespace()
+                    // Only intercept when the router actually exposes the
+                    // discovery tool; otherwise a user tool that happens to be
+                    // named tool_search must keep its function payload.
+                    && self.registry.registered_tool(&tool_name).is_some()
+                {
+                    // Function-backed tool_search transport: providers without
+                    // native support declare tool_search as a plain function,
+                    // so the model's call arrives as a regular function call.
+                    let arguments: SearchToolCallParams = serde_json::from_str(arguments.as_str())
+                        .map_err(|err| {
+                            FunctionCallError::RespondToModel(format!(
+                                "failed to parse tool_search arguments: {err}"
+                            ))
+                        })?;
+                    return Ok(Some(ToolCall {
+                        tool_name,
+                        call_id: call_id.clone(),
+                        payload: ToolPayload::ToolSearch {
+                            arguments,
+                            transport: ToolSearchTransport::Function,
+                        },
+                        encrypted_function_args: None,
+                        native_call: None,
+                    }));
+                }
                 let retain_native_call = self
                     .registry
                     .registered_tool(&tool_name)
@@ -323,7 +352,10 @@ impl ToolRouter {
                 Ok(Some(ToolCall {
                     tool_name: ToolName::plain("tool_search"),
                     call_id,
-                    payload: ToolPayload::ToolSearch { arguments },
+                    payload: ToolPayload::ToolSearch {
+                        arguments,
+                        transport: ToolSearchTransport::Native,
+                    },
                     encrypted_function_args: None,
                     native_call: None,
                 }))

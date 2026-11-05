@@ -259,3 +259,129 @@ fn loadable_tool_spec_namespace_serializes_with_deferred_child_tools() {
         })
     );
 }
+
+fn tool_search_spec() -> crate::ToolSpec {
+    crate::ToolSpec::ToolSearch {
+        execution: "client".to_string(),
+        description: "# Tool discovery\n\nSearches over deferred tool metadata.".to_string(),
+        parameters: JsonSchema::object(
+            BTreeMap::from([
+                (
+                    "query".to_string(),
+                    JsonSchema::string(Some("Search query for deferred tools.".to_string())),
+                ),
+                (
+                    "limit".to_string(),
+                    JsonSchema::number(Some(
+                        "Maximum number of tools to return. Defaults to 8.".to_string(),
+                    )),
+                ),
+            ]),
+            Some(vec!["query".to_string()]),
+            Some(false.into()),
+        ),
+    }
+}
+
+#[test]
+fn function_tool_search_transport_rewrites_wire_shape() {
+    let tools = vec![tool_search_spec()];
+
+    let raw = crate::create_tools_raw_json_for_responses_api_for_capabilities(
+        &tools, /*supports_custom_exec_tool*/ true, /*supports_native_tool_search*/ false,
+    )
+    .expect("serialize tools for function-backed tool_search transport");
+
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(raw.get()).expect("parse raw tools"),
+        json!([
+            {
+                "type": "function",
+                "name": "tool_search",
+                "description": "# Tool discovery\n\nSearches over deferred tool metadata.\n\nThe matcher is keyword-based (BM25) over English tool metadata: write `query` in English as tool-related keywords separated by spaces, for example `github repo file reader`. Avoid full sentences and non-English text.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query for deferred tools."
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "Maximum number of tools to return. Defaults to 8."
+                        }
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                }
+            }
+        ])
+    );
+}
+
+#[test]
+fn capabilities_serializer_rewrites_both_transports_independently() {
+    let tools = vec![
+        crate::ToolSpec::Freeform(FreeformTool {
+            name: "exec".to_string(),
+            description: "Run JavaScript".to_string(),
+            format: serde_json::from_value(json!({
+                "type": "grammar",
+                "syntax": "lark",
+                "definition": "start: \"js\"",
+            }))
+            .expect("grammar format"),
+            defer_loading: None,
+        }),
+        tool_search_spec(),
+    ];
+
+    let native = crate::create_tools_raw_json_for_responses_api_for_capabilities(
+        &tools, /*supports_custom_exec_tool*/ true, /*supports_native_tool_search*/ true,
+    )
+    .expect("serialize tools for a native provider");
+    let value: serde_json::Value = serde_json::from_str(native.get()).expect("parse raw tools");
+    assert_eq!(value[0]["type"], json!("custom"));
+    assert_eq!(value[1]["type"], json!("tool_search"));
+    let native_description = value[1]["description"].as_str().unwrap_or_default();
+    assert_eq!(
+        native_description, "# Tool discovery\n\nSearches over deferred tool metadata.",
+        "native transport keeps the original description without query guidance"
+    );
+
+    let shimmed = crate::create_tools_raw_json_for_responses_api_for_capabilities(
+        &tools, /*supports_custom_exec_tool*/ false,
+        /*supports_native_tool_search*/ false,
+    )
+    .expect("serialize tools for a function-only provider");
+    let value: serde_json::Value = serde_json::from_str(shimmed.get()).expect("parse raw tools");
+    assert_eq!(value[0]["type"], json!("function"));
+    assert_eq!(value[0]["name"], json!("exec"));
+    assert_eq!(value[0]["strict"], json!(true));
+    assert_eq!(value[1]["type"], json!("function"));
+    assert_eq!(value[1]["name"], json!("tool_search"));
+    assert!(
+        value[1].get("strict").is_none(),
+        "tool_search keeps strict unset because limit is optional"
+    );
+    let shimmed_description = value[1]["description"].as_str().unwrap_or_default();
+    assert!(shimmed_description.starts_with(native_description));
+    assert!(
+        shimmed_description.contains("BM25")
+            && shimmed_description.contains("github repo file reader"),
+        "function transport appends English-keyword query guidance: {shimmed_description}"
+    );
+
+    // Gateways such as BigModel accept custom tools but never expose a native
+    // tool_search to the model: only the discovery tool is rewritten.
+    let tool_search_shimmed = crate::create_tools_raw_json_for_responses_api_for_capabilities(
+        &tools, /*supports_custom_exec_tool*/ true, /*supports_native_tool_search*/ false,
+    )
+    .expect("serialize tools for a custom-capable gateway without native tool_search");
+    let value: serde_json::Value =
+        serde_json::from_str(tool_search_shimmed.get()).expect("parse raw tools");
+    assert_eq!(value[0]["type"], json!("custom"));
+    assert_eq!(value[0]["name"], json!("exec"));
+    assert_eq!(value[1]["type"], json!("function"));
+    assert_eq!(value[1]["name"], json!("tool_search"));
+}

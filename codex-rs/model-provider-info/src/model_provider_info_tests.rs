@@ -20,6 +20,20 @@ fn custom_exec_tool_support_defaults_true_and_can_be_disabled() {
 }
 
 #[test]
+fn native_tool_search_support_defaults_true_and_can_be_disabled() {
+    assert!(ModelProviderInfo::default().supports_native_tool_search());
+
+    let info = ModelProviderInfo {
+        capabilities: Some(ModelProviderCapabilities {
+            supports_native_tool_search: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(!info.supports_native_tool_search());
+}
+
+#[test]
 fn max_output_tokens_defaults_none_and_reads_capability_override() {
     assert_eq!(ModelProviderInfo::default().max_output_tokens(), None);
 
