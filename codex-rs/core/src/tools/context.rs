@@ -16,6 +16,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::models::function_call_output_content_items_to_text;
 use codex_tools::LoadableToolSpec;
 use codex_tools::ToolName;
+use codex_tools::ToolSearchTransport;
 use codex_utils_audio::estimate_tool_audio_tokens;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::truncate_function_output_payload;
@@ -391,6 +392,36 @@ impl ToolOutput for ApplyPatchToolOutput {
     }
 }
 
+/// Builds the terminal output item for a `tool_search` call that did not
+/// produce search results (validation failure, dispatch error, or abort).
+///
+/// The item must pair with the wire shape that delivered the call: native
+/// transports expect a `tool_search_output`, while function-backed transports
+/// declared `tool_search` as a plain function and require a
+/// `function_call_output` carrying the failure message so the model can
+/// correct its next attempt.
+pub(crate) fn tool_search_terminal_response_item(
+    call_id: &str,
+    message: &str,
+    transport: ToolSearchTransport,
+) -> ResponseInputItem {
+    match transport {
+        ToolSearchTransport::Native => ResponseInputItem::ToolSearchOutput {
+            call_id: call_id.to_string(),
+            status: "completed".to_string(),
+            execution: "client".to_string(),
+            tools: Vec::new(),
+        },
+        ToolSearchTransport::Function => ResponseInputItem::FunctionCallOutput {
+            call_id: call_id.to_string(),
+            output: FunctionCallOutputPayload {
+                body: FunctionCallOutputBody::Text(message.to_string()),
+                success: Some(false),
+            },
+        },
+    }
+}
+
 pub struct AbortedToolOutput {
     pub message: String,
 }
@@ -406,12 +437,9 @@ impl ToolOutput for AbortedToolOutput {
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
         match payload {
-            ToolPayload::ToolSearch { .. } => ResponseInputItem::ToolSearchOutput {
-                call_id: call_id.to_string(),
-                status: "completed".to_string(),
-                execution: "client".to_string(),
-                tools: Vec::new(),
-            },
+            ToolPayload::ToolSearch { transport, .. } => {
+                tool_search_terminal_response_item(call_id, &self.message, *transport)
+            }
             _ => function_tool_response(
                 call_id,
                 payload,

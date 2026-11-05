@@ -288,6 +288,7 @@ async fn fork_version_stops_before_older_segments_once_resolved() {
             last_started_turn_id: None,
             turn_attribution: None,
             previous_turn_settings: None,
+            tool_search_activated_tools: Default::default(),
         });
         append_items(
             &child_path,
