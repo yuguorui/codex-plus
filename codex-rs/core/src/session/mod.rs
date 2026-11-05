@@ -657,6 +657,10 @@ impl Session {
             last_started_turn_id: state.last_started_turn_id.clone(),
             turn_attribution: state.turn_attribution.clone(),
             previous_turn_settings: state.previous_turn_settings(),
+            tool_search_activated_tools: self
+                .services
+                .tool_search_handler_cache
+                .activated_deferred_tools(),
         }
     }
 
