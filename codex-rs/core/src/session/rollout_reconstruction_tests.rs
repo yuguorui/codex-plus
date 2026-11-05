@@ -1670,6 +1670,7 @@ async fn bounded_replay_matches_full_replay_after_empty_turn_compactions(
                             cyber_access_program: None,
                             realtime_active: Some(false),
                         }),
+                        tool_search_activated_tools: Default::default(),
                     }),
                 })),
                 RolloutItem::WorldState(WorldStateItem::full(object!({
