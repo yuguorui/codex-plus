@@ -424,6 +424,11 @@ pub(crate) fn finalize_tool_router(
     hosted_specs.retain(|spec| registry.tool_policy.allows(&ToolName::plain(spec.name())));
     apply_direct_model_only_namespace_overrides(turn_context, &mut registry);
     enforce_strict_3p_tools(turn_context, model_info, &mut registry);
+    if !turn_context.provider.info().supports_native_tool_search() {
+        // Function-backed tool_search transport: the provider never loads the
+        // discovered tools server-side, so re-declare them on this request.
+        apply_activated_tool_search_upgrades(&mut registry, tool_search_handler_cache);
+    }
     let tool_mode = effective_tool_mode(turn_context, model_info);
     let code_mode_enabled = matches!(tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly);
     if code_mode_enabled {
@@ -669,6 +674,40 @@ fn enforce_strict_3p_tools(
             );
             tool.exposure = ToolExposure::Deferred;
         }
+    }
+}
+
+/// Upgrades tools that a top-level `tool_search` call already surfaced from
+/// deferred exposure to direct wire declaration.
+///
+/// Native Responses providers load `tool_search_output` tools server-side.
+/// Gateways without that support only let the model call tools declared in the
+/// request's tool list, so the client re-declares every activated tool.
+fn apply_activated_tool_search_upgrades(
+    registry: &mut ToolRegistry,
+    tool_search_handler_cache: &ToolSearchHandlerCache,
+) {
+    let activated = tool_search_handler_cache.activated_deferred_tools();
+    if activated.is_empty() {
+        return;
+    }
+    for tool in registry.entries_mut() {
+        if !tool.exposure.is_deferred() {
+            continue;
+        }
+        let tool_name = tool.runtime.tool_name().with_default_namespace();
+        if !activated.contains(&tool_name) {
+            continue;
+        }
+        tool.exposure = match tool.exposure {
+            ToolExposure::Deferred => ToolExposure::Direct,
+            ToolExposure::DeferredModelOnly => ToolExposure::DirectModelOnly,
+            exposure => exposure,
+        };
+        tracing::debug!(
+            tool_name = %tool_name,
+            "Re-declaring tool_search-discovered tool for function-backed transport"
+        );
     }
 }
 

@@ -158,52 +158,100 @@ pub fn create_tools_raw_json_for_responses_api(
 pub fn create_tools_raw_json_for_responses_api_with_function_exec(
     tools: &[ToolSpec],
 ) -> Result<Arc<RawValue>, serde_json::Error> {
+    create_tools_raw_json_for_responses_api_for_capabilities(
+        tools, /*supports_custom_exec_tool*/ false, /*supports_native_tool_search*/ true,
+    )
+}
+
+/// Returns raw Responses tools rewritten for a provider's capability gaps.
+///
+/// `supports_custom_exec_tool = false` rewrites Code Mode's `custom exec` tool
+/// as a `function` tool (except `apply_patch`, which DeepSeek still accepts).
+/// `supports_native_tool_search = false` rewrites the `tool_search` discovery
+/// tool as a `function` tool; gateways such as BigModel accept the native tool
+/// type but never expose it to the model, while plain function tools work.
+/// `tool_search` keeps `strict` unset because its `limit` parameter is optional
+/// and strict schemas require every property to be required.
+pub fn create_tools_raw_json_for_responses_api_for_capabilities(
+    tools: &[ToolSpec],
+    supports_custom_exec_tool: bool,
+    supports_native_tool_search: bool,
+) -> Result<Arc<RawValue>, serde_json::Error> {
     let mut tools = serde_json::to_value(tools)?;
     if let Some(tools) = tools.as_array_mut() {
         for tool in tools {
-            if tool.get("type").and_then(Value::as_str) != Some("custom") {
-                continue;
+            let tool_type = tool.get("type").and_then(Value::as_str);
+            if !supports_custom_exec_tool && tool_type == Some("custom") {
+                rewrite_custom_tool_as_function(tool);
+            } else if !supports_native_tool_search && tool_type == Some("tool_search") {
+                rewrite_tool_search_as_function(tool);
             }
-            let Some(name) = tool.get("name").and_then(Value::as_str) else {
-                continue;
-            };
-            let name = name.to_string();
-            if name == "apply_patch" {
-                continue;
-            }
-            let description = tool
-                .get("description")
-                .cloned()
-                .unwrap_or_else(|| Value::String(String::new()));
-            let input_description = if name == "exec" {
-                "Raw JavaScript source for the exec tool. Put the source in this `input` string; do not send a {\"cmd\": ...} object."
-            } else {
-                "Raw input for the custom tool."
-            };
-            let mut function = serde_json::json!({
-                "type": "function",
-                "name": name,
-                "description": description,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "input": {
-                            "type": "string",
-                            "description": input_description
-                        }
-                    },
-                    "required": ["input"],
-                    "additionalProperties": false
-                },
-                "strict": true
-            });
-            if let Some(defer_loading) = tool.get("defer_loading") {
-                function["defer_loading"] = defer_loading.clone();
-            }
-            *tool = function;
         }
     }
     serde_json::value::to_raw_value(&tools).map(Arc::from)
+}
+
+fn rewrite_custom_tool_as_function(tool: &mut Value) {
+    let Some(name) = tool.get("name").and_then(Value::as_str) else {
+        return;
+    };
+    let name = name.to_string();
+    if name == "apply_patch" {
+        return;
+    }
+    let description = tool
+        .get("description")
+        .cloned()
+        .unwrap_or_else(|| Value::String(String::new()));
+    let input_description = if name == "exec" {
+        "Raw JavaScript source for the exec tool. Put the source in this `input` string; do not send a {\"cmd\": ...} object."
+    } else {
+        "Raw input for the custom tool."
+    };
+    let mut function = serde_json::json!({
+        "type": "function",
+        "name": name,
+        "description": description,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "input": {
+                    "type": "string",
+                    "description": input_description
+                }
+            },
+            "required": ["input"],
+            "additionalProperties": false
+        },
+        "strict": true
+    });
+    if let Some(defer_loading) = tool.get("defer_loading") {
+        function["defer_loading"] = defer_loading.clone();
+    }
+    *tool = function;
+}
+
+fn rewrite_tool_search_as_function(tool: &mut Value) {
+    let description = tool
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let description = format!(
+        "{description}\n\nThe matcher is keyword-based (BM25) over English tool metadata: \
+write `query` in English as tool-related keywords separated by spaces, for example \
+`github repo file reader`. Avoid full sentences and non-English text."
+    );
+    let parameters = tool
+        .get("parameters")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
+    *tool = serde_json::json!({
+        "type": "function",
+        "name": "tool_search",
+        "description": description,
+        "parameters": parameters,
+    });
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
