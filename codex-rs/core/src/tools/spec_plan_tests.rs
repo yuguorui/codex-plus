@@ -12,6 +12,7 @@ use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_5_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+use codex_model_provider_info::ModelProviderCapabilities;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
@@ -226,6 +227,15 @@ fn plan_with_model(
     model_info: &ModelInfo,
     inputs: ToolPlanInputs,
 ) -> ToolRouter {
+    plan_with_model_and_cache(turn, model_info, inputs, &ToolSearchHandlerCache::default())
+}
+
+fn plan_with_model_and_cache(
+    turn: &TurnContext,
+    model_info: &ModelInfo,
+    inputs: ToolPlanInputs,
+    tool_search_handler_cache: &ToolSearchHandlerCache,
+) -> ToolRouter {
     let mcp = codex_mcp::McpBinding::empty(mcp_config_for_test(&turn.config));
     let mut registry = build_core_tool_registry(
         turn,
@@ -248,7 +258,7 @@ fn plan_with_model(
         model_info,
         registry,
         hosted_specs,
-        &Default::default(),
+        tool_search_handler_cache,
     )
 }
 
@@ -1312,6 +1322,84 @@ async fn sleep_tool_stays_direct_and_outside_code_mode() {
         }
         assert!(!exec.description.contains("clock__sleep"));
     }
+}
+
+#[tokio::test]
+async fn activated_tool_search_tools_are_redeclared_for_function_backed_providers() {
+    let searchable_mcp = || ToolPlanInputs {
+        tool_runtimes: vec![mcp_runtime(
+            "searchable",
+            "mcp__searchable",
+            "lookup",
+            ToolExposure::Deferred,
+        )],
+        ..ToolPlanInputs::default()
+    };
+    let cache = ToolSearchHandlerCache::default();
+
+    let (_session, mut turn) = make_session_and_context().await;
+    update_turn_settings_for_test(&mut turn, |settings| {
+        Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
+    });
+    let provider_info = ModelProviderInfo {
+        name: "Function Search Gateway".to_string(),
+        capabilities: Some(ModelProviderCapabilities {
+            supports_native_tool_search: Some(false),
+            ..Default::default()
+        }),
+        ..ModelProviderInfo::default()
+    };
+    update_config(&mut turn, |config| {
+        config.model_provider_id = "function-search".to_string();
+        config.model_provider = provider_info.clone();
+    });
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+
+    let before = ToolPlanProbe::from_router(plan_with_model_and_cache(
+        &turn,
+        turn.model_info(),
+        searchable_mcp(),
+        &cache,
+    ));
+    before.assert_visible_contains(&["tool_search"]);
+    before.assert_visible_lacks(&["mcp__searchable"]);
+
+    cache.activate_tools([ToolName::namespaced("mcp__searchable", "lookup")]);
+    let after = ToolPlanProbe::from_router(plan_with_model_and_cache(
+        &turn,
+        turn.model_info(),
+        searchable_mcp(),
+        &cache,
+    ));
+    after.assert_visible_contains(&["tool_search"]);
+    after.assert_visible_contains(&["mcp__searchable"]);
+    let upgraded = after
+        .exposures
+        .iter()
+        .find(|(name, _)| name.contains("lookup"))
+        .expect("lookup tool stays registered");
+    assert_eq!(*upgraded.1, ToolExposure::Direct);
+
+    // Native providers load discovered tools server-side, so the same
+    // activation bookkeeping must not re-declare anything.
+    let (_native_session, mut native_turn) = make_session_and_context().await;
+    update_turn_settings_for_test(&mut native_turn, |settings| {
+        Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
+    });
+    let native = ToolPlanProbe::from_router(plan_with_model_and_cache(
+        &native_turn,
+        native_turn.model_info(),
+        searchable_mcp(),
+        &cache,
+    ));
+    native.assert_visible_contains(&["tool_search"]);
+    native.assert_visible_lacks(&["mcp__searchable"]);
+    let still_deferred = native
+        .exposures
+        .iter()
+        .find(|(name, _)| name.contains("lookup"))
+        .expect("lookup tool stays registered");
+    assert_eq!(*still_deferred.1, ToolExposure::Deferred);
 }
 
 #[tokio::test]
