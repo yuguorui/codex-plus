@@ -757,6 +757,7 @@ fn compacted_resume_metadata_presence_round_trips_empty_values() -> Result<()> {
         last_started_turn_id: None,
         turn_attribution: None,
         previous_turn_settings: None,
+        tool_search_activated_tools: Default::default(),
     };
     let item = CompactedItem {
         message: "summary".to_string(),
@@ -872,6 +873,7 @@ fn compacted_metadata_remains_compatible_with_legacy_response_item_readers() -> 
             last_started_turn_id: Some("turn-1".to_string()),
             turn_attribution: None,
             previous_turn_settings: None,
+            tool_search_activated_tools: Default::default(),
         }),
     })))?;
 

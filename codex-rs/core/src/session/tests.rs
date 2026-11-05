@@ -6081,6 +6081,130 @@ async fn settings_checkpoint_waits_for_accepted_settings_persistence() {
     );
 }
 
+#[tokio::test]
+async fn compaction_checkpoint_recovers_tool_search_activations_on_bounded_resume() {
+    let (mut session, turn_context) = make_session_and_context().await;
+    let rollout_path = attach_thread_persistence(&mut session).await;
+    let discovered = codex_tools::ToolName::namespaced("mcp__zread", "get_repo_structure");
+    session
+        .record_conversation_items(
+            &turn_context,
+            turn_context.model_info(),
+            &[
+                user_message("find a repo reader"),
+                ResponseItem::FunctionCall {
+                    status: None,
+                    encrypted_content: None,
+                    id: None,
+                    name: "tool_search".to_string(),
+                    namespace: None,
+                    arguments: r#"{"query":"github repo reader"}"#.to_string(),
+                    encrypted_function_args: None,
+                    call_id: "call-search".to_string(),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::FunctionCallOutput {
+                    id: None,
+                    call_id: Some("call-search".to_string()),
+                    name: Some("tool_search".to_string()),
+                    namespace: None,
+                    output: FunctionCallOutputPayload::from_text(
+                        r#"[{"type":"namespace","name":"mcp__zread","tools":[{"type":"function","name":"get_repo_structure"}]}]"#
+                            .to_string(),
+                    ),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+            ],
+        )
+        .await;
+    session
+        .services
+        .tool_search_handler_cache
+        .activate_tools([discovered.clone()]);
+
+    let history = session.clone_history().await;
+    let rebuilt = crate::compact::build_compacted_history(&history, "summary");
+    assert!(
+        !rebuilt.iter().any(|envelope| matches!(
+            &envelope.item,
+            ResponseItem::FunctionCall { name, .. } if name == "tool_search"
+        ) || matches!(
+            &envelope.item,
+            ResponseItem::FunctionCallOutput { call_id, .. }
+                if call_id.as_deref() == Some("call-search")
+        )),
+        "compaction drops the tool_search pairs from the replacement history"
+    );
+
+    let (window_number, window_ids) = session.advance_auto_compact_window().await;
+    assert!(
+        session
+            .replace_compacted_history(
+                rebuilt,
+                turn_context.to_turn_context_item(),
+                WorldStateSnapshot::default(),
+                /*rejected_audio_file_ids*/ Default::default(),
+                CompactedHistoryMetadata {
+                    input_goal_ids: Default::default(),
+                    message: "summary".to_string(),
+                    window_number,
+                    window_ids,
+                    compaction_response_id: None,
+                    compaction_model_hash: None,
+                    reviewer_compaction_hash: None,
+                },
+            )
+            .await
+    );
+    assert!(
+        session
+            .services
+            .tool_search_handler_cache
+            .activated_deferred_tools()
+            .contains(&discovered),
+        "in-session compaction must keep the live activation set"
+    );
+    session
+        .flush_rollout()
+        .await
+        .expect("flush compacted history");
+
+    let (items, _, _) = RolloutRecorder::load_rollout_items(&rollout_path)
+        .await
+        .expect("read compacted history");
+    // Paginated resumes scan newest-first and stop at the newest compaction.
+    let mut scan = codex_rollout::ModelContextScan::default();
+    for item in items.iter().rev() {
+        if scan.push(item.clone()) == codex_rollout::ModelContextScanProgress::Complete {
+            break;
+        }
+    }
+    let bounded = scan.finish();
+    assert!(
+        bounded
+            .iter()
+            .any(|item| matches!(item, RolloutItem::Compacted(_)))
+    );
+    assert!(
+        !bounded.iter().any(|item| matches!(
+            item,
+            RolloutItem::ResponseItem(envelope)
+                if matches!(
+                    &envelope.item,
+                    ResponseItem::FunctionCall { name, .. } if name == "tool_search"
+                )
+        )),
+        "bounded resume history no longer contains the pre-compaction search pairs"
+    );
+
+    let resumed = crate::tools::handlers::ToolSearchHandlerCache::default();
+    resumed.recover_activations(bounded.iter());
+    assert!(
+        resumed.activated_deferred_tools().contains(&discovered),
+        "resume after compaction must recover the checkpointed activations"
+    );
+}
+
 #[test_case(None; "idle")]
 #[test_case(Some(ActiveTurn::default()); "reserved turn")]
 #[test_case(Some(ActiveTurn {
@@ -6201,6 +6325,7 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
             root_turn_id: turn_context_baseline.root_turn_id.clone(),
         }),
         previous_turn_settings: Some(previous_turn_settings),
+        tool_search_activated_tools: Default::default(),
     };
     let expected_settings = ThreadSettingsAppliedEvent {
         thread_id: Some(session.thread_id()),
