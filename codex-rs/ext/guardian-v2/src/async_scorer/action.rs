@@ -26,7 +26,7 @@ impl GuardianAction {
                 serde_json::from_str(&arguments).unwrap_or(serde_json::Value::String(arguments))
             }
             ToolPayload::Custom { input } => serde_json::Value::String(input),
-            ToolPayload::ToolSearch { arguments } => json!(arguments),
+            ToolPayload::ToolSearch { arguments, .. } => json!(arguments),
         };
         let mut action = match arguments {
             serde_json::Value::Object(arguments) => arguments,

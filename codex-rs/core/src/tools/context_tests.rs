@@ -347,6 +347,7 @@ fn tool_search_payloads_roundtrip_as_tool_search_outputs() {
             query: "calendar".to_string(),
             limit: None,
         },
+        transport: codex_tools::ToolSearchTransport::Native,
     };
     let response = ToolSearchOutput {
         tools: vec![LoadableToolSpec::Function(codex_tools::ResponsesApiTool {
@@ -391,6 +392,68 @@ fn tool_search_payloads_roundtrip_as_tool_search_outputs() {
         }
         other => panic!("expected ToolSearchOutput, got {other:?}"),
     }
+}
+
+#[test]
+fn tool_search_terminal_outputs_pair_with_the_call_transport() {
+    for transport in [
+        codex_tools::ToolSearchTransport::Native,
+        codex_tools::ToolSearchTransport::Function,
+    ] {
+        let item = crate::tools::context::tool_search_terminal_response_item(
+            "call-x",
+            "query must not be empty",
+            transport,
+        );
+        match (transport, item) {
+            (
+                codex_tools::ToolSearchTransport::Native,
+                ResponseInputItem::ToolSearchOutput { call_id, .. },
+            ) => assert_eq!(call_id, "call-x"),
+            (
+                codex_tools::ToolSearchTransport::Function,
+                ResponseInputItem::FunctionCallOutput { call_id, output },
+            ) => {
+                assert_eq!(call_id, "call-x");
+                assert_eq!(output.text_content(), Some("query must not be empty"));
+                assert_eq!(output.success, Some(false));
+            }
+            (transport, item) => panic!("mismatched terminal item for {transport:?}: {item:?}"),
+        }
+    }
+}
+
+#[test]
+fn aborted_tool_output_pairs_with_the_call_transport() {
+    let aborted = crate::tools::context::AbortedToolOutput {
+        message: "aborted by user after 1.5s".to_string(),
+    };
+    let native_payload = ToolPayload::ToolSearch {
+        arguments: SearchToolCallParams {
+            query: "calendar".to_string(),
+            limit: None,
+        },
+        transport: codex_tools::ToolSearchTransport::Native,
+    };
+    assert!(matches!(
+        aborted.to_response_item("call-a", &native_payload),
+        ResponseInputItem::ToolSearchOutput { .. }
+    ));
+
+    let function_payload = ToolPayload::ToolSearch {
+        arguments: SearchToolCallParams {
+            query: "calendar".to_string(),
+            limit: None,
+        },
+        transport: codex_tools::ToolSearchTransport::Function,
+    };
+    let ResponseInputItem::FunctionCallOutput { call_id, output } =
+        aborted.to_response_item("call-b", &function_payload)
+    else {
+        panic!("function transport abort must pair a function_call_output")
+    };
+    assert_eq!(call_id, "call-b");
+    assert_eq!(output.text_content(), Some("aborted by user after 1.5s"));
 }
 
 #[test]
