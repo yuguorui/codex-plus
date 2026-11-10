@@ -279,11 +279,13 @@ impl WorkflowToolExecutor {
         .await
         .map_err(model_bounded_error)?;
         if restore_resume_args && let Some(run_id) = resolved.resume_from_run_id.as_deref() {
-            resolved.args = self
+            let (args, args_present) = self
                 .service
                 .resume_args(self.thread_id, run_id)
                 .await
                 .map_err(model_bounded_error)?;
+            resolved.args = args;
+            resolved.args_present = args_present;
         }
         let declared_patterns = resolved
             .script
@@ -507,6 +509,7 @@ impl WorkflowToolExecutor {
             verify_workflow_approval_artifact(&artifact).await?;
         }
         preflight_model_launch_response(self.thread_id, &config, &resolved)?;
+        let token_budget = invocation.turn_item_emitter.token_budget();
         let launch = self
             .service
             .launch(WorkflowLaunchRequest {
@@ -519,6 +522,7 @@ impl WorkflowToolExecutor {
                 captured_environments,
                 environment_location: location,
                 declared_inputs,
+                token_budget,
             })
             .await
             .map_err(model_bounded_error)?;

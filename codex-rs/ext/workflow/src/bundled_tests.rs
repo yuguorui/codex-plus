@@ -1101,7 +1101,8 @@ fn assert_synthesis_failure_attempts(
         | WorkflowAgentFailureKind::Skipped => vec![0],
         WorkflowAgentFailureKind::Cancelled
         | WorkflowAgentFailureKind::Stalled
-        | WorkflowAgentFailureKind::Blocked => {
+        | WorkflowAgentFailureKind::Blocked
+        | WorkflowAgentFailureKind::StructuredOutput => {
             panic!("unsupported final synthesis failure kind: {kind:?}")
         }
     };

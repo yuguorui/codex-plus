@@ -104,6 +104,11 @@ pub trait ToolTokenBudget: Send + Sync {
     fn total(&self) -> u64;
 
     fn spent(&self) -> u64;
+
+    /// Whether reaching the target is a hard limit or an observation-only budget.
+    fn enforce_limit(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

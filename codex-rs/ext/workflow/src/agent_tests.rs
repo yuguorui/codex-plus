@@ -565,7 +565,12 @@ fn schema_complexity_is_bounded_before_recursive_processing() {
     let rejected_depth = json!({ "not": accepted_depth });
     let error = structured_output_contract(&rejected_depth, true)
         .expect_err("schema nesting beyond the limit must fail before validation");
+    assert_eq!(error.kind, WorkflowAgentFailureKind::StructuredOutput);
     assert_eq!(error.message, "use a focused workflow agent schema");
+
+    let error = strict_output_schema(&rejected_depth)
+        .expect_err("strict schema normalization must report bounded-schema failures");
+    assert_eq!(error.kind, WorkflowAgentFailureKind::StructuredOutput);
 
     let accepted_nodes = JsonValue::Array(vec![json!(0); MAX_OUTPUT_SCHEMA_NODES - 1]);
     assert!(serialize_bounded_schema(&accepted_nodes, "workflow agent schema").is_ok());
@@ -573,7 +578,34 @@ fn schema_complexity_is_bounded_before_recursive_processing() {
     let rejected_nodes = JsonValue::Array(vec![json!(0); MAX_OUTPUT_SCHEMA_NODES]);
     let error = structured_output_contract(&rejected_nodes, true)
         .expect_err("schema node count beyond the limit must fail before validation");
+    assert_eq!(error.kind, WorkflowAgentFailureKind::StructuredOutput);
     assert_eq!(error.message, "use a focused workflow agent schema");
+}
+
+#[test]
+fn invalid_structured_output_schema_maps_to_structured_output_failure() {
+    let error = structured_output_contract(&json!({ "type": 5 }), true)
+        .expect_err("an invalid JSON schema must fail before starting the agent");
+    assert_eq!(error.kind, WorkflowAgentFailureKind::StructuredOutput);
+    assert!(error.message.contains("invalid workflow agent JSON schema"));
+}
+
+#[test]
+fn exhausted_structured_output_retries_map_to_structured_output_failure() {
+    let error = exhausted_structured_output_failure(17, 3);
+
+    assert_eq!(error.kind, WorkflowAgentFailureKind::StructuredOutput);
+    assert_eq!(
+        error.message,
+        "workflow agent exhausted structured output retries"
+    );
+    assert_eq!(
+        error.usage,
+        WorkflowTokenUsage {
+            total_tokens: 17,
+            tool_uses: 3,
+        }
+    );
 }
 
 #[test]
@@ -1438,4 +1470,218 @@ async fn assert_worktree_retained(repository: &Path, path: &Path, branch: &str) 
         .unwrap();
     assert!(branches.status.success());
     assert!(!branches.stdout.is_empty(), "branch {branch} was removed");
+}
+
+#[test]
+fn denied_tools_override_allowed_tools_without_crossing_namespaces() {
+    let policy = codex_extension_api::ToolPolicy {
+        allowed_tools: Some(vec![
+            codex_extension_api::ToolName::plain("exec_command"),
+            codex_extension_api::ToolName::plain("write_stdin"),
+        ]),
+        denied_tools: Some(vec![codex_extension_api::ToolName::plain("exec_command")]),
+        ..Default::default()
+    };
+
+    assert!(!policy.allows(&codex_extension_api::ToolName::plain("exec_command")));
+    assert!(!policy.allows(&codex_extension_api::ToolName::namespaced(
+        "functions",
+        "exec_command"
+    )));
+    assert!(policy.allows(&codex_extension_api::ToolName::plain("write_stdin")));
+
+    let denied_only = codex_extension_api::ToolPolicy {
+        denied_tools: Some(vec![codex_extension_api::ToolName::plain("exec_command")]),
+        ..Default::default()
+    };
+    assert!(
+        denied_only.allows(&codex_extension_api::ToolName::namespaced(
+            "mcp__server",
+            "exec_command"
+        ))
+    );
+}
+
+#[test]
+fn workflow_agent_policy_maps_claude_names_without_overmatching_namespaces() {
+    let options = codex_workflow::WorkflowAgentOptions {
+        disallowed_tools: Some(vec![
+            "Bash".to_string(),
+            "Write".to_string(),
+            "Edit".to_string(),
+            "Agent".to_string(),
+            "Read".to_string(),
+            "CustomTool".to_string(),
+            "mcp__server__Bash".to_string(),
+            "mcp__github__create-issue".to_string(),
+            "mcp__linear__*".to_string(),
+        ]),
+        ..Default::default()
+    };
+
+    let policy = workflow_agent_tool_policy(&options).expect("policy should be installed");
+    for denied in [
+        codex_extension_api::ToolName::plain("exec_command"),
+        codex_extension_api::ToolName::plain("write_stdin"),
+        codex_extension_api::ToolName::plain("apply_patch"),
+        codex_extension_api::ToolName::plain("Edit"),
+        codex_extension_api::ToolName::plain("fuzz_view_edit"),
+        codex_extension_api::ToolName::plain("spawn_agent"),
+        codex_extension_api::ToolName::plain("Read"),
+        codex_extension_api::ToolName::plain("CustomTool"),
+        codex_extension_api::ToolName::plain("mcp__server__Bash"),
+    ] {
+        assert!(!policy.allows(&denied), "tool should be denied: {denied}");
+    }
+    assert!(!policy.allows(&codex_extension_api::ToolName::namespaced(
+        "mcp__server",
+        "Bash"
+    )));
+    assert!(policy.allows(&codex_extension_api::ToolName::namespaced(
+        "mcp__server",
+        "exec_command"
+    )));
+    assert!(policy.allows(&codex_extension_api::ToolName::namespaced(
+        "mcp__other",
+        "Bash"
+    )));
+    assert!(policy.allows(&codex_extension_api::ToolName::namespaced(
+        "mcp__server_extra",
+        "Bash"
+    )));
+    assert!(!policy.allows(&codex_extension_api::ToolName::namespaced(
+        "mcp__github",
+        "create_issue"
+    )));
+    assert!(!policy.allows(&codex_extension_api::ToolName::namespaced(
+        "github",
+        "create_issue"
+    )));
+    assert!(!policy.allows(&codex_extension_api::ToolName::namespaced(
+        "mcp__linear",
+        "anything"
+    )));
+    assert!(!policy.allows(&codex_extension_api::ToolName::namespaced(
+        "linear", "anything"
+    )));
+    assert!(policy.allows(&codex_extension_api::ToolName::namespaced(
+        "mcp__github",
+        "list_issues"
+    )));
+    assert!(policy.allows(&codex_extension_api::ToolName::namespaced(
+        "mcp__linear_extra",
+        "anything"
+    )));
+}
+
+#[test]
+fn disallowed_tools_star_and_mcp_wildcards_deny_the_expected_surface() {
+    let deny_all = codex_workflow::WorkflowAgentOptions {
+        disallowed_tools: Some(vec!["*".to_string()]),
+        ..Default::default()
+    };
+    let policy = workflow_agent_tool_policy(&deny_all).expect("policy should be installed");
+    assert!(!policy.allows(&codex_extension_api::ToolName::plain("exec_command")));
+    assert!(!policy.allows(&codex_extension_api::ToolName::plain("Read")));
+
+    let mcp = codex_workflow::WorkflowAgentOptions {
+        disallowed_tools: Some(vec!["mcp__server__*".to_string()]),
+        ..Default::default()
+    };
+    let policy = workflow_agent_tool_policy(&mcp).expect("policy should be installed");
+    assert!(!policy.allows(&codex_extension_api::ToolName::namespaced(
+        "mcp__server",
+        "Bash"
+    )));
+    assert!(policy.allows(&codex_extension_api::ToolName::namespaced(
+        "mcp__server_extra",
+        "Bash"
+    )));
+    assert!(policy.allows(&codex_extension_api::ToolName::namespaced(
+        "mcp__other",
+        "Bash"
+    )));
+
+    let every_mcp = codex_workflow::WorkflowAgentOptions {
+        disallowed_tools: Some(vec!["mcp__*".to_string()]),
+        ..Default::default()
+    };
+    let policy = workflow_agent_tool_policy(&every_mcp).expect("policy should be installed");
+    assert!(!policy.allows(&codex_extension_api::ToolName::namespaced(
+        "mcp__server",
+        "Bash"
+    )));
+    assert!(!policy.allows(&codex_extension_api::ToolName::namespaced("server", "Bash")));
+    assert!(policy.allows(&codex_extension_api::ToolName::plain("Read")));
+}
+
+#[test]
+fn workflow_agent_extension_init_merges_disallowed_tools_and_bash_clamp() {
+    let options = codex_workflow::WorkflowAgentOptions {
+        disallowed_tools: Some(vec!["Bash".to_string()]),
+        bash_command_clamp: Some(vec!["Bash(git:*)".to_string()]),
+        ..Default::default()
+    };
+
+    let init = workflow_agent_extension_init_with_options(None, &options);
+    let policy = init
+        .get::<codex_extension_api::ToolPolicy>()
+        .expect("workflow agent policy should be merged into extension init");
+
+    assert!(!policy.allows(&codex_extension_api::ToolName::plain("exec_command")));
+    assert!(policy.allows_bash_command("git status"));
+    assert!(!policy.allows_bash_command("rm -rf /"));
+}
+
+#[test]
+fn bash_command_clamp_matches_exact_first_token_and_prefix_rules() {
+    let clamp = codex_extension_api::BashCommandClamp::from_rules([
+        "Bash(git status)",
+        "Bash(cargo)",
+        "Bash(npm run test:*)",
+        "Bash(pnpm *)",
+    ]);
+
+    assert!(clamp.allows_command("git status"));
+    assert!(!clamp.allows_command("git status --short"));
+    assert!(clamp.allows_command("cargo test --release"));
+    assert!(clamp.allows_command("npm run test:unit"));
+    assert!(clamp.allows_command("pnpm install"));
+    assert!(!clamp.allows_command("rm -rf /"));
+    assert!(!clamp.allows_command("cargo test && rm -rf /"));
+    assert!(!clamp.allows_command("npm run test:unit | sh"));
+    assert!(!clamp.allows_command("git status\nrm -rf /"));
+    assert!(!clamp.allows_command("git status > /tmp/out"));
+
+    let any = codex_extension_api::BashCommandClamp::from_rules(["Bash(ls)", "Bash"]);
+    assert!(any.allows_command("anything --goes"));
+    let wildcard = codex_extension_api::BashCommandClamp::from_rules(["Bash(*)"]);
+    assert!(wildcard.allows_command("anything && --goes"));
+}
+
+#[test]
+fn bash_command_clamp_fails_closed_for_empty_and_malformed_rules() {
+    for rules in [
+        Vec::<&str>::new(),
+        vec![""],
+        vec!["   "],
+        vec!["Bash()"],
+        vec!["Bash(git:*"],
+        vec!["Bash(:*)"],
+        vec!["Bash(git*)"],
+        vec!["Bash(git:*)", ""],
+    ] {
+        let clamp = codex_extension_api::BashCommandClamp::from_rules(rules);
+        assert!(!clamp.allows_command("git status"));
+        assert!(!clamp.allows_command("ls"));
+    }
+
+    assert!(codex_extension_api::ToolPolicy::default().allows_bash_command("anything"));
+    let policy = codex_extension_api::ToolPolicy {
+        bash_command_clamp: Some(codex_extension_api::BashCommandClamp::from_rules(
+            Vec::<&str>::new(),
+        )),
+        ..Default::default()
+    };
+    assert!(!policy.allows_bash_command("anything"));
 }

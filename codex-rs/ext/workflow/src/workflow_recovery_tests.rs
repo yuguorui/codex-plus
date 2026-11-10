@@ -1,4 +1,5 @@
 use super::*;
+use crate::service::PersistedWorkflowBudget;
 use codex_protocol::workflow::WorkflowUsage;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
@@ -94,6 +95,11 @@ fn snapshot(status: WorkflowTaskStatus, error: Option<&str>) -> WorkflowTaskSnap
         transcript_dir: root.join("transcript"),
         script_path: root.join("workflow.js"),
         args: JsonValue::Null,
+        args_present: true,
+        budget: PersistedWorkflowBudget {
+            recorded: true,
+            ..Default::default()
+        },
         result_artifact: None,
         output_file: root.join("workflow.json"),
         progress: Vec::new(),

@@ -140,6 +140,32 @@ async fn started_tombstone_does_not_hide_other_source_results() {
 }
 
 #[tokio::test]
+async fn replay_tombstones_are_not_resume_breakpoints() {
+    let directory = tempfile::tempdir().unwrap();
+    let source_path = directory.path().join("source");
+    let source = FileWorkflowJournal::open(source_path.clone(), None)
+        .await
+        .unwrap();
+    source
+        .append_result("source-key".to_string(), result("source"))
+        .await
+        .unwrap();
+    drop(source);
+
+    let current = FileWorkflowJournal::open(directory.path().join("current"), Some(&source_path))
+        .await
+        .unwrap();
+    assert_eq!(current.replay("absent-key").await.unwrap(), None);
+    assert!(!current.started("absent-key").await.unwrap());
+
+    current
+        .append_started("real-key".to_string())
+        .await
+        .unwrap();
+    assert!(current.started("real-key").await.unwrap());
+}
+
+#[tokio::test]
 async fn prefix_result_remains_available_after_an_unrelated_source_miss() {
     let directory = tempfile::tempdir().unwrap();
     let source_path = directory.path().join("source");

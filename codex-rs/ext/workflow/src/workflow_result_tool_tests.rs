@@ -1,5 +1,6 @@
 use super::*;
 use crate::result_artifact::WorkflowResultArtifact;
+use crate::service::PersistedWorkflowBudget;
 use codex_extension_api::ConversationHistory;
 use codex_extension_api::ExtensionItem;
 use codex_extension_api::NoopExtensionEventSink;
@@ -616,6 +617,11 @@ fn snapshot(status: WorkflowTaskStatus, result_bytes: usize) -> WorkflowTaskSnap
         transcript_dir: root.join("transcript"),
         script_path: root.join("workflow.js"),
         args: JsonValue::Null,
+        args_present: true,
+        budget: PersistedWorkflowBudget {
+            recorded: true,
+            ..Default::default()
+        },
         result_artifact: workflow_result_is_available(status).then_some(WorkflowResultArtifact {
             sha256: "0".repeat(64),
             bytes: u64::try_from(result_bytes).unwrap(),

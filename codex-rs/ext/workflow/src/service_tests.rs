@@ -317,6 +317,25 @@ impl RestoreFixture {
         snapshot
     }
 
+    async fn rewrite_snapshot(&self, snapshot: &WorkflowTaskSnapshot, source: &str) {
+        let script = validate_workflow_script(source).unwrap();
+        let environment = local_environment(&self.config);
+        write_current_snapshot(
+            &snapshot.output_file,
+            snapshot,
+            &PersistedWorkflowExecutionContext::capture(
+                &self.config,
+                self.thread_id,
+                WorkflowEnvironmentLocation::Local,
+                &[environment],
+            )
+            .await,
+            &PersistedWorkflowComposition::empty(&script),
+        )
+        .await
+        .unwrap();
+    }
+
     async fn prepare_snapshot(
         &self,
         run_id: &str,
@@ -345,6 +364,11 @@ impl RestoreFixture {
             transcript_dir: transcript_dir.clone(),
             script_path: script_path.clone(),
             args: JsonValue::Null,
+            args_present: true,
+            budget: PersistedWorkflowBudget {
+                recorded: true,
+                ..Default::default()
+            },
             result_artifact: None,
             output_file: transcript_dir.join(format!("{run_id}.output")),
             progress: Vec::new(),
@@ -497,6 +521,45 @@ impl RestoreFixture {
         environments: Vec<TurnEnvironmentSelection>,
         declared_inputs: WorkflowDeclaredInputs,
     ) -> Result<WorkflowLaunch, WorkflowServiceError> {
+        self.try_launch_with_args_inputs_and_budget(
+            source,
+            args,
+            resume_from_run_id,
+            environments,
+            declared_inputs,
+            None,
+        )
+        .await
+    }
+
+    async fn try_launch_with_args_and_budget(
+        &self,
+        source: &str,
+        args: JsonValue,
+        resume_from_run_id: Option<String>,
+        environments: Vec<TurnEnvironmentSelection>,
+        token_budget: Option<Arc<dyn codex_tools::ToolTokenBudget>>,
+    ) -> Result<WorkflowLaunch, WorkflowServiceError> {
+        self.try_launch_with_args_inputs_and_budget(
+            source,
+            args,
+            resume_from_run_id,
+            environments,
+            WorkflowDeclaredInputs::default(),
+            token_budget,
+        )
+        .await
+    }
+
+    async fn try_launch_with_args_inputs_and_budget(
+        &self,
+        source: &str,
+        args: JsonValue,
+        resume_from_run_id: Option<String>,
+        environments: Vec<TurnEnvironmentSelection>,
+        declared_inputs: WorkflowDeclaredInputs,
+        token_budget: Option<Arc<dyn codex_tools::ToolTokenBudget>>,
+    ) -> Result<WorkflowLaunch, WorkflowServiceError> {
         let script = validate_workflow_script(source).unwrap();
         let composition = FrozenWorkflowComposition::empty(&script);
         self.service
@@ -507,6 +570,7 @@ impl RestoreFixture {
                 resolved: ResolvedWorkflow {
                     script,
                     args,
+                    args_present: true,
                     resume_from_run_id,
                     origin: crate::discovery::WorkflowOrigin::Inline,
                     shadows_existing: false,
@@ -517,6 +581,7 @@ impl RestoreFixture {
                 captured_environments: None,
                 environment_location: WorkflowEnvironmentLocation::Local,
                 declared_inputs,
+                token_budget,
             })
             .await
     }
@@ -549,6 +614,7 @@ impl RestoreFixture {
                 resolved: ResolvedWorkflow {
                     script,
                     args: JsonValue::Null,
+                    args_present: true,
                     resume_from_run_id,
                     origin: crate::discovery::WorkflowOrigin::Inline,
                     shadows_existing: false,
@@ -559,6 +625,7 @@ impl RestoreFixture {
                 captured_environments: None,
                 environment_location: WorkflowEnvironmentLocation::Local,
                 declared_inputs: Default::default(),
+                token_budget: None,
             })
             .await
             .unwrap()
@@ -602,6 +669,204 @@ fn local_environment(config: &Config) -> TurnEnvironmentSelection {
         config: EnvironmentConfigState::FromThread,
         selected_capability_roots: Default::default(),
     }
+}
+
+struct FixedToolTokenBudget {
+    total: u64,
+    spent: u64,
+}
+
+impl codex_tools::ToolTokenBudget for FixedToolTokenBudget {
+    fn total(&self) -> u64 {
+        self.total
+    }
+
+    fn spent(&self) -> u64 {
+        self.spent
+    }
+}
+
+#[test]
+fn tool_token_budget_adapter_forwards_total_and_spent() {
+    let adapted = adapt_tool_token_budget(Some(Arc::new(FixedToolTokenBudget {
+        total: 150,
+        spent: 40,
+    })))
+    .expect("host budget should adapt");
+    assert_eq!(adapted.total(), 150);
+    assert_eq!(adapted.spent(), 40);
+    assert!(adapt_tool_token_budget(None).is_none());
+}
+
+#[tokio::test]
+async fn workflow_runtime_uses_the_adapted_host_token_budget() {
+    let mut fixture = RestoreFixture::new().await;
+    let source = "export const meta = { name: 'budget-test', description: 'read host budget' }; return { total: budget.total, spent: budget.spent() };";
+    let launch = fixture
+        .try_launch_with_args_and_budget(
+            source,
+            JsonValue::Null,
+            None,
+            Vec::new(),
+            Some(Arc::new(FixedToolTokenBudget {
+                total: 150,
+                spent: 40,
+            })),
+        )
+        .await
+        .unwrap();
+
+    let completed = fixture.wait_for_completion(&launch.run_id).await;
+    assert_eq!(completed.status, WorkflowTaskStatus::Completed);
+    let snapshot = fixture
+        .service
+        .list(fixture.thread_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|snapshot| snapshot.run_id == launch.run_id)
+        .expect("completed budget workflow snapshot");
+    assert_eq!(
+        read_snapshot_result(&snapshot).await,
+        json!({ "total": 150, "spent": 40 }),
+    );
+    assert!(snapshot.budget.recorded);
+    assert_eq!(snapshot.budget.total, 150);
+    assert_eq!(snapshot.budget.spent, 40);
+    assert!(snapshot.budget.enforce_limit);
+}
+
+#[tokio::test]
+async fn active_snapshot_without_recorded_budget_pauses_on_restore() {
+    let fixture = RestoreFixture::new().await;
+    let mut snapshot = fixture
+        .prepare_snapshot(
+            "wf_old-budget",
+            WorkflowTaskStatus::Running,
+            WORKFLOW_SOURCE,
+            sha256(WORKFLOW_SOURCE),
+            100,
+        )
+        .await;
+    snapshot.output_file = snapshot_path(&snapshot).unwrap();
+    snapshot.budget = PersistedWorkflowBudget::default();
+    fixture.rewrite_snapshot(&snapshot, WORKFLOW_SOURCE).await;
+
+    fixture.restore().await;
+
+    let restored = fixture
+        .service
+        .list(fixture.thread_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|snapshot| snapshot.run_id == "wf_old-budget")
+        .expect("restored snapshot");
+    assert_eq!(restored.status, WorkflowTaskStatus::Paused);
+    assert!(
+        restored
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("predates persisted token-budget metadata")),
+        "{:?}",
+        restored.error
+    );
+}
+
+#[tokio::test]
+async fn explicit_resume_keeps_the_saved_usage_baseline() {
+    let mut fixture = RestoreFixture::new().await;
+    let source = "export const meta = { name: 'resume-usage', description: 'resume usage' }; return 'resumed'";
+    let mut snapshot = fixture
+        .persist_named(
+            "wf_resume-usage",
+            WorkflowTaskStatus::Failed,
+            source,
+            sha256(source),
+            100,
+        )
+        .await;
+    snapshot.usage = WorkflowUsage {
+        total_tokens: 37,
+        tool_uses: 4,
+        duration_ms: 200,
+        ..Default::default()
+    };
+    fixture.rewrite_snapshot(&snapshot, source).await;
+    FileWorkflowJournal::open(
+        crate::persistence::journal_path(&snapshot.transcript_dir, &snapshot.task_id),
+        /*replay_path*/ None,
+    )
+    .await
+    .unwrap();
+    fixture.restore().await;
+
+    let launch = fixture
+        .try_launch(
+            source,
+            Some("wf_resume-usage".to_string()),
+            vec![local_environment(&fixture.config)],
+        )
+        .await
+        .unwrap();
+    let completed = fixture.wait_for_completion(&launch.run_id).await;
+    assert_eq!(completed.usage.total_tokens, 37);
+    assert_eq!(completed.usage.tool_uses, 4);
+}
+
+#[tokio::test]
+async fn resume_args_restore_the_recorded_args_presence() {
+    let fixture = RestoreFixture::new().await;
+    let mut snapshot = fixture
+        .persist(WorkflowTaskStatus::Failed, WORKFLOW_SOURCE)
+        .await;
+    snapshot.args_present = false;
+    snapshot.args = JsonValue::Null;
+    fixture.rewrite_snapshot(&snapshot, WORKFLOW_SOURCE).await;
+
+    fixture.restore().await;
+
+    let (args, args_present) = fixture
+        .service
+        .resume_args(fixture.thread_id, "wf_restore-test")
+        .await
+        .unwrap();
+    assert_eq!(args, JsonValue::Null);
+    assert!(!args_present);
+
+    let mut legacy = serde_json::to_value(&snapshot).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("argsPresent")
+        .expect("argsPresent field");
+    let decoded: WorkflowTaskSnapshot = serde_json::from_value(legacy).unwrap();
+    assert!(decoded.args_present);
+}
+
+#[tokio::test]
+async fn workflow_without_a_host_token_budget_reports_a_null_total() {
+    let mut fixture = RestoreFixture::new().await;
+    let source = "export const meta = { name: 'budget-test', description: 'read absent host budget' }; return { total: budget.total, spent: budget.spent() };";
+    let launch = fixture
+        .try_launch(source, /*resume_from_run_id*/ None, Vec::new())
+        .await
+        .unwrap();
+
+    let completed = fixture.wait_for_completion(&launch.run_id).await;
+    assert_eq!(completed.status, WorkflowTaskStatus::Completed);
+    let snapshot = fixture
+        .service
+        .list(fixture.thread_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|snapshot| snapshot.run_id == launch.run_id)
+        .expect("completed no-budget workflow snapshot");
+    assert_eq!(
+        read_snapshot_result(&snapshot).await,
+        json!({ "total": null, "spent": 0 }),
+    );
 }
 
 #[tokio::test]
@@ -739,6 +1004,7 @@ async fn evicted_terminal_history_is_lazy_loaded_after_restart() {
             resolved: ResolvedWorkflow {
                 script,
                 args: JsonValue::Null,
+                args_present: true,
                 resume_from_run_id: Some(resumable_run_id.to_string()),
                 origin: crate::discovery::WorkflowOrigin::Inline,
                 shadows_existing: false,
@@ -749,6 +1015,7 @@ async fn evicted_terminal_history_is_lazy_loaded_after_restart() {
             captured_environments: None,
             environment_location: WorkflowEnvironmentLocation::Local,
             declared_inputs: Default::default(),
+            token_budget: None,
         })
         .await
         .unwrap();
@@ -1536,6 +1803,7 @@ async fn concurrent_resume_launches_commit_exactly_one_replacement() {
                     resolved: ResolvedWorkflow {
                         script,
                         args: JsonValue::Null,
+                        args_present: true,
                         resume_from_run_id: Some(run_id),
                         origin: crate::discovery::WorkflowOrigin::Inline,
                         shadows_existing: false,
@@ -1546,6 +1814,7 @@ async fn concurrent_resume_launches_commit_exactly_one_replacement() {
                     captured_environments: None,
                     environment_location: WorkflowEnvironmentLocation::Local,
                     declared_inputs: Default::default(),
+                    token_budget: None,
                 })
                 .await
         })
@@ -1954,6 +2223,7 @@ async fn explicit_resume_reuses_the_run_id_after_an_edited_script_is_reapproved(
             resolved: ResolvedWorkflow {
                 script: edited_script,
                 args: json!({ "revision": 2 }),
+                args_present: true,
                 resume_from_run_id: Some(previous.run_id.clone()),
                 origin: crate::discovery::WorkflowOrigin::Inline,
                 shadows_existing: false,
@@ -1964,6 +2234,7 @@ async fn explicit_resume_reuses_the_run_id_after_an_edited_script_is_reapproved(
             captured_environments: None,
             environment_location: WorkflowEnvironmentLocation::Local,
             declared_inputs: Default::default(),
+            token_budget: None,
         })
         .await
         .unwrap();
@@ -2023,6 +2294,7 @@ async fn edited_script_resume_replays_seeded_successful_agents_without_a_model_r
             resolved: ResolvedWorkflow {
                 script: edited_script,
                 args: JsonValue::Null,
+                args_present: true,
                 resume_from_run_id: Some(previous.run_id.clone()),
                 origin: crate::discovery::WorkflowOrigin::Inline,
                 shadows_existing: false,
@@ -2033,6 +2305,7 @@ async fn edited_script_resume_replays_seeded_successful_agents_without_a_model_r
             captured_environments: None,
             environment_location: WorkflowEnvironmentLocation::Local,
             declared_inputs: Default::default(),
+            token_budget: None,
         })
         .await
         .unwrap();
@@ -2078,7 +2351,7 @@ async fn edited_script_resume_replays_seeded_successful_agents_without_a_model_r
 }
 
 #[tokio::test]
-async fn terminal_agent_failure_fails_with_null_and_preserves_diagnostics() {
+async fn terminal_agent_failure_completes_with_null_and_preserves_diagnostics() {
     let mut fixture = RestoreFixture::new().await;
     let script = validate_workflow_script(
         "export const meta = { name: 'failure-test', description: 'record failure' }; return agent('fail')",
@@ -2094,6 +2367,7 @@ async fn terminal_agent_failure_fails_with_null_and_preserves_diagnostics() {
             resolved: ResolvedWorkflow {
                 script,
                 args: JsonValue::Null,
+                args_present: true,
                 resume_from_run_id: None,
                 origin: crate::discovery::WorkflowOrigin::Inline,
                 shadows_existing: false,
@@ -2104,6 +2378,7 @@ async fn terminal_agent_failure_fails_with_null_and_preserves_diagnostics() {
             captured_environments: None,
             environment_location: WorkflowEnvironmentLocation::Local,
             declared_inputs: Default::default(),
+            token_budget: None,
         })
         .await
         .unwrap();
@@ -2117,9 +2392,9 @@ async fn terminal_agent_failure_fails_with_null_and_preserves_diagnostics() {
         }
     })
     .await
-    .expect("failed workflow should publish a terminal event");
+    .expect("workflow should publish a terminal event");
 
-    assert_eq!(completed.status, WorkflowTaskStatus::Failed);
+    assert_eq!(completed.status, WorkflowTaskStatus::Completed);
     assert_eq!(completed.usage.agent_count, 1);
     assert_eq!(completed.failures.len(), 1);
     assert!(completed.failures[0].contains("thread manager dropped"));
@@ -2945,6 +3220,11 @@ fn workflow_task(
             transcript_dir,
             script_path,
             args: JsonValue::Null,
+            args_present: true,
+            budget: PersistedWorkflowBudget {
+                recorded: true,
+                ..Default::default()
+            },
             result_artifact: None,
             output_file,
             progress: Vec::new(),
@@ -3933,6 +4213,11 @@ async fn terminal_task_keeps_owner_resident_until_completion_delivery_finishes()
             transcript_dir: root.join("transcript"),
             script_path: root.join("workflow.js"),
             args: JsonValue::Null,
+            args_present: true,
+            budget: PersistedWorkflowBudget {
+                recorded: true,
+                ..Default::default()
+            },
             result_artifact: None,
             output_file: root.join("workflow.json"),
             progress: Vec::new(),
@@ -4562,6 +4847,11 @@ fn wait_service_with_task(
             transcript_dir: root.join("transcript"),
             script_path: root.join("workflow.js"),
             args: JsonValue::Null,
+            args_present: true,
+            budget: PersistedWorkflowBudget {
+                recorded: true,
+                ..Default::default()
+            },
             result_artifact: None,
             output_file: root.join("workflow.json"),
             progress: Vec::new(),

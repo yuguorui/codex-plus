@@ -59,6 +59,41 @@ fn compiled_source_does_not_inject_agent_schema_contract_budgeting() {
 }
 
 #[test]
+fn compiled_source_carries_args_presence_and_budget_values() {
+    let script = validate_workflow_script(valid_script("return null")).unwrap();
+
+    let absent = compile_workflow_source_with_context(
+        &script,
+        &serde_json::Value::Null,
+        WorkflowScriptContext {
+            args_present: false,
+            budget_total: Some(25),
+            budget_initial_spent: 7,
+            ..WorkflowScriptContext::default()
+        },
+    )
+    .unwrap();
+    assert!(absent.contains("const __wfHasArgs = false;"));
+    assert!(absent.contains("const __wfBudgetTotal = 25;"));
+    assert!(absent.contains("const __wfBudgetInitialSpent = 7;"));
+
+    let present = compile_workflow_source(&script, &serde_json::Value::Null).unwrap();
+    assert!(present.contains("const __wfHasArgs = true;"));
+    assert!(present.contains("const __wfBudgetTotal = null;"));
+}
+
+#[test]
+fn accepts_and_ignores_unknown_metadata_fields() {
+    let script = validate_workflow_script(
+        "export const meta = { name: 'test', description: 'desc', futureField: { enabled: true } }; return 1",
+    )
+    .unwrap();
+
+    assert_eq!(script.meta.name, "test");
+    assert_eq!(script.meta.description, "desc");
+}
+
+#[test]
 fn rejects_nonliteral_metadata() {
     for source in [
         "export const meta = makeMeta();",
@@ -78,6 +113,21 @@ fn requires_metadata_to_be_the_first_statement() {
     let error = validate_workflow_script("const x = 1; export const meta = {};").unwrap_err();
 
     assert_eq!(error, WorkflowScriptError::MissingMeta);
+}
+
+#[test]
+fn accepts_comments_and_a_shebang_before_metadata() {
+    for prefix in [
+        "// header\n",
+        "/* header */\n",
+        "#!/usr/bin/env node\n// header\n",
+        "\u{feff}// bom header\n",
+    ] {
+        let source = format!(
+            "{prefix}export const meta = {{ name: 'commented', description: 'commented' }}; return 1;"
+        );
+        validate_workflow_script(source).expect("leading trivia should be allowed");
+    }
 }
 
 #[test]
@@ -387,6 +437,21 @@ fn rejects_statically_invalid_agent_options_before_starting_the_workflow() {
             "this agent option must be a string",
         ),
         (
+            "return agent('work', { disallowedTools: 'Bash' })",
+            "disallowedTools",
+            "this agent option must be an array of non-empty strings",
+        ),
+        (
+            "return agent('work', { bashCommandClamp: ['git status', '  '] })",
+            "bashCommandClamp",
+            "this agent option must contain non-empty strings",
+        ),
+        (
+            "return agent('work', { disallowedTools: [1] })",
+            "disallowedTools",
+            "this agent option must be an array of non-empty strings",
+        ),
+        (
             "return agentSettled('work', [])",
             "<options>",
             "agent options must be an object",
@@ -448,6 +513,8 @@ fn accepts_valid_and_dynamic_agent_options() {
         })"#,
         "return agent('work', { label: null, effort: null, isolation: null })",
         "return agent('work', { stallMs: 1800000 })",
+        "return agent('work', { disallowedTools: ['Bash'], bashCommandClamp: ['git status'] })",
+        "return agent('work', { disallowedTools: args.tools, bashCommandClamp: args.commands })",
     ] {
         validate_workflow_script(valid_script(body)).unwrap_or_else(|error| {
             panic!("rejected valid or dynamic agent options in `{body}`: {error}")

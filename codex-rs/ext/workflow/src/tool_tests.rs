@@ -2087,6 +2087,39 @@ struct EnvironmentEmitter {
     environment: ToolExecutionEnvironment,
 }
 
+struct HostBudgetEmitter {
+    budget: Arc<dyn codex_tools::ToolTokenBudget>,
+}
+
+struct FixedHostTokenBudget {
+    total: u64,
+    spent: u64,
+}
+
+impl codex_tools::ToolTokenBudget for FixedHostTokenBudget {
+    fn total(&self) -> u64 {
+        self.total
+    }
+
+    fn spent(&self) -> u64 {
+        self.spent
+    }
+}
+
+impl TurnItemEmitter for HostBudgetEmitter {
+    fn emit_started<'a>(&'a self, _item: ExtensionTurnItem) -> TurnItemEmissionFuture<'a> {
+        Box::pin(std::future::ready(()))
+    }
+
+    fn emit_completed<'a>(&'a self, _item: ExtensionTurnItem) -> TurnItemEmissionFuture<'a> {
+        Box::pin(std::future::ready(()))
+    }
+
+    fn token_budget(&self) -> Option<Arc<dyn codex_tools::ToolTokenBudget>> {
+        Some(Arc::clone(&self.budget))
+    }
+}
+
 impl EnvironmentEmitter {
     fn new(environment: ToolExecutionEnvironment) -> Self {
         Self { environment }
@@ -2137,6 +2170,36 @@ fn workflow_payload() -> ToolPayload {
     workflow_payload_with_source(
         "export const meta = { name: 'approval-test', description: 'Review this script before launch', phases: [{ title: 'Inspect' }, { title: 'Verify' }] }; return 'ok'",
     )
+}
+
+#[tokio::test]
+async fn workflow_tool_forwards_the_host_token_budget_to_the_runtime() {
+    let fixture = ToolFixture::new(AskForApproval::Never).await;
+    let emitter = Arc::new(HostBudgetEmitter {
+        budget: Arc::new(FixedHostTokenBudget {
+            total: 250,
+            spent: 60,
+        }),
+    });
+    let payload = workflow_payload_with_source(
+        "export const meta = { name: 'budget-tool-test', description: 'read host budget' }; return { total: budget.total, spent: budget.spent() };",
+    );
+
+    fixture
+        .handle(workflow_call_with_payload(emitter, payload))
+        .await
+        .unwrap();
+    fixture.wait_for_terminal().await;
+
+    let snapshots = fixture.service.list(fixture.thread_id).await.unwrap();
+    let [snapshot] = snapshots.as_slice() else {
+        panic!("expected one launched workflow");
+    };
+    assert_eq!(snapshot.status, WorkflowTaskStatus::Completed);
+    assert_eq!(
+        read_snapshot_result(snapshot).await,
+        json!({ "total": 250, "spent": 60 }),
+    );
 }
 
 fn workflow_payload_with_source(source: &str) -> ToolPayload {

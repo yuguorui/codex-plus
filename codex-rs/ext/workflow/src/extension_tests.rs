@@ -3,6 +3,7 @@ use crate::analyze_inputs::ANALYZE_WORKFLOW_INPUTS_TOOL_NAME;
 use crate::persistence::snapshot_path;
 use crate::persistence::workflow_session_dir;
 use crate::persistence::write_json;
+use crate::service::PersistedWorkflowBudget;
 use crate::service::WorkflowTaskSnapshot;
 use codex_config::LoaderOverrides;
 use codex_core::config::ConfigBuilder;
@@ -53,6 +54,11 @@ async fn disabled_feature_does_not_restore_persisted_workflows() {
         transcript_dir: scripts_dir.clone(),
         script_path,
         args: serde_json::Value::Null,
+        args_present: true,
+        budget: PersistedWorkflowBudget {
+            recorded: true,
+            ..Default::default()
+        },
         result_artifact: None,
         output_file: scripts_dir.join("wdisabled.output"),
         progress: Vec::new(),

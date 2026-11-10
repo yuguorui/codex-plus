@@ -1,16 +1,5 @@
 use super::*;
 
-struct AgentConcurrencyPermit {
-    local: OwnedSemaphorePermit,
-    global: Option<OwnedSemaphorePermit>,
-}
-
-impl AgentConcurrencyPermit {
-    fn release(self) {
-        drop((self.local, self.global));
-    }
-}
-
 impl WorkflowDelegate {
     pub(super) async fn invoke_agent(
         &self,
@@ -26,24 +15,25 @@ impl WorkflowDelegate {
         if let Some(phase_title) = &mut input.phase_title {
             *phase_title = sanitize_progress_text(phase_title);
         }
-        let inputs_sha256 = workflow_agent_inputs_sha256(input.options.inputs.as_ref())?;
+        let inputs_sha256 =
+            workflow_agent_inputs_sha256(input.options.inputs.as_ref()).map_err(agent_error)?;
         if let Some(label) = input.options.label.as_deref() {
-            ensure_progress_text_bound("workflow agent label", label)?;
+            ensure_progress_text_bound("workflow agent label", label).map_err(agent_error)?;
         }
         if let Some(phase) = input.options.phase.as_deref() {
-            ensure_progress_text_bound("workflow phase title", phase)?;
+            ensure_progress_text_bound("workflow phase title", phase).map_err(agent_error)?;
         }
         if let Some(phase_title) = input.phase_title.as_deref() {
-            ensure_progress_text_bound("workflow phase title", phase_title)?;
+            ensure_progress_text_bound("workflow phase title", phase_title).map_err(agent_error)?;
         }
         if input
             .options
             .stall_ms
             .is_some_and(|stall_ms| stall_ms > MAX_WORKFLOW_AGENT_STALL_MS)
         {
-            return Err(
-                "choose stallMs within the supported workflow agent timeout range".to_string(),
-            );
+            return Err(agent_error(
+                "choose stallMs within the supported workflow agent timeout range",
+            ));
         }
         let journal_key = {
             let mut state = self
@@ -90,20 +80,49 @@ impl WorkflowDelegate {
             .clone()
             .unwrap_or_else(|| format!("agent-{}", input.index + 1));
         let prompt_preview = truncate_utf8(&input.prompt, PROMPT_PREVIEW_BYTES);
-        let replay_allowed = self
-            .invocation_state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .rerun_from
-            .is_none_or(|rerun_from| input.index < rerun_from);
-        let cached = match self.config.journal.as_ref() {
-            Some(journal) => journal.replay(&journal_key).await.map_err(|error| {
-                format!("workflow journal replay failed for agent {label}: {error}")
-            })?,
-            None => None,
+        let cached = {
+            let _replay_guard = self.replay_gate.lock().await;
+            let replay_allowed = {
+                let state = self
+                    .invocation_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state
+                    .rerun_from
+                    .is_none_or(|rerun_from| input.index < rerun_from)
+                    && !state.replay_diverged
+            };
+            let journal = self.config.journal.as_ref();
+            let cached = match journal {
+                Some(journal) if replay_allowed => {
+                    journal.replay(&journal_key).await.map_err(|error| {
+                        format!("workflow journal replay failed for agent {label}: {error}")
+                    })?
+                }
+                Some(_) | None => None,
+            };
+            let cached_hit = cached.is_some();
+            let cached_replayable = cached
+                .as_ref()
+                .is_some_and(|cached| cached_outcome_is_replayable(&cached.outcome));
+            if replay_allowed
+                && !cached_hit
+                && let Some(journal) = journal
+                && !journal.started(&journal_key).await.map_err(|error| {
+                    format!("workflow journal replay failed for agent {label}: {error}")
+                })?
+            {
+                self.mark_replay_diverged();
+            }
+            if replay_allowed && cached_hit && !cached_replayable {
+                // A journaled failure or explicit skip is not a reusable result.
+                // Once resume reaches one, later calls must re-execute even if
+                // their own keys still match the journal.
+                self.mark_replay_diverged();
+            }
+            cached
         };
-        if let Some(cached) =
-            cached.filter(|cached| replay_allowed && cached_outcome_is_replayable(&cached.outcome))
+        if let Some(cached) = cached.filter(|cached| cached_outcome_is_replayable(&cached.outcome))
         {
             let failure = match &cached.outcome {
                 WorkflowAgentOutcome::Success => None,
@@ -154,15 +173,20 @@ impl WorkflowDelegate {
                     )
                     .await
                 }
-                Some((kind, message)) if input.result_mode == AgentResultMode::Settled => {
-                    workflow_tool_result(
-                        agent_failure_value(input.result_mode, kind, &message),
-                        0,
-                        None,
-                    )
-                }
-                Some((_, message)) => Err(message),
+                Some((kind, message)) => workflow_tool_result(
+                    agent_failure_value(input.result_mode, kind, &message),
+                    0,
+                    None,
+                ),
             };
+        }
+        self.check_budget()?;
+        let dispatch_index = self.real_agent_count.fetch_add(1, Ordering::AcqRel);
+        if dispatch_index >= self.config.max_agents {
+            return Err(self.run_level_error(format!(
+                "workflow agent cap exceeded (max {} agents per run)",
+                self.config.max_agents
+            )));
         }
         self.emit_agent(
             &input,
@@ -175,7 +199,8 @@ impl WorkflowDelegate {
             },
         )
         .await;
-        let mut concurrency_permit = Some(self.acquire_agent_permit(&tool_cancellation).await?);
+        let _concurrency_permit = self.acquire_agent_permit(&tool_cancellation).await?;
+        self.check_budget()?;
         if let Some(journal) = self.config.journal.as_ref() {
             journal
                 .append_started(journal_key.clone())
@@ -192,6 +217,7 @@ impl WorkflowDelegate {
         let mut throttle_retried = false;
         let mut agent_usage = WorkflowTokenUsage::default();
         loop {
+            self.check_budget()?;
             let attempt_cancellation = CancellationToken::new();
             let action = Arc::new(AtomicUsize::new(AgentAction::None as usize));
             self.control
@@ -355,7 +381,7 @@ impl WorkflowDelegate {
                 .tool_uses
                 .saturating_add(attempt_usage.tool_uses);
             if let Some(message) = cancelled_message {
-                return Err(message.to_string());
+                return Err(self.run_level_error(message));
             }
             let action = match action.load(Ordering::Acquire) {
                 value if value == AgentAction::Skip as usize => AgentAction::Skip,
@@ -470,10 +496,10 @@ impl WorkflowDelegate {
                     tokio::select! {
                         _ = tokio::time::sleep(backoff) => {}
                         _ = self.control.cancellation.cancelled() => {
-                            return Err("workflow cancelled".to_string());
+                            return Err(self.run_level_error("workflow cancelled"));
                         }
                         _ = tool_cancellation.cancelled() => {
-                            return Err("workflow agent call cancelled".to_string());
+                            return Err(self.run_level_error("workflow agent call cancelled"));
                         }
                     }
                     stall_retries_used += 1;
@@ -486,84 +512,13 @@ impl WorkflowDelegate {
                     tokio::select! {
                         _ = tokio::time::sleep(self.config.throttle_retry_delay) => {}
                         _ = self.control.cancellation.cancelled() => {
-                            return Err("workflow cancelled".to_string());
+                            return Err(self.run_level_error("workflow cancelled"));
+                        }
+                        _ = tool_cancellation.cancelled() => {
+                            return Err(self.run_level_error("workflow agent call cancelled"));
                         }
                     }
                     attempt = attempt.saturating_add(1);
-                }
-                Err(failure) if failure.kind == WorkflowAgentFailureKind::Stalled => {
-                    // A user decision has no deadline. Release the concurrency slot while this
-                    // attempt waits so queued invocations can make progress.
-                    if let Some(permit) = concurrency_permit.take() {
-                        permit.release();
-                    }
-                    let decision = self
-                        .await_user_decision(
-                            &input,
-                            &label,
-                            AgentEventDetails {
-                                queued_at,
-                                started_at: Some(started_at),
-                                attempt,
-                                agent_id: clone_agent_id(&started_agent_id),
-                                awaiting_decision: true,
-                                error: Some(failure.message),
-                                tokens: Some(agent_usage.total_tokens),
-                                tool_calls: Some(agent_usage.tool_uses),
-                                duration_ms: Some(duration_millis(started.elapsed())),
-                                prompt_preview: prompt_preview.clone(),
-                                ..AgentEventDetails::default()
-                            },
-                            &tool_cancellation,
-                        )
-                        .await;
-                    match decision {
-                        Some(AgentAction::Retry) => {
-                            concurrency_permit =
-                                Some(self.acquire_agent_permit(&tool_cancellation).await?);
-                            attempt = attempt.saturating_add(1);
-                        }
-                        Some(AgentAction::Skip) => {
-                            let value = agent_failure_value(
-                                input.result_mode,
-                                WorkflowAgentFailureKind::Skipped,
-                                "skipped by user",
-                            );
-                            self.append_failure(
-                                &journal_key,
-                                WorkflowAgentFailureKind::Skipped,
-                                "skipped by user",
-                                &agent_usage,
-                            )
-                            .await?;
-                            self.emit_agent(
-                                &input,
-                                &label,
-                                WorkflowAgentState::Error,
-                                AgentEventDetails {
-                                    queued_at,
-                                    started_at: Some(started_at),
-                                    attempt,
-                                    agent_id: clone_agent_id(&started_agent_id),
-                                    skipped: true,
-                                    error: Some("skipped by user".to_string()),
-                                    tokens: Some(agent_usage.total_tokens),
-                                    tool_calls: Some(agent_usage.tool_uses),
-                                    duration_ms: Some(duration_millis(started.elapsed())),
-                                    prompt_preview,
-                                    ..AgentEventDetails::default()
-                                },
-                            )
-                            .await;
-                            return workflow_tool_result(value, agent_usage.total_tokens, None);
-                        }
-                        None => {
-                            return Err("workflow cancelled".to_string());
-                        }
-                        Some(AgentAction::None) => {
-                            unreachable!("pending user decision resolves to an action")
-                        }
-                    }
                 }
                 Err(failure) if failure.kind == WorkflowAgentFailureKind::Skipped => {
                     let message = if input.result_mode == AgentResultMode::Settled {
@@ -595,11 +550,97 @@ impl WorkflowDelegate {
                         },
                     )
                     .await;
-                    return if input.result_mode == AgentResultMode::Settled {
-                        workflow_tool_result(value, agent_usage.total_tokens, None)
+                    return workflow_tool_result(value, agent_usage.total_tokens, None);
+                }
+                Err(failure) if failure.kind == WorkflowAgentFailureKind::StructuredOutput => {
+                    self.emit_agent(
+                        &input,
+                        &label,
+                        WorkflowAgentState::Error,
+                        AgentEventDetails {
+                            queued_at,
+                            started_at: Some(started_at),
+                            attempt,
+                            agent_id: clone_agent_id(&started_agent_id),
+                            error: Some(failure.message.clone()),
+                            tokens: Some(agent_usage.total_tokens),
+                            tool_calls: Some(agent_usage.tool_uses),
+                            duration_ms: Some(duration_millis(started.elapsed())),
+                            prompt_preview,
+                            ..AgentEventDetails::default()
+                        },
+                    )
+                    .await;
+                    let message = if input.result_mode == AgentResultMode::Settled {
+                        truncate_utf8(&failure.message, MAX_SETTLED_FAILURE_MESSAGE_BYTES)
                     } else {
-                        Err(message)
+                        failure.message
                     };
+                    if input.result_mode == AgentResultMode::Settled {
+                        self.failures
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(format!("{label}: {message}"));
+                        self.append_failure(
+                            &journal_key,
+                            WorkflowAgentFailureKind::StructuredOutput,
+                            &message,
+                            &agent_usage,
+                        )
+                        .await?;
+                        let value = agent_failure_value(
+                            input.result_mode,
+                            WorkflowAgentFailureKind::StructuredOutput,
+                            &message,
+                        );
+                        return workflow_tool_result(value, agent_usage.total_tokens, None);
+                    }
+                    return Err(format!("{WORKFLOW_AGENT_ERROR_PREFIX}{message}"));
+                }
+                Err(failure) if failure.kind == WorkflowAgentFailureKind::Stalled => {
+                    self.emit_agent(
+                        &input,
+                        &label,
+                        WorkflowAgentState::Error,
+                        AgentEventDetails {
+                            queued_at,
+                            started_at: Some(started_at),
+                            attempt,
+                            agent_id: clone_agent_id(&started_agent_id),
+                            error: Some(failure.message.clone()),
+                            tokens: Some(agent_usage.total_tokens),
+                            tool_calls: Some(agent_usage.tool_uses),
+                            duration_ms: Some(duration_millis(started.elapsed())),
+                            prompt_preview,
+                            ..AgentEventDetails::default()
+                        },
+                    )
+                    .await;
+                    let message = if input.result_mode == AgentResultMode::Settled {
+                        truncate_utf8(&failure.message, MAX_SETTLED_FAILURE_MESSAGE_BYTES)
+                    } else {
+                        failure.message
+                    };
+                    if input.result_mode == AgentResultMode::Settled {
+                        self.failures
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(format!("{label}: {message}"));
+                        self.append_failure(
+                            &journal_key,
+                            WorkflowAgentFailureKind::Stalled,
+                            &message,
+                            &agent_usage,
+                        )
+                        .await?;
+                        let value = agent_failure_value(
+                            input.result_mode,
+                            WorkflowAgentFailureKind::Stalled,
+                            &message,
+                        );
+                        return workflow_tool_result(value, agent_usage.total_tokens, None);
+                    }
+                    return Err(format!("{WORKFLOW_AGENT_ERROR_PREFIX}{message}"));
                 }
                 Err(failure) if failure.kind == WorkflowAgentFailureKind::Cancelled => {
                     self.emit_agent(
@@ -620,7 +661,7 @@ impl WorkflowDelegate {
                         },
                     )
                     .await;
-                    return Err(failure.message);
+                    return Err(self.run_level_error(failure.message));
                 }
                 Err(failure) => {
                     let blocked = failure.kind == WorkflowAgentFailureKind::Blocked;
@@ -655,11 +696,8 @@ impl WorkflowDelegate {
                     .await;
                     self.append_failure(&journal_key, kind, &message, &agent_usage)
                         .await?;
-                    if input.result_mode == AgentResultMode::Settled {
-                        let value = agent_failure_value(input.result_mode, kind, &message);
-                        return workflow_tool_result(value, agent_usage.total_tokens, None);
-                    }
-                    return Err(message);
+                    let value = agent_failure_value(input.result_mode, kind, &message);
+                    return workflow_tool_result(value, agent_usage.total_tokens, None);
                 }
             }
         }
@@ -668,14 +706,16 @@ impl WorkflowDelegate {
     async fn acquire_agent_permit(
         &self,
         tool_cancellation: &CancellationToken,
-    ) -> Result<AgentConcurrencyPermit, String> {
+    ) -> Result<(OwnedSemaphorePermit, Option<OwnedSemaphorePermit>), String> {
         let local = tokio::select! {
             permit = Arc::clone(&self.semaphore).acquire_owned() => {
                 permit.map_err(|_| "workflow concurrency limiter closed".to_string())?
             }
-            _ = self.control.cancellation.cancelled() => return Err("workflow cancelled".to_string()),
+            _ = self.control.cancellation.cancelled() => {
+                return Err(self.run_level_error("workflow cancelled"));
+            }
             _ = tool_cancellation.cancelled() => {
-                return Err("workflow agent call cancelled".to_string());
+                return Err(self.run_level_error("workflow agent call cancelled"));
             }
         };
 
@@ -685,17 +725,17 @@ impl WorkflowDelegate {
                     permit.map_err(|_| "global workflow concurrency limiter closed".to_string())?,
                 ),
                 _ = self.control.cancellation.cancelled() => {
-                    return Err("workflow cancelled".to_string());
+                    return Err(self.run_level_error("workflow cancelled"));
                 }
                 _ = tool_cancellation.cancelled() => {
-                    return Err("workflow agent call cancelled".to_string());
+                    return Err(self.run_level_error("workflow agent call cancelled"));
                 }
             }
         } else {
             None
         };
 
-        Ok(AgentConcurrencyPermit { local, global })
+        Ok((local, global))
     }
 
     fn remove_agent_control(&self, index: usize) {
@@ -704,46 +744,6 @@ impl WorkflowDelegate {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&index);
-    }
-
-    /// Emits a stalled-agent failure and waits for the user to retry or skip it.
-    ///
-    /// The agent stays in the run's control map while waiting, so retry/skip actions
-    /// from the host reach it. Returns the resolved [`AgentAction`], or `None` when the
-    /// workflow was cancelled while waiting.
-    async fn await_user_decision(
-        &self,
-        input: &AgentToolInput,
-        label: &str,
-        details: AgentEventDetails,
-        tool_cancellation: &CancellationToken,
-    ) -> Option<AgentAction> {
-        let cancellation = CancellationToken::new();
-        let action = Arc::new(AtomicUsize::new(AgentAction::None as usize));
-        self.control
-            .agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                input.index,
-                ActiveAgentControl {
-                    action: Arc::clone(&action),
-                    cancellation: cancellation.clone(),
-                },
-            );
-        self.emit_agent(input, label, WorkflowAgentState::Error, details)
-            .await;
-        let decision = tokio::select! {
-            _ = cancellation.cancelled() => action.load(Ordering::Acquire),
-            _ = self.control.cancellation.cancelled() => AgentAction::None as usize,
-            _ = tool_cancellation.cancelled() => AgentAction::None as usize,
-        };
-        self.remove_agent_control(input.index);
-        match decision {
-            value if value == AgentAction::Retry as usize => Some(AgentAction::Retry),
-            value if value == AgentAction::Skip as usize => Some(AgentAction::Skip),
-            _ => None,
-        }
     }
 
     pub(super) async fn record_log(&self, execution_generation: u64, message: String) {
@@ -800,10 +800,10 @@ impl WorkflowDelegate {
                 permit.map_err(|_| "workflow child concurrency limiter closed".to_string())?
             }
             _ = self.control.cancellation.cancelled() => {
-                return Err("workflow cancelled".to_string());
+                return Err(self.run_level_error("workflow cancelled"));
             }
             _ = tool_cancellation.cancelled() => {
-                return Err("child workflow call cancelled".to_string());
+                return Err(self.run_level_error("child workflow call cancelled"));
             }
         };
         validate_workflow_input_value(&input.args, "child workflow arguments")?;
@@ -821,17 +821,20 @@ impl WorkflowDelegate {
         let request = WorkflowChildRequest {
             name_or_ref: input.name_or_ref,
             args: input.args,
+            args_present: input.args_present,
         };
         let resolved = tokio::select! {
             resolved = resolver.resolve_child(request) => resolved?,
             _ = self.control.cancellation.cancelled() => {
-                return Err("workflow cancelled".to_string());
+                return Err(self.run_level_error("workflow cancelled"));
             }
             _ = tool_cancellation.cancelled() => {
-                return Err("child workflow call cancelled".to_string());
+                return Err(self.run_level_error("child workflow call cancelled"));
             }
         };
         validate_workflow_input_value(&resolved.args, "resolved child workflow arguments")?;
+        let (budget_total, budget_initial_spent) =
+            workflow_budget_context(&self.config, self.total_tokens.load(Ordering::Acquire));
         let source = compile_workflow_source_with_context(
             &resolved.script,
             &resolved.args,
@@ -840,6 +843,10 @@ impl WorkflowDelegate {
                 phase_index: input.phase_index,
                 phase_title: input.phase_title,
                 result_tool_name: Some(result_tool_name.clone()),
+                args_present: resolved.args_present,
+                budget_total,
+                budget_initial_spent,
+                ..WorkflowScriptContext::default()
             },
         )
         .map_err(|error| error.to_string())?;
@@ -856,7 +863,13 @@ impl WorkflowDelegate {
             invocation_prefix: format!("{invocation_prefix}/{}", input.invocation_id),
         })
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| {
+            let message = execution_error_to_tool_error(error);
+            if message.starts_with(WORKFLOW_RUN_ERROR_PREFIX) {
+                self.record_run_error(message.clone());
+            }
+            message
+        })?;
         let input_artifact_store = Arc::clone(&self.config.input_artifact_store);
         tokio::spawn(async move {
             let _child_permit = child_permit;
@@ -931,17 +944,15 @@ impl WorkflowDelegate {
 
 /// Returns whether a journaled outcome can stand in for a fresh agent call.
 ///
-/// Successful calls are deterministic results. A `Skipped` outcome is an
-/// explicit user decision and must stay skipped across resume. Every other
-/// failure is a runtime condition (API error, throttle, stall, policy block, or
-/// validation failure) that should be retried rather than replayed.
+/// Only successful calls are deterministic results. Explicit user skips and
+/// every runtime failure are journaled as failed and must re-execute on
+/// resume, matching Claude's workflow journal semantics.
 fn cached_outcome_is_replayable(outcome: &WorkflowAgentOutcome) -> bool {
-    match outcome {
-        WorkflowAgentOutcome::Success => true,
-        WorkflowAgentOutcome::Failure { kind, .. } => {
-            matches!(kind, WorkflowAgentFailureKind::Skipped)
-        }
-    }
+    matches!(outcome, WorkflowAgentOutcome::Success)
+}
+
+fn agent_error(message: impl std::fmt::Display) -> String {
+    format!("{WORKFLOW_AGENT_ERROR_PREFIX}{message}")
 }
 
 async fn workflow_tool_result_with_artifact(
@@ -996,6 +1007,7 @@ fn failure_kind_name(kind: WorkflowAgentFailureKind) -> &'static str {
         WorkflowAgentFailureKind::Stalled => "stalled",
         WorkflowAgentFailureKind::Throttled => "throttled",
         WorkflowAgentFailureKind::Blocked => "blocked",
+        WorkflowAgentFailureKind::StructuredOutput => "structuredOutput",
         WorkflowAgentFailureKind::Skipped => "skipped",
     }
 }

@@ -157,12 +157,31 @@ pub fn compile_workflow_source(
     compile_workflow_source_with_context(script, args, WorkflowScriptContext::default())
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WorkflowScriptContext {
     pub(crate) child_mode: bool,
     pub(crate) phase_index: Option<usize>,
     pub(crate) phase_title: Option<String>,
     pub(crate) result_tool_name: Option<String>,
+    pub(crate) args_present: bool,
+    pub(crate) budget_total: Option<u64>,
+    pub(crate) budget_initial_spent: u64,
+    pub(crate) phase_models: Vec<Option<String>>,
+}
+
+impl Default for WorkflowScriptContext {
+    fn default() -> Self {
+        Self {
+            child_mode: false,
+            phase_index: None,
+            phase_title: None,
+            result_tool_name: None,
+            args_present: true,
+            budget_total: None,
+            budget_initial_spent: 0,
+            phase_models: Vec::new(),
+        }
+    }
 }
 
 pub(crate) fn compile_workflow_source_with_context(
@@ -192,13 +211,28 @@ pub(crate) fn compile_workflow_source_with_context(
             .unwrap_or("workflow_result"),
     )
     .map_err(|error| WorkflowScriptError::InvalidMeta(error.to_string()))?;
+    let budget_total = serde_json::to_string(&context.budget_total)
+        .map_err(|error| WorkflowScriptError::InvalidMeta(error.to_string()))?;
+    let phase_models = serde_json::to_string(
+        &script
+            .meta
+            .phases
+            .iter()
+            .map(|phase| phase.model.as_deref())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| WorkflowScriptError::InvalidMeta(error.to_string()))?;
     let unavailable_global_names = serde_json::to_string(UNAVAILABLE_GLOBAL_NAMES)
         .map_err(|error| WorkflowScriptError::InvalidMeta(error.to_string()))?;
     Ok(format!(
-        "const __wfArgsValue = {};\nconst __wfPhaseTitlesJson = {};\nconst __wfChildMode = {};\nconst __wfInitialPhaseIndex = {};\nconst __wfInitialPhaseTitle = {};\nconst __wfResultToolName = {};\nconst __wfUnavailableGlobalNames = {unavailable_global_names};\n{}\n{}\n",
+        "const __wfArgsValue = {};\nconst __wfHasArgs = {};\nconst __wfBudgetTotal = {};\nconst __wfBudgetInitialSpent = {};\nconst __wfPhaseTitlesJson = {};\nconst __wfPhaseModels = {};\nconst __wfChildMode = {};\nconst __wfInitialPhaseIndex = {};\nconst __wfInitialPhaseTitle = {};\nconst __wfResultToolName = {};\nconst __wfUnavailableGlobalNames = {unavailable_global_names};\n{}\n{}\n",
         args,
+        context.args_present,
+        budget_total,
+        context.budget_initial_spent,
         serde_json::to_string(&phase_titles)
             .map_err(|error| WorkflowScriptError::InvalidMeta(error.to_string()))?,
+        phase_models,
         context.child_mode,
         phase_index,
         phase_title,
@@ -211,13 +245,15 @@ pub(crate) fn compile_workflow_source_with_context(
 fn workflow_body(body: &str) -> String {
     format!(
         r#"
-const args = __wfDeepFreeze(__wfArgsValue);
+const args = __wfHasArgs ? __wfDeepFreeze(__wfArgsValue) : undefined;
+const budget = __wfBuildBudget();
 const {{ agent, agentSettled, parallel, pipeline, phase, log, workflow, listInputs, readInput }} = __wfBuildApi();
-const console = Object.freeze({{ log, info: log, warn: log, error: log }});
+const console = Object.freeze({{ log, info: log, warn: log, error: log, debug: log }});
 const __wfMain = async () => {{
 {body}
 }};
 const __wfResult = await __wfMain();
+if (__wfRunLevelFailure !== null) throw __wfRunLevelFailure;
 await __wfHostResult({{ result: __wfSanitize(__wfResult), tokens: __wfRunTokens }});
 "#
     )
@@ -236,8 +272,33 @@ fn validate_size_and_characters(source: &str) -> Result<(), WorkflowScriptError>
     Ok(())
 }
 
+fn skip_leading_trivia(source: &str) -> &str {
+    let mut rest = source;
+    loop {
+        rest = rest.trim_start_matches(|character: char| {
+            character.is_whitespace() || character == '\u{feff}'
+        });
+        if rest.starts_with("#!") {
+            rest = rest.find('\n').map_or("", |end| &rest[end + 1..]);
+            continue;
+        }
+        if let Some(comment) = rest.strip_prefix("//") {
+            rest = comment.find('\n').map_or("", |end| &comment[end + 1..]);
+            continue;
+        }
+        if let Some(comment) = rest.strip_prefix("/*") {
+            if let Some(end) = comment.find("*/") {
+                rest = &comment[end + 2..];
+                continue;
+            }
+            return rest;
+        }
+        return rest;
+    }
+}
+
 fn split_meta_statement(source: &str) -> Result<(&str, &str), WorkflowScriptError> {
-    let trimmed = source.trim_start_matches(char::is_whitespace);
+    let trimmed = skip_leading_trivia(source);
     let rest = trimmed
         .strip_prefix(META_PREFIX)
         .ok_or(WorkflowScriptError::MissingMeta)?;
@@ -407,6 +468,10 @@ fn validate_meta(meta: &WorkflowMeta) -> Result<(), WorkflowScriptError> {
             &phase.title,
             MAX_WORKFLOW_PROGRESS_TEXT_BYTES,
         )?;
+        if let Some(model) = phase.model.as_deref() {
+            require_nonempty("phases[].model", model)?;
+            require_bounded("phases[].model", model, MAX_WORKFLOW_TITLE_BYTES)?;
+        }
     }
     Ok(())
 }

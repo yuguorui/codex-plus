@@ -1,4 +1,5 @@
 use super::*;
+use crate::service::PersistedWorkflowBudget;
 use codex_protocol::workflow::WorkflowAgentProgress;
 use codex_protocol::workflow::WorkflowIsolation;
 use codex_protocol::workflow::WorkflowProgressItem;
@@ -306,6 +307,11 @@ fn snapshot_with_agent() -> WorkflowTaskSnapshot {
         transcript_dir: root.join("transcript"),
         script_path: root.join("workflow.js"),
         args: JsonValue::Null,
+        args_present: true,
+        budget: PersistedWorkflowBudget {
+            recorded: true,
+            ..Default::default()
+        },
         result_artifact: None,
         output_file: root.join("workflow.json"),
         progress: vec![WorkflowProgressItem::WorkflowAgent(Box::new(

@@ -85,9 +85,18 @@ Run the deep-research workflow on the current state of local-first AI coding too
 Run a high-effort code-review workflow on the current branch.
 ```
 
-Codex++ includes `deep-research` and `code-review` workflows. It can also discover saved `.js` workflows from `~/.codex/workflows`, project-level `.codex/workflows` and `.claude/workflows` directories, and active plugins. Workflow scripts can compose `agent()`, `pipeline()`, and `parallel()` calls, validate structured results with JSON Schema, and isolate mutating agents in temporary Git worktrees.
+Codex++ includes `deep-research` and `code-review` workflows. It also discovers saved `.js` workflows from active plugins, `$CODEX_HOME/workflows`, and personal Claude workflows: `CLAUDE_CONFIG_DIR/workflows` when `CLAUDE_CONFIG_DIR` is set, otherwise `~/.claude/workflows`. Project discovery checks `.codex/workflows` and `.claude/workflows` at every directory from the current working directory up to the filesystem root. Saved workflows override bundled and plugin workflows. Project workflows take priority over personal ones; within the same directory, `.codex/workflows` wins over `.claude/workflows`; and the closest project directory to the current working directory wins. Only `.js` files are accepted. Workflow scripts can compose `agent()`, `pipeline()`, and `parallel()` calls, validate structured results with JSON Schema, and isolate mutating agents in temporary Git worktrees.
 
-Runs continue in the background after launch. Open `/workflows` in the TUI to inspect phases and agents, stop a run, or skip and retry individual agents.
+Runs continue in the background after launch. Open `/workflows` in the TUI to inspect phases and agents, stop a run, or skip and retry individual agents. For command-line use and quick validation:
+
+```bash
+codex++ workflow run review-changes --args '{"path":"src"}'
+codex++ workflow run ./.claude/workflows/review-changes.js
+codex++ workflow run review-changes --resume wf_abc123
+codex++ workflow validate ./.claude/workflows/review-changes.js --json
+```
+
+`workflow run` launches a normal `codex exec` turn that calls the existing `Workflow` tool and waits for the terminal result, then verifies the newest local workflow snapshot and exits non-zero unless the run completed. Omit `--args` to leave the script's `args` global `undefined`, or pass `--args null` for an explicit null. `--resume` continues an existing run and, without `--args`, restores the original arguments and their presence. `workflow validate` parses and validates the root script locally without a model call; saved child workflows are resolved and frozen when the root workflow is launched. For concurrent CI jobs, give each invocation a distinct `CODEX_HOME` so snapshot verification cannot observe another job's run. `workflow run` still follows the thread's approval and automatic-review policy; non-interactive workers must configure approval appropriately, or pass the root bypass flag only when that is acceptable.
 
 Workflow agents default to a CPU-derived per-run limit.
 

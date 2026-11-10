@@ -149,6 +149,17 @@ impl ToolTokenBudget for CoreToolTokenBudget {
     fn spent(&self) -> u64 {
         self.snapshot().map_or(0, |(_, spent)| spent)
     }
+
+    fn enforce_limit(&self) -> bool {
+        self.session.upgrade().is_none_or(|session| {
+            session
+                .services
+                .local_agent_runtime
+                .control(session.session_id())
+                .rollout_budget()
+                .enforce_limit()
+        })
+    }
 }
 
 impl CoreToolTokenBudget {

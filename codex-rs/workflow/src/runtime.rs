@@ -60,6 +60,7 @@ use crate::WorkflowInputDescriptor;
 use crate::WorkflowJournalResult;
 use crate::WorkflowProgressKind;
 use crate::WorkflowRunOutcome;
+use crate::WorkflowTokenBudget;
 use crate::WorkflowTokenUsage;
 use crate::inputs::validate_workflow_input_value;
 use crate::inputs::workflow_agent_inputs_sha256;
@@ -89,6 +90,9 @@ const WORKFLOW_LOG_HEAD_LEN: usize = MAX_WORKFLOW_LOGS / 4;
 const WORKFLOW_LOG_TAIL_LEN: usize = MAX_WORKFLOW_LOGS - WORKFLOW_LOG_HEAD_LEN - 1;
 const PROMPT_PREVIEW_BYTES: usize = 400;
 const WORKFLOW_ISOLATE_HEAP_BYTES: usize = 64 * 1024 * 1024;
+const WORKFLOW_RUN_ERROR_PREFIX: &str = "WorkflowRunError: ";
+const WORKFLOW_AGENT_ERROR_PREFIX: &str = "WorkflowAgentError: ";
+const DEFAULT_MAX_AGENTS_PER_RUN: usize = 1_000;
 /// Stable journal namespace for one Workflow lineage.
 ///
 /// The journal itself is scoped to one run, so this value deliberately does not
@@ -112,6 +116,8 @@ pub type WorkflowChildFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ResolvedWorkflowChild, String>> + Send + 'a>>;
 pub type WorkflowJournalReplayFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Option<WorkflowJournalResult>, String>> + Send + 'a>>;
+pub type WorkflowJournalStartedFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>>;
 pub type WorkflowJournalFuture<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
 
 /// Executes one workflow agent call using host-owned agent infrastructure.
@@ -152,12 +158,14 @@ pub trait WorkflowAgentRuntime: Send + Sync {
 pub struct WorkflowChildRequest {
     pub name_or_ref: JsonValue,
     pub args: JsonValue,
+    pub args_present: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct ResolvedWorkflowChild {
     pub script: ValidatedWorkflowScript,
     pub args: JsonValue,
+    pub args_present: bool,
 }
 
 /// Resolves saved workflows without coupling the runtime to host filesystem policy.
@@ -167,11 +175,19 @@ pub trait WorkflowChildResolver: Send + Sync {
 
 /// Stores agent outcomes for replay when a workflow is resumed.
 ///
-/// The runtime replays successful outcomes and explicit user skips. Other
-/// failures are retried instead of treated as reusable results.
+/// The runtime replays successful outcomes. Skips and other failures are
+/// retried instead of treated as reusable results.
 pub trait WorkflowJournal: Send + Sync {
     /// Reads a journaled outcome. Errors prevent the corresponding agent from executing.
     fn replay<'a>(&'a self, key: &'a str) -> WorkflowJournalReplayFuture<'a>;
+
+    /// Reports whether `key` was durably started but has no journaled outcome.
+    ///
+    /// A started call is a resume breakpoint: it must re-execute, but it does
+    /// not invalidate the replay cache for calls that follow it.
+    fn started<'a>(&'a self, _key: &'a str) -> WorkflowJournalStartedFuture<'a> {
+        Box::pin(std::future::ready(Ok(false)))
+    }
 
     /// Durably invalidates any replayable generation for `key` before execution starts.
     ///
@@ -247,6 +263,12 @@ pub struct WorkflowRuntimeConfig {
     pub synchronous_timeout: Duration,
     /// Usage already consumed by this run before a restored runtime starts.
     pub initial_usage: WorkflowTokenUsage,
+    /// Live host token budget checked before every real agent dispatch.
+    pub budget: Option<Arc<dyn WorkflowTokenBudget>>,
+    /// Maximum real agent dispatches in one run. Cached replays do not count.
+    pub max_agents: usize,
+    /// Whether the root workflow received an arguments value, including `null`.
+    pub args_present: bool,
     pub child_resolver: Option<Arc<dyn WorkflowChildResolver>>,
     pub journal: Option<Arc<dyn WorkflowJournal>>,
     pub input_artifact_store: Arc<dyn WorkflowInputArtifactStore>,
@@ -261,12 +283,16 @@ impl Default for WorkflowRuntimeConfig {
         Self {
             concurrency: cores.saturating_sub(2).clamp(2, 16),
             global_concurrency: None,
-            stall_retries: 3,
+            // Match Claude's five automatic restarts (six total attempts).
+            stall_retries: 5,
             stall_retry_base_delay: Duration::from_secs(30),
             stall_retry_max_delay: Duration::from_secs(300),
             throttle_retry_delay: Duration::from_secs(45),
             synchronous_timeout: Duration::from_secs(30),
             initial_usage: WorkflowTokenUsage::default(),
+            budget: None,
+            max_agents: DEFAULT_MAX_AGENTS_PER_RUN,
+            args_present: true,
             child_resolver: None,
             journal: None,
             input_artifact_store: Arc::new(MemoryWorkflowInputArtifactStore::default()),
@@ -601,6 +627,41 @@ impl ControlState {
     }
 }
 
+fn execution_error_to_tool_error(error: WorkflowExecutionError) -> String {
+    match error {
+        WorkflowExecutionError::Cancelled => {
+            format!("{WORKFLOW_RUN_ERROR_PREFIX}workflow cancelled")
+        }
+        WorkflowExecutionError::RerunRequested => {
+            format!("{WORKFLOW_RUN_ERROR_PREFIX}workflow rerun was requested")
+        }
+        WorkflowExecutionError::Runtime(message)
+            if message.starts_with(WORKFLOW_RUN_ERROR_PREFIX) =>
+        {
+            message
+        }
+        WorkflowExecutionError::Runtime(message) => message,
+    }
+}
+
+fn workflow_budget_context(
+    config: &WorkflowRuntimeConfig,
+    total_tokens: u64,
+) -> (Option<u64>, u64) {
+    let total = config
+        .budget
+        .as_ref()
+        .map(|budget| budget.total())
+        .filter(|total| *total > 0);
+    let host_spent = config.budget.as_ref().map_or(0, |budget| budget.spent());
+    // Workflow subagents run without the host rollout budget, so host spend and
+    // workflow usage are disjoint. `total_tokens` already includes the persisted
+    // prefix and every completed session, which keeps reruns and child
+    // workflows from under-reporting `budget.spent()`.
+    let initial_spent = host_spent.saturating_add(total_tokens);
+    (total, initial_spent)
+}
+
 pub async fn execute_workflow(
     script: &ValidatedWorkflowScript,
     args: JsonValue,
@@ -647,30 +708,6 @@ async fn execute_workflow_inner(
     let _close_control = CloseControlOnDrop(control.clone());
     let started = Instant::now();
     let result_tool_name = RESULT_TOOL_NAME.to_string();
-    let source = validate_workflow_input_value(&args, "workflow arguments")
-        .map_err(WorkflowExecutionError::Runtime)
-        .and_then(|()| {
-            compile_workflow_source_with_context(
-                script,
-                &args,
-                WorkflowScriptContext {
-                    result_tool_name: Some(result_tool_name.clone()),
-                    ..WorkflowScriptContext::default()
-                },
-            )
-            .map_err(|error| WorkflowExecutionError::Runtime(error.to_string()))
-        });
-    let source = match source {
-        Ok(source) => source,
-        Err(error) => {
-            return match control.state.finish_error() {
-                WorkflowCompletionDecision::Cancelled => Err(WorkflowExecutionError::Cancelled),
-                WorkflowCompletionDecision::Complete | WorkflowCompletionDecision::Rerun => {
-                    Err(error)
-                }
-            };
-        }
-    };
     let allow_child = config.child_resolver.is_some();
     let delegate = Arc::new(WorkflowDelegate::new(
         agent_runtime,
@@ -695,8 +732,37 @@ async fn execute_workflow_inner(
     loop {
         let (rerun_from, rerun_receiver) = control.state.take_rerun_from();
         let execution_generation = delegate.begin_session(rerun_from);
+        let (budget_total, budget_initial_spent) =
+            workflow_budget_context(&config, delegate.total_tokens.load(Ordering::Acquire));
+        let source = validate_workflow_input_value(&args, "workflow arguments")
+            .map_err(WorkflowExecutionError::Runtime)
+            .and_then(|()| {
+                compile_workflow_source_with_context(
+                    script,
+                    &args,
+                    WorkflowScriptContext {
+                        result_tool_name: Some(result_tool_name.clone()),
+                        args_present: config.args_present,
+                        budget_total,
+                        budget_initial_spent,
+                        ..WorkflowScriptContext::default()
+                    },
+                )
+                .map_err(|error| WorkflowExecutionError::Runtime(error.to_string()))
+            });
+        let source = match source {
+            Ok(source) => source,
+            Err(error) => {
+                return match control.state.finish_error() {
+                    WorkflowCompletionDecision::Cancelled => Err(WorkflowExecutionError::Cancelled),
+                    WorkflowCompletionDecision::Complete | WorkflowCompletionDecision::Rerun => {
+                        Err(error)
+                    }
+                };
+            }
+        };
         let result = run_workflow_source(WorkflowSourceExecution {
-            source: source.clone(),
+            source,
             delegate: delegate.clone(),
             control: Arc::clone(&control.state),
             invocation_cancellation: CancellationToken::new(),
@@ -827,11 +893,13 @@ async fn run_workflow_source(
         _ = control.cancellation.cancelled() => {
             let _ = session.terminate(cell_id.clone().into()).await;
             let _ = session.shutdown().await;
+            delegate.record_run_error(format!("{WORKFLOW_RUN_ERROR_PREFIX}workflow cancelled"));
             return Err(WorkflowExecutionError::Cancelled);
         }
         _ = invocation_cancellation.cancelled() => {
             let _ = session.terminate(cell_id.clone().into()).await;
             let _ = session.shutdown().await;
+            delegate.record_run_error(format!("{WORKFLOW_RUN_ERROR_PREFIX}workflow cancelled"));
             return Err(WorkflowExecutionError::Cancelled);
         }
         _ = wait_for_rerun(&mut rerun_receiver) => {
@@ -848,10 +916,14 @@ async fn run_workflow_source(
                     .await
                     .map_err(WorkflowExecutionError::Runtime)?;
                 if let Some(error) = error_text {
-                    return Err(WorkflowExecutionError::Runtime(truncate_utf8(
-                        &error,
-                        MAX_TERMINAL_RUNTIME_ERROR_BYTES,
-                    )));
+                    let error = truncate_utf8(&error, MAX_TERMINAL_RUNTIME_ERROR_BYTES);
+                    if error.starts_with(WORKFLOW_RUN_ERROR_PREFIX) {
+                        delegate.record_run_error(error.clone());
+                    }
+                    return Err(WorkflowExecutionError::Runtime(error));
+                }
+                if let Some(error) = delegate.current_run_error() {
+                    return Err(WorkflowExecutionError::Runtime(error));
                 }
                 return delegate.take_result(&result_tool_name).ok_or_else(|| {
                     WorkflowExecutionError::Runtime(
@@ -861,6 +933,7 @@ async fn run_workflow_source(
             }
             RuntimeResponse::Terminated { .. } => {
                 let _ = session.shutdown().await;
+                delegate.record_run_error(format!("{WORKFLOW_RUN_ERROR_PREFIX}workflow cancelled"));
                 return Err(WorkflowExecutionError::Cancelled);
             }
             RuntimeResponse::Yielded { .. } => {
@@ -917,13 +990,18 @@ struct WorkflowDelegate {
     semaphore: Arc<Semaphore>,
     child_semaphore: Arc<Semaphore>,
     invocation_state: Mutex<InvocationState>,
+    /// Serializes journal replay decisions so the first miss and every later
+    /// call observe one linearized divergence point.
+    replay_gate: tokio::sync::Mutex<()>,
     cache_root: String,
     execution_generation: AtomicU64,
     total_tokens: AtomicU64,
     total_tool_calls: AtomicU64,
+    real_agent_count: AtomicUsize,
     final_results: Mutex<HashMap<String, WorkflowSourceResult>>,
     logs: Mutex<WorkflowLogBuffer>,
     failures: Mutex<WorkflowFailureBuffer>,
+    run_error: Mutex<Option<String>>,
 }
 
 #[derive(Default)]
@@ -933,6 +1011,10 @@ struct InvocationState {
     invocation_indices: HashMap<String, usize>,
     /// Agents at or after this index re-execute instead of replaying from the journal.
     rerun_from: Option<usize>,
+    /// Once a call misses the journal after a prior entry or existing result,
+    /// no later call may replay. This matches Claude's single run-level
+    /// divergence flag.
+    replay_diverged: bool,
 }
 
 #[derive(Default)]
@@ -1024,14 +1106,18 @@ impl WorkflowDelegate {
                 next_index: 0,
                 invocation_indices: HashMap::new(),
                 rerun_from: None,
+                replay_diverged: false,
             }),
+            replay_gate: tokio::sync::Mutex::new(()),
             cache_root,
             execution_generation: AtomicU64::new(0),
             total_tokens: AtomicU64::new(initial_usage.total_tokens),
             total_tool_calls: AtomicU64::new(initial_usage.tool_uses),
+            real_agent_count: AtomicUsize::new(0),
             final_results: Mutex::new(HashMap::new()),
             logs: Mutex::new(WorkflowLogBuffer::default()),
             failures: Mutex::new(WorkflowFailureBuffer::default()),
+            run_error: Mutex::new(None),
         }
     }
 
@@ -1045,12 +1131,49 @@ impl WorkflowDelegate {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.agent_count = 0;
         state.rerun_from = rerun_from;
+        state.replay_diverged = false;
         drop(state);
+        self.real_agent_count.store(0, Ordering::Release);
         self.failures
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+        *self
+            .run_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         self.execution_generation.fetch_add(1, Ordering::AcqRel)
+    }
+
+    fn mark_replay_diverged(&self) {
+        self.invocation_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replay_diverged = true;
+    }
+
+    fn check_budget(&self) -> Result<(), String> {
+        let Some(budget) = self.config.budget.as_ref() else {
+            return Ok(());
+        };
+        if !budget.enforce_limit() {
+            return Ok(());
+        }
+        let total = budget.total();
+        if total == 0 {
+            return Ok(());
+        }
+        // `total_tokens` starts at the persisted workflow prefix, so it is
+        // disjoint from the host rollout spend.
+        let spent = budget
+            .spent()
+            .saturating_add(self.total_tokens.load(Ordering::Acquire));
+        if spent >= total {
+            return Err(self.run_level_error(format!(
+                "workflow token budget exceeded before agent dispatch (spent {spent} of {total} tokens)"
+            )));
+        }
+        Ok(())
     }
 
     async fn emit(&self, execution_generation: u64, event: WorkflowEvent) {
@@ -1079,6 +1202,29 @@ impl WorkflowDelegate {
             total_tool_calls: self.total_tool_calls.load(Ordering::Acquire),
             duration_ms: duration_millis(elapsed),
         }
+    }
+
+    fn record_run_error(&self, message: String) {
+        let mut run_error = self
+            .run_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if run_error.is_none() {
+            *run_error = Some(message);
+        }
+    }
+
+    fn run_level_error(&self, message: impl std::fmt::Display) -> String {
+        let message = format!("{WORKFLOW_RUN_ERROR_PREFIX}{message}");
+        self.record_run_error(message.clone());
+        message
+    }
+
+    fn current_run_error(&self) -> Option<String> {
+        self.run_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     fn take_result(&self, result_tool_name: &str) -> Option<WorkflowSourceResult> {
@@ -1302,8 +1448,14 @@ struct ChildToolInput {
     invocation_id: String,
     name_or_ref: JsonValue,
     args: JsonValue,
+    #[serde(default = "default_true")]
+    args_present: bool,
     phase_index: Option<usize>,
     phase_title: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Default)]
@@ -1387,6 +1539,22 @@ fn workflow_cache_key(
     }
     if let Some(agent_type) = options.agent_type.as_ref() {
         selected.insert("agentType", JsonValue::String(agent_type.clone()));
+    }
+    if let Some(disallowed_tools) = options.disallowed_tools.as_ref() {
+        let mut sorted = disallowed_tools.clone();
+        sorted.sort();
+        selected.insert(
+            "disallowedTools",
+            serde_json::to_value(sorted).unwrap_or(JsonValue::Null),
+        );
+    }
+    if let Some(bash_command_clamp) = options.bash_command_clamp.as_ref() {
+        let mut sorted = bash_command_clamp.clone();
+        sorted.sort();
+        selected.insert(
+            "bashCommandClamp",
+            serde_json::to_value(sorted).unwrap_or(JsonValue::Null),
+        );
     }
     if result_mode == AgentResultMode::Settled {
         selected.insert("resultMode", JsonValue::String("settled".to_string()));

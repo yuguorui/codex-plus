@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -20,6 +21,7 @@ use crate::WorkflowDeclaredInputs;
 use crate::WorkflowInputArtifactFuture;
 use crate::WorkflowMeta;
 use crate::WorkflowPhase;
+use crate::WorkflowTokenBudget;
 use crate::WorkflowTokenUsage;
 use crate::validate_workflow_script;
 use crate::workflow_input_artifact_ref;
@@ -59,6 +61,31 @@ impl FakeJournal {
     }
 }
 
+#[derive(Default)]
+struct TestBudget {
+    total: AtomicU64,
+    spent: AtomicU64,
+}
+
+impl TestBudget {
+    fn new(total: u64, spent: u64) -> Self {
+        Self {
+            total: AtomicU64::new(total),
+            spent: AtomicU64::new(spent),
+        }
+    }
+}
+
+impl WorkflowTokenBudget for TestBudget {
+    fn total(&self) -> u64 {
+        self.total.load(Ordering::Acquire)
+    }
+
+    fn spent(&self) -> u64 {
+        self.spent.load(Ordering::Acquire)
+    }
+}
+
 impl WorkflowJournal for FakeJournal {
     fn replay<'a>(&'a self, key: &'a str) -> WorkflowJournalReplayFuture<'a> {
         Box::pin(async move {
@@ -68,6 +95,17 @@ impl WorkflowJournal for FakeJournal {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(key)
                 .cloned())
+        })
+    }
+
+    fn started<'a>(&'a self, key: &'a str) -> WorkflowJournalStartedFuture<'a> {
+        Box::pin(async move {
+            Ok(self
+                .started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .any(|started| started == key))
         })
     }
 
@@ -111,6 +149,7 @@ impl WorkflowChildResolver for FakeChildResolver {
             Ok(ResolvedWorkflowChild {
                 script: self.script.clone(),
                 args: request.args,
+                args_present: request.args_present,
             })
         })
     }
@@ -119,6 +158,35 @@ impl WorkflowChildResolver for FakeChildResolver {
 struct FixedArgsChildResolver {
     script: ValidatedWorkflowScript,
     args: JsonValue,
+}
+
+struct FailingPutArtifactStore;
+
+impl WorkflowInputArtifactStore for FailingPutArtifactStore {
+    fn put(&self, _value: JsonValue) -> WorkflowInputArtifactFuture<'_, WorkflowInputArtifactRef> {
+        Box::pin(async { Err("artifact storage unavailable".to_string()) })
+    }
+
+    fn put_descriptor(
+        &self,
+        _descriptor: WorkflowInputDescriptor,
+    ) -> WorkflowInputArtifactFuture<'_, WorkflowInputArtifactRef> {
+        Box::pin(async { Err("artifact storage unavailable".to_string()) })
+    }
+
+    fn get<'a>(
+        &'a self,
+        _reference: &WorkflowInputArtifactRef,
+    ) -> WorkflowInputArtifactFuture<'a, Arc<JsonValue>> {
+        Box::pin(async { Err("artifact storage unavailable".to_string()) })
+    }
+
+    fn get_descriptor<'a>(
+        &'a self,
+        _reference: &WorkflowInputArtifactRef,
+    ) -> WorkflowInputArtifactFuture<'a, Arc<WorkflowInputDescriptor>> {
+        Box::pin(async { Err("artifact storage unavailable".to_string()) })
+    }
 }
 
 struct BlockingPutArtifactStore {
@@ -193,6 +261,7 @@ impl WorkflowChildResolver for FixedArgsChildResolver {
             Ok(ResolvedWorkflowChild {
                 script: self.script.clone(),
                 args: self.args.clone(),
+                args_present: true,
             })
         })
     }
@@ -240,6 +309,16 @@ impl WorkflowAgentRuntime for FakeAgentRuntime {
                     return Err(WorkflowAgentFailure::failed("cancelled"));
                 }
             }
+            if request.prompt.contains("stall-consumes-budget") {
+                return Err(WorkflowAgentFailure {
+                    kind: WorkflowAgentFailureKind::Stalled,
+                    message: "agent made no progress for 180s".to_string(),
+                    usage: WorkflowTokenUsage {
+                        total_tokens: 10,
+                        tool_uses: 0,
+                    },
+                });
+            }
             if request.prompt.contains("always-stall") {
                 return Err(WorkflowAgentFailure {
                     kind: WorkflowAgentFailureKind::Stalled,
@@ -265,12 +344,33 @@ impl WorkflowAgentRuntime for FakeAgentRuntime {
                         usage: WorkflowTokenUsage::default(),
                     });
                 }
+                if request.prompt.contains("structured-output") {
+                    return Err(WorkflowAgentFailure {
+                        kind: WorkflowAgentFailureKind::StructuredOutput,
+                        message: "structured output validation failed".to_string(),
+                        usage: WorkflowTokenUsage::default(),
+                    });
+                }
                 return Err(WorkflowAgentFailure::failed("requested failure"));
             }
             if request.prompt.contains("throttled") {
                 return Err(WorkflowAgentFailure {
                     kind: WorkflowAgentFailureKind::Throttled,
                     message: "request throttled".to_string(),
+                    usage: WorkflowTokenUsage::default(),
+                });
+            }
+            if request.prompt.contains("blocked") {
+                return Err(WorkflowAgentFailure {
+                    kind: WorkflowAgentFailureKind::Blocked,
+                    message: "request blocked".to_string(),
+                    usage: WorkflowTokenUsage::default(),
+                });
+            }
+            if request.prompt.contains("host-cancelled") {
+                return Err(WorkflowAgentFailure {
+                    kind: WorkflowAgentFailureKind::Cancelled,
+                    message: "agent cancelled by host".to_string(),
                     usage: WorkflowTokenUsage::default(),
                 });
             }
@@ -375,6 +475,22 @@ async fn run_with_config(
     (outcome, runtime, events)
 }
 
+async fn try_run_with_config(
+    body: &str,
+    args: serde_json::Value,
+    config: WorkflowRuntimeConfig,
+) -> Result<WorkflowRunOutcome, WorkflowExecutionError> {
+    execute_workflow(
+        &script(body),
+        args,
+        Arc::new(FakeAgentRuntime::default()),
+        Arc::new(|_, _| {}),
+        config,
+        WorkflowControl::new(),
+    )
+    .await
+}
+
 #[tokio::test]
 async fn declared_inputs_are_frozen_and_available_through_read_only_runtime_apis() {
     let declared_inputs = WorkflowDeclaredInputs {
@@ -436,6 +552,460 @@ async fn passes_args_to_agents_and_returns_the_workflow_result() {
     assert_eq!(outcome.total_tokens, 10);
     assert_eq!(outcome.total_tool_calls, 1);
     assert_eq!(runtime.prompts(), vec!["inspect:src/lib.rs"]);
+}
+
+#[tokio::test]
+async fn omitted_args_are_undefined_while_explicit_null_is_present() {
+    let absent = try_run_with_config(
+        "return [typeof args, args === undefined, args === null]",
+        json!(null),
+        WorkflowRuntimeConfig {
+            args_present: false,
+            ..WorkflowRuntimeConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(absent.result, json!(["undefined", true, false]));
+
+    let present = try_run_with_config(
+        "return [typeof args, args === undefined, args === null]",
+        json!(null),
+        WorkflowRuntimeConfig::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(present.result, json!(["object", false, true]));
+}
+
+#[tokio::test]
+async fn console_debug_maps_to_the_workflow_log() {
+    let (outcome, _, _) = run("console.debug('debug-message'); return 'ok'", json!(null)).await;
+
+    assert_eq!(outcome.result, json!("ok"));
+    assert!(outcome.logs.iter().any(|log| log == "debug-message"));
+}
+
+#[tokio::test]
+async fn phase_models_apply_without_overriding_an_explicit_agent_model() {
+    let workflow = validate_workflow_script(
+        "export const meta = { name: 'phase-model', description: 'phase model', phases: [{ title: 'Run', model: 'phase-model' }] };\n\
+         await agent('inherits-phase-model', { phase: 'Run' });\n\
+         return agent('explicit-model', { phase: 'Run', model: 'explicit-model' })",
+    )
+    .unwrap();
+    let runtime = Arc::new(FakeAgentRuntime::default());
+    execute_workflow(
+        &workflow,
+        json!(null),
+        runtime.clone(),
+        Arc::new(|_, _| {}),
+        WorkflowRuntimeConfig::default(),
+        WorkflowControl::new(),
+    )
+    .await
+    .unwrap();
+
+    let requests = runtime.requests();
+    assert_eq!(
+        requests[0].options.model.as_deref(),
+        Some("phase-model"),
+        "{:?}",
+        requests[0].options.model
+    );
+    assert_eq!(requests[1].options.model.as_deref(), Some("explicit-model"));
+}
+
+#[tokio::test]
+async fn budget_is_frozen_and_unbounded_without_a_positive_total() {
+    let script = r#"
+const start = budget.spent();
+const total = budget.total;
+const frozen = Object.isFrozen(budget);
+await agent('work');
+return {
+  start,
+  total,
+  frozen,
+  delta: budget.spent() - start,
+  infinite: budget.remaining() === Infinity,
+};
+"#;
+
+    let no_budget = try_run_with_config(
+        script,
+        json!(null),
+        WorkflowRuntimeConfig {
+            initial_usage: WorkflowTokenUsage {
+                total_tokens: 7,
+                tool_uses: 2,
+            },
+            ..WorkflowRuntimeConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        no_budget.result,
+        json!({
+            "start": 7,
+            "total": null,
+            "frozen": true,
+            "delta": 10,
+            "infinite": true,
+        })
+    );
+
+    let zero_total = try_run_with_config(
+        script,
+        json!(null),
+        WorkflowRuntimeConfig {
+            budget: Some(Arc::new(TestBudget::new(0, 0))),
+            ..WorkflowRuntimeConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        zero_total.result,
+        json!({
+            "start": 0,
+            "total": null,
+            "frozen": true,
+            "delta": 10,
+            "infinite": true,
+        })
+    );
+}
+
+#[tokio::test]
+async fn budget_total_and_remaining_track_initial_and_run_usage() {
+    let outcome = try_run_with_config(
+        r#"
+const start = budget.spent();
+await agent('work');
+return {
+  total: budget.total,
+  start,
+  spent: budget.spent(),
+  remaining: budget.remaining(),
+};
+"#,
+        json!(null),
+        WorkflowRuntimeConfig {
+            initial_usage: WorkflowTokenUsage {
+                total_tokens: 7,
+                tool_uses: 0,
+            },
+            // Host spend and persisted workflow usage are disjoint because
+            // workflow subagents run without the host rollout budget.
+            budget: Some(Arc::new(TestBudget::new(50, 10))),
+            ..WorkflowRuntimeConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome.result,
+        json!({
+            "total": 50,
+            "start": 17,
+            "spent": 27,
+            "remaining": 23,
+        })
+    );
+
+    let error = try_run_with_config(
+        "return agent('must-not-run')",
+        json!(null),
+        WorkflowRuntimeConfig {
+            initial_usage: WorkflowTokenUsage {
+                total_tokens: 20,
+                tool_uses: 0,
+            },
+            budget: Some(Arc::new(TestBudget::new(25, 10))),
+            ..WorkflowRuntimeConfig::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("token budget"), "{error}");
+}
+
+#[tokio::test]
+async fn budget_rechecks_queued_and_retried_dispatches() {
+    let runtime = Arc::new(FakeAgentRuntime::default());
+    let queued = execute_workflow(
+        &script("return parallel([() => agent('one'), () => agent('two')])"),
+        json!(null),
+        runtime.clone(),
+        Arc::new(|_, _| {}),
+        WorkflowRuntimeConfig {
+            concurrency: 1,
+            budget: Some(Arc::new(TestBudget::new(10, 0))),
+            ..WorkflowRuntimeConfig::default()
+        },
+        WorkflowControl::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(queued.to_string().contains("token budget"), "{queued}");
+    assert_eq!(runtime.prompts(), vec!["one"]);
+
+    let retried = try_run_with_config(
+        "return agent('stall-consumes-budget')",
+        json!(null),
+        WorkflowRuntimeConfig {
+            budget: Some(Arc::new(TestBudget::new(15, 0))),
+            stall_retries: 2,
+            stall_retry_base_delay: Duration::ZERO,
+            stall_retry_max_delay: Duration::ZERO,
+            ..WorkflowRuntimeConfig::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(retried.to_string().contains("token budget"), "{retried}");
+}
+
+#[tokio::test]
+async fn budget_enforces_workflow_tokens_beyond_host_spent() {
+    let error = try_run_with_config(
+        "await agent('one'); await agent('two'); await agent('three'); return 'done'",
+        json!(null),
+        WorkflowRuntimeConfig {
+            // The host has spent 3 tokens; each fake agent adds 10.
+            // Dispatch three must see 23 >= 20 and fail.
+            budget: Some(Arc::new(TestBudget::new(20, 3))),
+            ..WorkflowRuntimeConfig::default()
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("token budget"), "{error}");
+}
+
+#[tokio::test]
+async fn exhausted_budget_rejects_through_parallel_and_pipeline() {
+    for body in [
+        "return parallel([() => agent('must-not-run')])",
+        "return pipeline([1], () => agent('must-not-run'))",
+    ] {
+        let error = try_run_with_config(
+            body,
+            json!(null),
+            WorkflowRuntimeConfig {
+                budget: Some(Arc::new(TestBudget::new(5, 5))),
+                ..WorkflowRuntimeConfig::default()
+            },
+        )
+        .await
+        .unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("token budget"),
+            "unexpected error: {message}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn agent_cap_rejects_through_parallel_and_pipeline() {
+    for body in [
+        "return parallel([() => agent('one'), () => agent('two'), () => agent('three')])",
+        "return pipeline([1, 2, 3], () => agent('worker'))",
+    ] {
+        let error = try_run_with_config(
+            body,
+            json!(null),
+            WorkflowRuntimeConfig {
+                concurrency: 1,
+                max_agents: 2,
+                ..WorkflowRuntimeConfig::default()
+            },
+        )
+        .await
+        .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("agent cap"), "unexpected error: {message}");
+    }
+}
+
+#[tokio::test]
+async fn cached_agents_do_not_count_toward_the_run_agent_cap() {
+    let journal = FakeJournal::new(HashMap::from([
+        (
+            workflow_cache_key(
+                WORKFLOW_CACHE_ROOT,
+                "root/agent:0",
+                "cached-a",
+                &WorkflowAgentOptions::default(),
+                AgentResultMode::Value,
+                None,
+            ),
+            WorkflowAgentResult {
+                value: json!("cached-a"),
+                usage: WorkflowTokenUsage::default(),
+                agent_id: None,
+                model: None,
+                fallback_model: None,
+            },
+        ),
+        (
+            workflow_cache_key(
+                WORKFLOW_CACHE_ROOT,
+                "root/agent:1",
+                "cached-b",
+                &WorkflowAgentOptions::default(),
+                AgentResultMode::Value,
+                None,
+            ),
+            WorkflowAgentResult {
+                value: json!("cached-b"),
+                usage: WorkflowTokenUsage::default(),
+                agent_id: None,
+                model: None,
+                fallback_model: None,
+            },
+        ),
+    ]));
+    let runtime = Arc::new(FakeAgentRuntime::default());
+    let outcome = execute_workflow(
+        &script(
+            "const a = await agent('cached-a'); const b = await agent('cached-b'); return [a, b]",
+        ),
+        json!(null),
+        runtime.clone(),
+        Arc::new(|_, _| {}),
+        WorkflowRuntimeConfig {
+            journal: Some(Arc::new(journal)),
+            max_agents: 0,
+            ..WorkflowRuntimeConfig::default()
+        },
+        WorkflowControl::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.result, json!(["cached-a", "cached-b"]));
+    assert!(runtime.prompts().is_empty());
+}
+
+#[tokio::test]
+async fn direct_agent_failures_resolve_to_null() {
+    for prompt in [
+        "terminal-api-fail",
+        "throttled",
+        "blocked",
+        "fail",
+        "host-skipped",
+    ] {
+        let body = format!("return agent({})", serde_json::to_string(prompt).unwrap());
+        let outcome = try_run_with_config(
+            &body,
+            json!(null),
+            WorkflowRuntimeConfig {
+                throttle_retry_delay: Duration::ZERO,
+                ..WorkflowRuntimeConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.result, JsonValue::Null, "prompt {prompt}");
+    }
+}
+
+#[tokio::test]
+async fn cancelled_agents_are_run_level_errors() {
+    for body in [
+        "return agent('host-cancelled')",
+        "return agentSettled('host-cancelled')",
+        "return parallel([() => agent('host-cancelled')])",
+        "return pipeline([1], () => agent('host-cancelled'))",
+    ] {
+        let error = try_run_with_config(body, json!(null), WorkflowRuntimeConfig::default())
+            .await
+            .unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("cancelled"),
+            "unexpected error for `{body}`: {message}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn structured_output_failure_throws_directly_and_nulls_in_fanout() {
+    let error = try_run_with_config(
+        "return agent('structured-output-fail')",
+        json!(null),
+        WorkflowRuntimeConfig::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("structured output validation failed")
+    );
+
+    for body in [
+        "return parallel([() => agent('structured-output-fail')])",
+        "return pipeline([1], () => agent('structured-output-fail'))",
+    ] {
+        let (outcome, _, _) = run(body, json!(null)).await;
+        assert_eq!(outcome.result, json!([null]));
+    }
+}
+
+#[tokio::test]
+async fn agent_settled_preserves_structured_output_envelopes() {
+    let (outcome, _, _) = run("return agentSettled('structured-output-fail')", json!(null)).await;
+
+    assert_eq!(
+        outcome.result,
+        json!({
+            "status": "rejected",
+            "reason": {
+                "kind": "structuredOutput",
+                "message": "structured output validation failed",
+            },
+        })
+    );
+}
+
+#[tokio::test]
+async fn policy_agent_options_are_forwarded() {
+    let runtime = Arc::new(FakeAgentRuntime::default());
+    execute_workflow(
+        &script(
+            "return agent('policy', { disallowedTools: ['Bash'], bashCommandClamp: ['git status'] })",
+        ),
+        json!(null),
+        runtime.clone(),
+        Arc::new(|_, _| {}),
+        WorkflowRuntimeConfig::default(),
+        WorkflowControl::new(),
+    )
+    .await
+    .unwrap();
+
+    let requests = runtime.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].options.disallowed_tools,
+        Some(vec!["Bash".to_string()])
+    );
+    assert_eq!(
+        requests[0].options.bash_command_clamp,
+        Some(vec!["git status".to_string()])
+    );
 }
 
 #[tokio::test]
@@ -1032,12 +1602,15 @@ async fn agent_progress_timestamps_use_unix_seconds_like_task_timestamps() {
 #[tokio::test]
 async fn parallel_is_all_settled_and_reports_failures_as_null() {
     let (outcome, _, events) = run(
-        "return parallel([() => agent('one'), () => agent('fail'), () => agent('three')])",
+        "return parallel([() => agent('one'), () => { throw new Error('boom'); }, () => agent('fail'), () => agent('three')])",
         json!(null),
     )
     .await;
 
-    assert_eq!(outcome.result, json!(["result:one", null, "result:three"]));
+    assert_eq!(
+        outcome.result,
+        json!(["result:one", null, null, "result:three"])
+    );
     assert_eq!(outcome.agent_count, 3);
     assert!(
         outcome
@@ -1052,10 +1625,10 @@ async fn parallel_is_all_settled_and_reports_failures_as_null() {
 }
 
 #[tokio::test]
-async fn direct_terminal_api_failure_rejects_and_records_the_failure() {
+async fn direct_terminal_api_failure_resolves_null_and_records_the_failure() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let event_output = Arc::clone(&events);
-    let result = execute_workflow(
+    let outcome = execute_workflow(
         &script("return agent('terminal-api-fail')"),
         json!(null),
         Arc::new(FakeAgentRuntime::default()),
@@ -1071,12 +1644,11 @@ async fn direct_terminal_api_failure_rejects_and_records_the_failure() {
         },
         WorkflowControl::new(),
     )
-    .await;
+    .await
+    .unwrap();
 
-    let Err(WorkflowExecutionError::Runtime(message)) = result else {
-        panic!("direct host failure must reject the workflow");
-    };
-    assert!(message.contains("terminal API failure"));
+    assert_eq!(outcome.result, JsonValue::Null);
+    assert_eq!(outcome.failures, vec!["agent-1: terminal API failure"]);
     let events = events
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1089,35 +1661,35 @@ async fn direct_terminal_api_failure_rejects_and_records_the_failure() {
 }
 
 #[tokio::test]
-async fn strict_parallel_never_runs_synthesis_with_host_failures() {
-    for failure in ["terminal-api-fail", "throttled", "host-skipped"] {
-        let runtime = Arc::new(FakeAgentRuntime::default());
-        let result = execute_workflow(
-            &script(
-                "const reports = await parallel([() => agent('ok'), () => agent(args.failure)], { requireAll: true }); return agent('synthesize', { inputs: { reports } })",
-            ),
-            json!({ "failure": failure }),
-            runtime.clone(),
-            Arc::new(|_, _| {}),
-            WorkflowRuntimeConfig {
-                throttle_retry_delay: Duration::ZERO,
-                ..WorkflowRuntimeConfig::default()
-            },
-            WorkflowControl::new(),
-        )
-        .await;
+async fn strict_parallel_rethrows_run_level_failures_without_synthesis() {
+    let runtime = Arc::new(FakeAgentRuntime::default());
+    let result = execute_workflow(
+        &script(
+            "const reports = await parallel([() => agent('ok'), () => agent('second')], { requireAll: true }); return agent('synthesize', { inputs: { reports } })",
+        ),
+        json!(null),
+        runtime.clone(),
+        Arc::new(|_, _| {}),
+        WorkflowRuntimeConfig {
+            concurrency: 1,
+            max_agents: 1,
+            ..WorkflowRuntimeConfig::default()
+        },
+        WorkflowControl::new(),
+    )
+    .await;
 
-        let Err(WorkflowExecutionError::Runtime(message)) = result else {
-            panic!("strict fan-in must fail for {failure}");
-        };
-        assert!(message.contains("WorkflowParallelError"));
-        assert!(
-            !runtime
-                .prompts()
-                .iter()
-                .any(|prompt| prompt == "synthesize")
-        );
-    }
+    let Err(WorkflowExecutionError::Runtime(message)) = result else {
+        panic!("strict fan-in must fail when an agent cap is reached");
+    };
+    assert!(message.contains("agent cap"));
+    assert!(!message.contains("WorkflowParallelError"));
+    assert!(
+        !runtime
+            .prompts()
+            .iter()
+            .any(|prompt| prompt == "synthesize")
+    );
 }
 
 #[tokio::test]
@@ -1711,16 +2283,14 @@ async fn events_until_closed(
 }
 
 #[tokio::test]
-async fn agent_fan_out_continues_past_the_previous_total_limit() {
-    let runtime = Arc::new(FakeAgentRuntime::default());
-    let task_runtime = runtime.clone();
-    let outcome = execute_workflow(
+async fn default_agent_fan_out_stops_at_one_thousand_real_agents() {
+    let result = execute_workflow(
         &script(
             "const tasks = Array.from({ length: 1001 }, (_, index) => \
              () => agent(`worker-${index}`)); return parallel(tasks)",
         ),
         json!(null),
-        task_runtime,
+        Arc::new(FakeAgentRuntime::default()),
         Arc::new(|_, _| {}),
         WorkflowRuntimeConfig {
             concurrency: 16,
@@ -1729,20 +2299,12 @@ async fn agent_fan_out_continues_past_the_previous_total_limit() {
         },
         WorkflowControl::new(),
     )
-    .await
-    .unwrap();
+    .await;
 
-    assert_eq!(outcome.result.as_array().unwrap().len(), 1001);
-    assert!(
-        outcome
-            .result
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(JsonValue::is_string)
-    );
-    assert_eq!(outcome.agent_count, 1001);
-    assert_eq!(runtime.prompts().len(), 1001);
+    let Err(WorkflowExecutionError::Runtime(message)) = result else {
+        panic!("workflow must stop at the default 1000-agent cap");
+    };
+    assert!(message.contains("agent cap"));
 }
 
 #[tokio::test]
@@ -1970,7 +2532,7 @@ return {
 }
 
 #[tokio::test]
-async fn journal_replays_matching_logical_invocations_independently() {
+async fn journal_stops_replaying_after_the_first_miss() {
     let workflow = script(
         r#"
 const first = await agent('cached-first');
@@ -2056,11 +2618,11 @@ return [first, second, third];
         json!([
             "replayed:cached-first",
             "result:changed-second",
-            "replayed:cached-third"
+            "result:cached-third"
         ])
     );
-    assert_eq!(runtime.prompts(), vec!["changed-second"]);
-    assert_eq!(outcome.total_tokens, 10);
+    assert_eq!(runtime.prompts(), vec!["changed-second", "cached-third"]);
+    assert_eq!(outcome.total_tokens, 20);
     assert!(
         events
             .lock()
@@ -2071,6 +2633,67 @@ return [first, second, third];
                 WorkflowEvent::WorkflowAgent(agent) if agent.cached
             ))
     );
+}
+
+#[tokio::test]
+async fn started_without_result_is_a_resume_breakpoint() {
+    let options = WorkflowAgentOptions::default();
+    let breakpoint_key = workflow_cache_key(
+        WORKFLOW_CACHE_ROOT,
+        "root/agent:0",
+        "breakpoint",
+        &options,
+        AgentResultMode::Value,
+        None,
+    );
+    let cached_key = workflow_cache_key(
+        WORKFLOW_CACHE_ROOT,
+        "root/agent:1",
+        "cached-after-breakpoint",
+        &options,
+        AgentResultMode::Value,
+        None,
+    );
+    let journal = Arc::new(FakeJournal::new(HashMap::from([(
+        cached_key,
+        WorkflowAgentResult {
+            value: json!("replayed:after-breakpoint"),
+            usage: WorkflowTokenUsage::default(),
+            agent_id: None,
+            model: None,
+            fallback_model: None,
+        },
+    )])));
+    journal
+        .started
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(breakpoint_key);
+    let runtime = Arc::new(FakeAgentRuntime::default());
+
+    let outcome = execute_workflow(
+        &script(
+            "const first = await agent('breakpoint');\n\
+             const second = await agent('cached-after-breakpoint');\n\
+             return [first, second]",
+        ),
+        json!(null),
+        runtime.clone(),
+        Arc::new(|_, _| {}),
+        WorkflowRuntimeConfig {
+            journal: Some(journal),
+            ..WorkflowRuntimeConfig::default()
+        },
+        WorkflowControl::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome.result,
+        json!(["result:breakpoint", "replayed:after-breakpoint"])
+    );
+    assert_eq!(runtime.prompts(), vec!["breakpoint"]);
 }
 
 #[tokio::test]
@@ -2122,7 +2745,7 @@ return { result };
 }
 
 #[tokio::test]
-async fn journal_replays_only_success_and_explicit_skips() {
+async fn journal_reruns_failures_and_stops_replaying_later_calls() {
     let options = WorkflowAgentOptions::default();
     let success_key = workflow_cache_key(
         WORKFLOW_CACHE_ROOT,
@@ -2227,12 +2850,63 @@ async fn journal_replays_only_success_and_explicit_skips() {
         json!([
             "cached-ok",
             {
-                "status": "rejected",
-                "reason": { "kind": "skipped", "message": "skipped by user" },
+                "status": "fulfilled",
+                "value": "result:cached-skip",
             },
         ])
     );
-    assert_eq!(runtime.prompts(), vec!["terminal-api-fail"]);
+    assert_eq!(runtime.prompts(), vec!["terminal-api-fail", "cached-skip"]);
+}
+
+#[tokio::test]
+async fn cached_skipped_value_reruns_on_resume() {
+    let key = workflow_cache_key(
+        WORKFLOW_CACHE_ROOT,
+        "root/agent:0",
+        "cached-skip-value",
+        &WorkflowAgentOptions::default(),
+        AgentResultMode::Value,
+        None,
+    );
+    let journal = Arc::new(CachingJournal::default());
+    journal
+        .results
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            key,
+            WorkflowJournalResult {
+                result: WorkflowAgentResult {
+                    value: JsonValue::Null,
+                    usage: WorkflowTokenUsage::default(),
+                    agent_id: None,
+                    model: None,
+                    fallback_model: None,
+                },
+                outcome: WorkflowAgentOutcome::Failure {
+                    kind: WorkflowAgentFailureKind::Skipped,
+                    message: "skipped by user".to_string(),
+                },
+            },
+        );
+    let runtime = Arc::new(FakeAgentRuntime::default());
+
+    let outcome = execute_workflow(
+        &script("return agent('cached-skip-value')"),
+        json!(null),
+        runtime.clone(),
+        Arc::new(|_, _| {}),
+        WorkflowRuntimeConfig {
+            journal: Some(journal),
+            ..WorkflowRuntimeConfig::default()
+        },
+        WorkflowControl::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.result, json!("result:cached-skip-value"));
+    assert_eq!(runtime.prompts(), vec!["cached-skip-value"]);
 }
 
 #[tokio::test]
@@ -2317,7 +2991,8 @@ async fn edited_workflow_reuses_unchanged_prefix_and_recomputes_changed_calls() 
             "shared-c",
             "old-tail",
             "new-tail",
-            "changed-c"
+            "changed-c",
+            "new-tail"
         ]
     );
 }
@@ -2329,7 +3004,8 @@ async fn failed_workflow_edit_reuses_the_successful_prefix_and_retries_the_tail(
     let broken = script(
         "const a = await agent('prefix-a');\n\
          const b = await agent('prefix-b');\n\
-         return await agent('fail-tail')",
+         await agent('fail-tail');\n\
+         throw new Error('broken tail')",
     );
     let fixed = script(
         "const a = await agent('prefix-a');\n\
@@ -2373,9 +3049,9 @@ async fn failed_workflow_edit_reuses_the_successful_prefix_and_retries_the_tail(
 }
 
 #[tokio::test]
-async fn child_workflow_inherits_phase_and_cannot_nest_again() {
+async fn child_workflow_uses_its_own_phase_and_cannot_nest_again() {
     let child = validate_workflow_script(
-        r#"export const meta = { name: 'child', description: 'child', phases: [{ title: 'Ignored' }] };
+        r#"export const meta = { name: 'child', description: 'child', phases: [{ title: 'Ignored', model: 'child-model' }] };
 phase('Ignored');
 return agent(`child:${args.target}`);
 "#,
@@ -2411,6 +3087,10 @@ return agent(`child:${args.target}`);
     assert_eq!(outcome.result, json!("result:child:item"));
     assert_eq!(outcome.agent_count, 1);
     assert_eq!(runtime.prompts(), vec!["child:item"]);
+    assert_eq!(
+        runtime.requests()[0].options.model.as_deref(),
+        Some("child-model")
+    );
     assert!(
         events
             .lock()
@@ -2420,7 +3100,7 @@ return agent(`child:${args.target}`);
                 event,
                 WorkflowEvent::WorkflowAgent(agent)
                     if agent.phase_index == Some(0)
-                        && agent.phase_title.as_deref() == Some("Run")
+                        && agent.phase_title.as_deref() == Some("Ignored")
             ))
     );
     assert_eq!(
@@ -2432,6 +3112,7 @@ return agent(`child:${args.target}`);
         &[WorkflowChildRequest {
             name_or_ref: json!("child"),
             args: json!({ "target": "item" }),
+            args_present: true,
         }]
     );
 
@@ -2458,6 +3139,43 @@ return agent(`child:${args.target}`);
         nested,
         Err(WorkflowExecutionError::Runtime(message)) if message.contains("call workflow() from the root workflow")
     ));
+}
+
+#[tokio::test]
+async fn omitted_child_args_are_undefined_and_explicit_null_stays_null() {
+    let child = validate_workflow_script(
+        "export const meta = { name: 'child', description: 'child' }; return [typeof args, args === undefined, args === null]",
+    )
+    .unwrap();
+    let resolver = Arc::new(FakeChildResolver {
+        script: child,
+        requests: Mutex::new(Vec::new()),
+    });
+    let outcome = execute_workflow(
+        &script("return [await workflow('child'), await workflow('child', null)]"),
+        json!(null),
+        Arc::new(FakeAgentRuntime::default()),
+        Arc::new(|_, _| {}),
+        WorkflowRuntimeConfig {
+            child_resolver: Some(resolver.clone()),
+            ..WorkflowRuntimeConfig::default()
+        },
+        WorkflowControl::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome.result,
+        json!([["undefined", true, false], ["object", false, true],])
+    );
+    let requests = resolver
+        .requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(requests.len(), 2);
+    assert!(!requests[0].args_present);
+    assert!(requests[1].args_present);
 }
 
 #[tokio::test]
@@ -2698,6 +3416,7 @@ async fn cancelled_child_caller_keeps_admission_until_persistence_stops() {
         invocation_id: invocation_id.to_string(),
         name_or_ref: json!("child"),
         args: json!(index),
+        args_present: true,
         phase_index: None,
         phase_title: None,
     };
@@ -2777,6 +3496,16 @@ async fn dynamic_progress_text_and_stall_timeout_have_host_side_limits() {
         Err(WorkflowExecutionError::Runtime(message))
             if message.contains("choose stallMs within the supported workflow agent timeout range")
     ));
+
+    let outcome = try_run_with_config(
+        "try { await agent('bad-label', { label: args.label }); } catch (_) {}\n\
+         return agent('after-catch')",
+        json!({ "label": "x".repeat(300) }),
+        WorkflowRuntimeConfig::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.result, json!("result:after-catch"));
 }
 
 #[test]
@@ -2843,128 +3572,88 @@ async fn stalled_agents_auto_retry_exponentially_and_then_recover() {
 }
 
 #[tokio::test]
-async fn stalled_agents_suspend_for_user_retry_and_skip() {
-    let runtime = Arc::new(FakeAgentRuntime::default());
-    let control = WorkflowControl::new();
-    let task_control = control.clone();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let task_runtime = runtime.clone();
-    let workflow = script("return agent('always-stall', { label: 'worker' })");
-    let task = tokio::spawn(async move {
-        execute_workflow(
-            &workflow,
-            json!(null),
-            task_runtime,
-            Arc::new(move |_, event| {
-                let _ = event_tx.send(event);
-            }),
-            WorkflowRuntimeConfig {
-                stall_retries: 3,
-                stall_retry_base_delay: Duration::from_millis(1),
-                stall_retry_max_delay: Duration::from_millis(4),
-                throttle_retry_delay: Duration::ZERO,
-                ..WorkflowRuntimeConfig::default()
-            },
-            task_control,
-        )
+async fn stalled_agents_reject_or_envelope_after_retry_budget() {
+    let config = || WorkflowRuntimeConfig {
+        stall_retries: 2,
+        stall_retry_base_delay: Duration::ZERO,
+        stall_retry_max_delay: Duration::ZERO,
+        throttle_retry_delay: Duration::ZERO,
+        ..WorkflowRuntimeConfig::default()
+    };
+
+    let error = try_run_with_config("return agent('always-stall')", json!(null), config())
         .await
-    });
+        .unwrap_err();
+    assert!(error.to_string().contains("made no progress"), "{error}");
 
-    for expected_attempts in [4, 5] {
-        let awaiting = loop {
-            let event = event_rx.recv().await.unwrap();
-            if let WorkflowEvent::WorkflowAgent(agent) = event
-                && agent.state == WorkflowAgentState::Error
-                && agent.awaiting_decision
-            {
-                break agent;
-            }
-        };
-        assert_eq!(runtime.prompts().len(), expected_attempts);
-        assert_eq!(awaiting.label, "worker");
-        if expected_attempts == 4 {
-            assert!(control.retry_agent(0));
-        } else {
-            assert!(control.skip_agent(0));
-        }
-    }
+    let (fanout, _, _) = run_with_config(
+        "return parallel([() => agent('always-stall')])",
+        json!(null),
+        config(),
+    )
+    .await;
+    assert_eq!(fanout.result, json!([null]));
 
-    let outcome = task.await.unwrap().unwrap();
-    assert_eq!(outcome.result, JsonValue::Null);
-    assert_eq!(runtime.prompts().len(), 5);
-    let events = events_until_closed(event_rx).await;
-    assert!(events.iter().any(|event| matches!(
+    let (outcome, runtime, events) =
+        run_with_config("return agentSettled('always-stall')", json!(null), config()).await;
+    assert_eq!(
+        outcome.result,
+        json!({
+            "status": "rejected",
+            "reason": {
+                "kind": "stalled",
+                "message": "agent made no progress for 180s",
+            },
+        })
+    );
+    assert_eq!(runtime.prompts().len(), 3);
+    assert!(events.iter().all(|event| !matches!(
         event,
-        WorkflowEvent::WorkflowAgent(agent)
-            if agent.state == WorkflowAgentState::Error
-                && !agent.awaiting_decision
-                && agent.skipped
+        WorkflowEvent::WorkflowAgent(agent) if agent.awaiting_decision
     )));
 }
 
 #[tokio::test]
-async fn awaiting_user_decision_does_not_hold_the_last_parallel_concurrency_slot() {
-    let runtime = Arc::new(FakeAgentRuntime::default());
-    let control = WorkflowControl::new();
-    let task_control = control.clone();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let task_runtime = runtime.clone();
-    let workflow = script(
+async fn stalled_agents_release_the_last_parallel_concurrency_slot() {
+    let (outcome, runtime, _) = run_with_config(
         r#"
 return parallel([
-  () => agent('always-stall', { label: 'stalled' }),
+  () => agentSettled('always-stall', { label: 'stalled' }),
   () => agent('healthy', { label: 'queued' }),
 ]);
 "#,
-    );
-    let task = tokio::spawn(async move {
-        execute_workflow(
-            &workflow,
-            json!(null),
-            task_runtime,
-            Arc::new(move |_, event| {
-                let _ = event_tx.send(event);
-            }),
-            WorkflowRuntimeConfig {
-                concurrency: 1,
-                global_concurrency: Some(WorkflowGlobalConcurrency::new(
-                    NonZeroUsize::new(1).unwrap(),
-                )),
-                stall_retries: 0,
-                stall_retry_base_delay: Duration::from_millis(1),
-                stall_retry_max_delay: Duration::from_millis(1),
-                throttle_retry_delay: Duration::ZERO,
-                ..WorkflowRuntimeConfig::default()
+        json!(null),
+        WorkflowRuntimeConfig {
+            concurrency: 1,
+            global_concurrency: Some(WorkflowGlobalConcurrency::new(
+                NonZeroUsize::new(1).unwrap(),
+            )),
+            stall_retries: 0,
+            stall_retry_base_delay: Duration::ZERO,
+            stall_retry_max_delay: Duration::ZERO,
+            throttle_retry_delay: Duration::ZERO,
+            ..WorkflowRuntimeConfig::default()
+        },
+    )
+    .await;
+
+    assert_eq!(
+        outcome.result,
+        json!([
+            {
+                "status": "rejected",
+                "reason": {
+                    "kind": "stalled",
+                    "message": "agent made no progress for 180s",
+                },
             },
-            task_control,
-        )
-        .await
-    });
-
-    loop {
-        let event = event_rx.recv().await.unwrap();
-        if let WorkflowEvent::WorkflowAgent(agent) = event
-            && agent.state == WorkflowAgentState::Error
-            && agent.awaiting_decision
-        {
-            assert_eq!(agent.label, "stalled");
-            break;
-        }
-    }
-    timeout(Duration::from_secs(1), async {
-        loop {
-            if runtime.prompts().iter().any(|prompt| prompt == "healthy") {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("queued agent should run while stalled agent awaits user input");
-    assert!(control.skip_agent(0));
-
-    let outcome = task.await.unwrap().unwrap();
-    assert_eq!(outcome.result, json!([JsonValue::Null, "result:healthy"]));
+            "result:healthy",
+        ])
+    );
+    assert_eq!(
+        runtime.prompts(),
+        vec!["always-stall".to_string(), "healthy".to_string()]
+    );
 }
 
 #[test]
@@ -3578,6 +4267,56 @@ async fn journal_replay_failure_prevents_agent_execution() {
 }
 
 #[tokio::test]
+async fn run_level_storage_failures_cannot_be_swallowed_by_fanout() {
+    let runtime = Arc::new(FakeAgentRuntime::default());
+    let error = execute_workflow(
+        &script(
+            "try { await parallel([() => agent('must-not-run')]); } catch (_) {}\n\
+             return 'swallowed'",
+        ),
+        json!(null),
+        runtime.clone(),
+        Arc::new(|_, _| {}),
+        WorkflowRuntimeConfig {
+            journal: Some(Arc::new(FailingReplayJournal)),
+            ..WorkflowRuntimeConfig::default()
+        },
+        WorkflowControl::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("workflow journal replay failed for agent agent-1")
+    );
+    assert!(runtime.requests().is_empty());
+
+    let artifact_runtime = Arc::new(FakeAgentRuntime::default());
+    let error = execute_workflow(
+        &script(
+            "try { await parallel([() => agent('artifact-input', { inputs: { data: { value: 1 } } })]); } catch (_) {}\n\
+             return 'swallowed'",
+        ),
+        json!(null),
+        artifact_runtime.clone(),
+        Arc::new(|_, _| {}),
+        WorkflowRuntimeConfig {
+            input_artifact_store: Arc::new(FailingPutArtifactStore),
+            ..WorkflowRuntimeConfig::default()
+        },
+        WorkflowControl::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("artifact storage unavailable"),
+        "{error}"
+    );
+    assert!(artifact_runtime.requests().is_empty());
+}
+
+#[tokio::test]
 async fn journal_result_failure_prevents_successful_workflow_completion() {
     let runtime = Arc::new(FakeAgentRuntime::default());
     let error = execute_workflow(
@@ -3686,7 +4425,7 @@ async fn workflow_cancellation_is_not_replayed_on_resume() {
 }
 
 #[tokio::test]
-async fn explicit_user_skip_remains_replayable() {
+async fn explicit_user_skip_reruns_on_resume() {
     let runtime = Arc::new(FakeAgentRuntime::default());
     let journal = Arc::new(CachingJournal::default());
     let control = WorkflowControl::new();
@@ -3740,8 +4479,17 @@ async fn explicit_user_skip_remains_replayable() {
     .await
     .unwrap();
 
-    assert_eq!(replayed.result, expected);
-    assert_eq!(runtime.prompts(), vec!["slow-explicit-skip"]);
+    assert_eq!(
+        replayed.result,
+        json!({
+            "status": "fulfilled",
+            "value": "result:slow-explicit-skip",
+        })
+    );
+    assert_eq!(
+        runtime.prompts(),
+        vec!["slow-explicit-skip", "slow-explicit-skip"]
+    );
 }
 
 #[tokio::test]

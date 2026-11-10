@@ -2,7 +2,8 @@ Launch a deterministic JavaScript workflow that coordinates Codex subagents afte
 system opt-in to multi-agent orchestration. Load the `$workflow` skill before authoring or revising
 a script; it contains the complete API and recovery guidance.
 
-Provide exactly one source:
+Provide one source. When several are present, `scriptPath` takes precedence over `script`, and
+`script` takes precedence over `name`:
 
 - `script`: a new inline workflow.
 - `name`: a built-in, plugin, user, or project workflow.
@@ -35,14 +36,22 @@ return agent("Inspect the request supplied in inputs.", {
 
 Core globals:
 
-- `args` is the invocation's JSON value. Omit it for a new workflow to use null; with
-  `resumeFromRunId`, omit it to reuse that run's persisted arguments. Resume arguments that differ
-  from the saved value start a new replay lineage; matching arguments keep the existing journal.
+- `args` is the invocation's JSON value. Omit it for a new workflow to make the script's `args`
+  global `undefined`; pass explicit `null` to make it `null`. With `resumeFromRunId`, omit it to
+  reuse that run's persisted arguments and their presence, so an originally absent `args` stays
+  `undefined`. Resume arguments that differ from the saved value start a new replay lineage;
+  matching arguments keep the existing journal.
   Pass variable runtime data through named
   `agent(..., { inputs })` values rather than concatenating it into prompts. Agents with structured
   inputs receive `AnalyzeWorkflowInputs` for bounded inspection; an oversized analysis returns
   `resultShape` and `nextAction` for narrowing the next program.
-- `agent()` runs a subagent; `agentSettled()` returns an explicit fulfilled or rejected status.
+- `agent()` runs a subagent. Agent-level failures (skip, terminal API error, throttle, block, or
+  ordinary failure) resolve to `null`. Exhausted stall retries and exhausted schema retries throw
+  from a direct call, while `parallel()`/`pipeline()` turn that slot into `null`. Run-level failures
+  (cancel, token budget, per-run agent cap) throw and are never swallowed. `agentSettled()` returns
+  an explicit status envelope for agent-level failures and still throws on run-level failures.
+- `budget` is a frozen object with `total`, `spent()`, and `remaining()`. `total` is `null` when no
+  token target is configured; `remaining()` is then `Infinity`.
 - `parallel()` and `pipeline()` coordinate bounded work. Use `parallel(..., { requireAll: true })`
   only when every result is required.
 - `phase()` and `log()` report progress. `workflow()` invokes an approved static local child.

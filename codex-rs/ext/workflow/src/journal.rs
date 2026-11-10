@@ -3,6 +3,7 @@ use codex_workflow::WorkflowJournal;
 use codex_workflow::WorkflowJournalFuture;
 use codex_workflow::WorkflowJournalReplayFuture;
 use codex_workflow::WorkflowJournalResult;
+use codex_workflow::WorkflowJournalStartedFuture;
 use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
@@ -52,6 +53,10 @@ impl JournalMarker {
 enum DurableKeyState {
     Started {
         key: String,
+        /// A replay tombstone shadows an older generation but never represents
+        /// a call that actually started executing.
+        #[serde(default)]
+        tombstone: bool,
     },
     Result {
         key: String,
@@ -211,6 +216,45 @@ impl FileWorkflowJournal {
         })
         .await
         .map_err(|error| error.to_string())?
+    }
+
+    fn started_blocking(
+        marker_path: &Path,
+        storage_directory: &AbsolutePathBuf,
+        source_storage_directories: &[AbsolutePathBuf],
+        file_state: &JournalFileState,
+        key: &str,
+    ) -> Result<bool, String> {
+        let marker = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(marker_path)
+            .and_then(|marker| {
+                marker.lock()?;
+                Ok(marker)
+            }) {
+            Ok(marker) => marker,
+            Err(error) => {
+                tracing::warn!(path = %marker_path.display(), %error, "failed to lock workflow journal for replay");
+                return Err(error.to_string());
+            }
+        };
+        let states = std::iter::once(storage_directory).chain(source_storage_directories.iter());
+        for directory in states {
+            match read_state(directory, key, file_state)? {
+                ReadState::Complete(Some(DurableKeyState::Started {
+                    tombstone: false, ..
+                })) => return Ok(true),
+                ReadState::Complete(Some(DurableKeyState::Started {
+                    tombstone: true, ..
+                }))
+                | ReadState::Complete(Some(DurableKeyState::Result { .. })) => return Ok(false),
+                ReadState::CorruptTail => return Ok(true),
+                ReadState::Complete(None) => {}
+            }
+        }
+        drop(marker);
+        Ok(false)
     }
 
     fn replay_blocking(
@@ -380,8 +424,32 @@ impl WorkflowJournal for FileWorkflowJournal {
         })
     }
 
+    fn started<'a>(&'a self, key: &'a str) -> WorkflowJournalStartedFuture<'a> {
+        let marker_path = self.marker_path.clone();
+        let storage_directory = self.storage_directory.clone();
+        let source_storage_directories = self.source_storage_directories.clone();
+        let file_state = Arc::clone(&self.file_state);
+        let key = key.to_string();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                Self::started_blocking(
+                    &marker_path,
+                    &storage_directory,
+                    &source_storage_directories,
+                    &file_state,
+                    &key,
+                )
+            })
+            .await
+            .map_err(|error| error.to_string())?
+        })
+    }
+
     fn append_started(&self, key: String) -> WorkflowJournalFuture<'_> {
-        Box::pin(self.write_state(DurableKeyState::Started { key }))
+        Box::pin(self.write_state(DurableKeyState::Started {
+            key,
+            tombstone: false,
+        }))
     }
 
     fn append_result(
@@ -588,7 +656,7 @@ fn write_state_blocking(
         hook.proceed.wait();
     }
     let started_durability = match state {
-        DurableKeyState::Started { key } => {
+        DurableKeyState::Started { key, .. } => {
             let current_has_result = has_result(storage_directory, key, _file_state)?;
             let source_has_result =
                 has_result_in_sources(source_storage_directories, key, _file_state)?;
@@ -854,6 +922,7 @@ fn persist_replay_tombstone(
 ) -> Result<(), String> {
     let tombstone = DurableKeyState::Started {
         key: key.to_string(),
+        tombstone: true,
     };
     write_state_locked(
         storage_directory,
@@ -866,7 +935,7 @@ fn persist_replay_tombstone(
 
 fn state_key(state: &DurableKeyState) -> &str {
     match state {
-        DurableKeyState::Started { key } | DurableKeyState::Result { key, .. } => key,
+        DurableKeyState::Started { key, .. } | DurableKeyState::Result { key, .. } => key,
     }
 }
 
@@ -948,7 +1017,7 @@ fn apply_hot_state(file_state: &JournalFileState, state: DurableKeyState) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     match state {
-        DurableKeyState::Started { key } => {
+        DurableKeyState::Started { key, .. } => {
             replay.prefix_results.remove(&key);
             replay.current_results.remove(&key);
             if replay.invalidated_keys.len() >= MAX_HOT_JOURNAL_RESULTS

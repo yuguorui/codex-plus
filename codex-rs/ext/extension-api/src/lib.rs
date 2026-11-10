@@ -13,6 +13,7 @@ pub use message_lifecycle::MessageLifecycleContributor;
 pub use message_lifecycle::MessageLifecycleInput;
 pub use session_isolation::IsolatedSessionExtensions;
 pub use session_isolation::SessionIsolation;
+pub use tool_policy::BashCommandClamp;
 pub use tool_policy::ToolPolicy;
 
 pub use capabilities::ConversationHistorySnapshot;

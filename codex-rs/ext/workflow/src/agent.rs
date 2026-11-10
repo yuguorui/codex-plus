@@ -15,7 +15,10 @@ use codex_core::context::WorkflowChildIsolation;
 use codex_core::context::WorkflowChildOutputContract;
 use codex_core::context::WorkflowChildPreamble;
 use codex_core::context::WorkflowChildTask;
+use codex_extension_api::BashCommandClamp;
 use codex_extension_api::ExtensionDataInit;
+use codex_extension_api::ToolName;
+use codex_extension_api::ToolPolicy;
 use codex_features::Feature;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -32,6 +35,7 @@ use codex_workflow::WorkflowAgentFailure;
 use codex_workflow::WorkflowAgentFailureKind;
 use codex_workflow::WorkflowAgentFuture;
 use codex_workflow::WorkflowAgentInputs;
+use codex_workflow::WorkflowAgentOptions;
 use codex_workflow::WorkflowAgentProgressCallback;
 use codex_workflow::WorkflowAgentProgressUpdate;
 use codex_workflow::WorkflowAgentRequest;
@@ -268,8 +272,14 @@ impl CodexWorkflowAgentRuntime {
                 }
             }
         };
+        let explicit_model = match request.options.model.as_deref() {
+            // Claude treats both spellings as an explicit request to inherit
+            // the parent model rather than as provider model names.
+            Some("inherit" | "default") | None => None,
+            Some(model) => Some(model.to_string()),
+        };
         let explicit_model_overrides = AgentModelOverrides {
-            model: request.options.model.clone(),
+            model: explicit_model,
             reasoning_effort: request.options.effort.map(reasoning_effort),
         };
         self.runner
@@ -366,7 +376,8 @@ impl CodexWorkflowAgentRuntime {
                 .unwrap_or(DEFAULT_STALL_TIMEOUT);
 
             let mut total_tool_uses = 0_u64;
-            let thread_extension_init = workflow_agent_extension_init(analysis_inputs);
+            let thread_extension_init =
+                workflow_agent_extension_init_with_options(analysis_inputs, &request.options);
             let output_schema = if use_native_output_schema {
                 request
                     .options
@@ -464,20 +475,17 @@ impl CodexWorkflowAgentRuntime {
                 };
 
                 if structured_attempt == MAX_STRUCTURED_OUTPUT_RETRIES {
-                    return Err(failure(
-                        WorkflowAgentFailureKind::Failed,
-                        "workflow agent exhausted structured output retries",
-                    )
-                    .with_usage(WorkflowTokenUsage {
-                        total_tokens: completion
-                            .token_usage
-                            .as_ref()
-                            .and_then(|usage| {
-                                u64::try_from(usage.total_token_usage.total_tokens).ok()
-                            })
-                            .unwrap_or(0),
-                        tool_uses: total_tool_uses,
-                    }));
+                    let total_tokens = completion
+                        .token_usage
+                        .as_ref()
+                        .and_then(|usage| {
+                            u64::try_from(usage.total_token_usage.total_tokens).ok()
+                        })
+                        .unwrap_or(0);
+                    return Err(exhausted_structured_output_failure(
+                        total_tokens,
+                        total_tool_uses,
+                    ));
                 }
                 structured_attempt += 1;
                 completion = self
@@ -586,6 +594,186 @@ pub(crate) fn workflow_agent_extension_init(
         init.insert(WorkflowInputsCapability::new(inputs));
     }
     init
+}
+
+fn workflow_agent_extension_init_with_options(
+    inputs: Option<WorkflowAgentInputs>,
+    options: &WorkflowAgentOptions,
+) -> ExtensionDataInit {
+    let mut init = workflow_agent_extension_init(inputs);
+    if let Some(policy) = workflow_agent_tool_policy(options) {
+        init.insert(policy);
+    }
+    init
+}
+
+#[derive(Default)]
+struct ClaudeNamespaceDenies {
+    exact: Vec<String>,
+    all: bool,
+}
+
+impl ClaudeNamespaceDenies {
+    fn merge(&mut self, other: Self) {
+        self.exact.extend(other.exact);
+        self.all |= other.all;
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.all && self.exact.is_empty()
+    }
+}
+
+fn workflow_agent_tool_policy(options: &WorkflowAgentOptions) -> Option<ToolPolicy> {
+    let deny_all = options
+        .disallowed_tools
+        .as_ref()
+        .is_some_and(|names| names.iter().any(|name| name == "*"));
+    let mut denied_tools = (!deny_all).then(|| {
+        options
+            .disallowed_tools
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .flat_map(|name| claude_denied_tools(name))
+            .collect::<Vec<_>>()
+    });
+    let mut denied_namespaces = ClaudeNamespaceDenies::default();
+    if let Some(names) = options.disallowed_tools.as_ref() {
+        for name in names {
+            if let Some(denies) = claude_denied_namespace(name) {
+                denied_namespaces.merge(denies);
+            }
+        }
+    }
+    let bash_command_clamp = options
+        .bash_command_clamp
+        .as_ref()
+        .map(BashCommandClamp::from_rules);
+    if bash_command_clamp.is_some() {
+        // A clamped workflow agent must not keep an interactive shell alive and
+        // receive unchecked input through write_stdin.
+        denied_tools
+            .get_or_insert_with(Vec::new)
+            .push(ToolName::plain("write_stdin"));
+    }
+    if !deny_all
+        && denied_tools.as_ref().is_none_or(Vec::is_empty)
+        && denied_namespaces.is_empty()
+        && bash_command_clamp.is_none()
+    {
+        return None;
+    }
+    Some(ToolPolicy {
+        allowed_tools: deny_all.then_some(Vec::new()),
+        denied_tools,
+        denied_tool_namespaces: (!denied_namespaces.exact.is_empty())
+            .then_some(denied_namespaces.exact),
+        deny_all_namespaces: denied_namespaces.all,
+        bash_command_clamp,
+        ..ToolPolicy::default()
+    })
+}
+
+fn sanitize_mcp_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn claude_denied_tools(name: &str) -> Vec<ToolName> {
+    if let Some(rest) = name.strip_prefix("mcp__")
+        && let Some((server, tool)) = rest.split_once("__")
+        && !server.is_empty()
+        && !tool.is_empty()
+        && tool != "*"
+    {
+        let sanitized_server = sanitize_mcp_component(server);
+        let sanitized_tool = sanitize_mcp_component(tool);
+        let mut denied = Vec::new();
+        for namespace in [format!("mcp__{sanitized_server}"), sanitized_server.clone()] {
+            denied.push(ToolName::namespaced(
+                namespace.clone(),
+                sanitized_tool.as_str(),
+            ));
+            denied.push(ToolName::plain(format!("{namespace}__{sanitized_tool}")));
+        }
+        // Keep raw spellings as a fallback when the host exposes them
+        // unsanitized. Conflict hashes cannot be predicted here; surface the
+        // limitation instead of silently ignoring a possibly-unmatched name.
+        if sanitized_server != server || sanitized_tool != tool {
+            tracing::warn!(
+                name = %name,
+                "workflow disallowedTools MCP name was sanitized; conflict-hashed variants may not be covered"
+            );
+        }
+        denied.push(ToolName::namespaced(format!("mcp__{server}"), tool));
+        denied.push(ToolName::plain(format!("mcp__{server}__{tool}")));
+        denied.sort();
+        denied.dedup();
+        return denied;
+    }
+    match name {
+        "Bash" => vec![
+            ToolName::plain("exec_command"),
+            ToolName::plain("write_stdin"),
+        ],
+        "Write" => vec![
+            ToolName::plain("apply_patch"),
+            ToolName::plain("fuzz_view_edit"),
+        ],
+        // Keep a direct `Edit` match in addition to Codex's patch tools.
+        "Edit" => vec![
+            ToolName::plain("apply_patch"),
+            ToolName::plain("Edit"),
+            ToolName::plain("fuzz_view_edit"),
+        ],
+        "Agent" => vec![
+            ToolName::plain("spawn_agent"),
+            ToolName::namespaced("multi_agent_v1", "spawn_agent"),
+            ToolName::namespaced("multi_agent_v2", "spawn_agent"),
+        ],
+        "Read" => vec![ToolName::plain("Read")],
+        _ => vec![ToolName::plain(name)],
+    }
+}
+
+fn claude_denied_namespace(name: &str) -> Option<ClaudeNamespaceDenies> {
+    let rest = name.strip_prefix("mcp__")?;
+    if rest == "*" {
+        return Some(ClaudeNamespaceDenies {
+            all: true,
+            ..Default::default()
+        });
+    }
+    if !rest.contains("__") {
+        let server = sanitize_mcp_component(rest);
+        if server.is_empty() {
+            return None;
+        }
+        return Some(ClaudeNamespaceDenies {
+            exact: vec![format!("mcp__{server}"), server],
+            ..Default::default()
+        });
+    }
+    let server = rest
+        .strip_suffix("__*")
+        .or_else(|| rest.strip_suffix('*'))?;
+    if server.is_empty() {
+        return None;
+    }
+    let server = sanitize_mcp_component(server);
+    Some(ClaudeNamespaceDenies {
+        exact: vec![format!("mcp__{server}"), server],
+        ..Default::default()
+    })
 }
 
 fn isolated_worktree_context(
@@ -708,6 +896,17 @@ fn workflow_agent_context(
     Ok(context)
 }
 
+fn exhausted_structured_output_failure(total_tokens: u64, tool_uses: u64) -> WorkflowAgentFailure {
+    failure(
+        WorkflowAgentFailureKind::StructuredOutput,
+        "workflow agent exhausted structured output retries",
+    )
+    .with_usage(WorkflowTokenUsage {
+        total_tokens,
+        tool_uses,
+    })
+}
+
 fn structured_retry_prompt(error: &str) -> String {
     let error = truncate_text(
         error,
@@ -725,7 +924,7 @@ fn structured_output_contract(
     serialize_bounded_schema(schema, "workflow agent schema")?;
     jsonschema::validator_for(schema).map_err(|error| {
         failure(
-            WorkflowAgentFailureKind::Failed,
+            WorkflowAgentFailureKind::StructuredOutput,
             format!("invalid workflow agent JSON schema: {error}"),
         )
     })?;
@@ -797,14 +996,14 @@ fn serialize_bounded_schema(
     while let Some((value, depth)) = stack.pop() {
         if depth > MAX_OUTPUT_SCHEMA_DEPTH {
             return Err(failure(
-                WorkflowAgentFailureKind::Failed,
+                WorkflowAgentFailureKind::StructuredOutput,
                 format!("use a focused {label}"),
             ));
         }
         nodes = nodes.saturating_add(1);
         if nodes > MAX_OUTPUT_SCHEMA_NODES {
             return Err(failure(
-                WorkflowAgentFailureKind::Failed,
+                WorkflowAgentFailureKind::StructuredOutput,
                 format!("use a focused {label}"),
             ));
         }
@@ -824,7 +1023,7 @@ fn serialize_bounded_schema(
 
     serde_json::to_string(schema).map_err(|error| {
         failure(
-            WorkflowAgentFailureKind::Failed,
+            WorkflowAgentFailureKind::StructuredOutput,
             format!("failed to serialize {label}: {error}"),
         )
     })

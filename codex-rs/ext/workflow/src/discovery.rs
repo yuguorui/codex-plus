@@ -1,4 +1,5 @@
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_absolute_path::AbsolutePathBufGuard;
 use codex_workflow::MAX_WORKFLOW_SCRIPT_BYTES;
 use codex_workflow::ValidatedWorkflowScript;
 use codex_workflow::WorkflowScriptError;
@@ -28,17 +29,34 @@ pub(crate) struct WorkflowInput {
     pub script: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
-    #[serde(default)]
+    // Keep a present `null` distinct from an omitted field. `Option<JsonValue>`
+    // alone collapses both into `None`, which loses Claude's explicit-null
+    // `args` semantics and breaks resume argument presence.
+    #[serde(default, deserialize_with = "deserialize_present_json_value")]
     pub args: Option<JsonValue>,
     #[serde(default)]
     pub script_path: Option<String>,
     #[serde(default)]
     pub resume_from_run_id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+fn deserialize_present_json_value<'de, D>(deserializer: D) -> Result<Option<JsonValue>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // This is only called when the field is present. Deserialize `null` into
+    // `Some(Value::Null)` so presence survives; a missing field stays `None`.
+    JsonValue::deserialize(deserializer).map(Some)
 }
 
 pub(crate) struct ResolvedWorkflow {
     pub script: ValidatedWorkflowScript,
     pub args: JsonValue,
+    pub args_present: bool,
     pub resume_from_run_id: Option<String>,
     pub origin: WorkflowOrigin,
     pub shadows_existing: bool,
@@ -156,10 +174,10 @@ pub(crate) async fn active_plugin_workflow_roots(
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum WorkflowResolveError {
-    #[error("workflow input requires exactly one of scriptPath, script, or name")]
+    #[error("workflow input requires scriptPath, script, or name")]
     MissingSource,
-    #[error("workflow input accepts exactly one of scriptPath, script, or name")]
-    MultipleSources,
+    #[error("workflow scriptPath must not be empty")]
+    EmptyScriptPath,
     #[error("workflow name must be a single safe name segment")]
     InvalidName,
     #[error("workflow run id must match ^wf_[a-z0-9-]{{6,}}$")]
@@ -186,36 +204,66 @@ pub(crate) async fn resolve_workflow(
     plugin_roots: &[PluginWorkflowRoot],
     child_policy: ChildWorkflowPolicy,
 ) -> Result<ResolvedWorkflow, WorkflowResolveError> {
-    validate_resume_id(input.resume_from_run_id.as_deref())?;
-    let source_count = usize::from(input.script_path.is_some())
-        + usize::from(input.script.is_some())
-        + usize::from(input.name.is_some());
-    if source_count == 0 {
-        return Err(WorkflowResolveError::MissingSource);
-    }
-    if source_count > 1 {
-        return Err(WorkflowResolveError::MultipleSources);
-    }
-    let (source, origin, shadows_existing) = if let Some(script_path) = input.script_path.as_deref()
-    {
+    let claude_personal_workflows = claude_personal_workflows_dir(cwd);
+    resolve_workflow_with_claude_personal_dir(
+        input,
+        cwd,
+        codex_home,
+        plugin_roots,
+        child_policy,
+        claude_personal_workflows.as_deref(),
+    )
+    .await
+}
+
+async fn resolve_workflow_with_claude_personal_dir(
+    input: WorkflowInput,
+    cwd: &AbsolutePathBuf,
+    codex_home: &AbsolutePathBuf,
+    plugin_roots: &[PluginWorkflowRoot],
+    child_policy: ChildWorkflowPolicy,
+    claude_personal_workflows: Option<&Path>,
+) -> Result<ResolvedWorkflow, WorkflowResolveError> {
+    let WorkflowInput {
+        script,
+        name,
+        args,
+        script_path,
+        resume_from_run_id,
+        title,
+        description,
+    } = input;
+    // Claude-compatible metadata is accepted but intentionally has no runtime effect.
+    let _ = (title, description);
+    validate_resume_id(resume_from_run_id.as_deref())?;
+    let (source, origin, shadows_existing) = if let Some(script_path) = script_path.as_deref() {
         let (source, path) = read_explicit_path(script_path, cwd).await?;
         (source, WorkflowOrigin::File { path }, false)
-    } else if let Some(script) = input.script {
+    } else if let Some(script) = script {
         (script, WorkflowOrigin::Inline, false)
-    } else if let Some(name) = input.name.as_deref() {
-        resolve_named(name, cwd, codex_home, plugin_roots).await?
+    } else if let Some(name) = name.as_deref() {
+        resolve_named_with_claude_personal_dir(
+            name,
+            cwd,
+            codex_home,
+            plugin_roots,
+            claude_personal_workflows,
+        )
+        .await?
     } else {
-        unreachable!("source count was validated above")
+        return Err(WorkflowResolveError::MissingSource);
     };
     let script = validate_workflow_script(&source)?;
     let composition =
         freeze_workflow_composition(&script, child_policy, cwd, codex_home, plugin_roots)
             .await
             .map_err(WorkflowResolveError::ChildComposition)?;
+    let args_present = args.is_some();
     Ok(ResolvedWorkflow {
         script,
-        args: input.args.unwrap_or(JsonValue::Null),
-        resume_from_run_id: input.resume_from_run_id,
+        args: args.unwrap_or(JsonValue::Null),
+        args_present,
+        resume_from_run_id,
         origin,
         shadows_existing,
         composition,
@@ -226,6 +274,9 @@ pub(crate) async fn read_explicit_path(
     raw_path: &str,
     cwd: &AbsolutePathBuf,
 ) -> Result<(String, AbsolutePathBuf), WorkflowResolveError> {
+    if raw_path.trim().is_empty() {
+        return Err(WorkflowResolveError::EmptyScriptPath);
+    }
     if cfg!(windows) && raw_path.starts_with("\\\\") {
         return Err(WorkflowResolveError::InvalidName);
     }
@@ -250,6 +301,24 @@ pub(crate) async fn resolve_named(
     codex_home: &AbsolutePathBuf,
     plugin_roots: &[PluginWorkflowRoot],
 ) -> Result<(String, WorkflowOrigin, bool), WorkflowResolveError> {
+    let claude_personal_workflows = claude_personal_workflows_dir(cwd);
+    resolve_named_with_claude_personal_dir(
+        name,
+        cwd,
+        codex_home,
+        plugin_roots,
+        claude_personal_workflows.as_deref(),
+    )
+    .await
+}
+
+async fn resolve_named_with_claude_personal_dir(
+    name: &str,
+    cwd: &AbsolutePathBuf,
+    codex_home: &AbsolutePathBuf,
+    plugin_roots: &[PluginWorkflowRoot],
+    claude_personal_workflows: Option<&Path>,
+) -> Result<(String, WorkflowOrigin, bool), WorkflowResolveError> {
     validate_name(name)?;
     let mut selected =
         bundled::get(name).map(|source| (source.to_string(), WorkflowOrigin::Bundled));
@@ -260,7 +329,7 @@ pub(crate) async fn resolve_named(
             .iter()
             .filter(|plugin| plugin.namespace == namespace)
         {
-            (selected, shadows_existing) = choose_saved(
+            let choice = choose_saved(
                 selected,
                 shadows_existing,
                 &plugin.workflows_dir,
@@ -268,10 +337,13 @@ pub(crate) async fn resolve_named(
                 SavedWorkflowSource::Plugin(namespace),
             )
             .await?;
+            selected = choice.selected;
+            shadows_existing = choice.shadows_existing;
         }
     }
 
-    (selected, shadows_existing) = choose_saved(
+    // Personal scope: Codex-native workflows win over the Claude compatibility directory.
+    let codex_personal = choose_saved(
         selected,
         shadows_existing,
         &codex_home.join("workflows"),
@@ -279,11 +351,29 @@ pub(crate) async fn resolve_named(
         SavedWorkflowSource::File,
     )
     .await?;
+    let codex_personal_found = codex_personal.found;
+    selected = codex_personal.selected;
+    shadows_existing = codex_personal.shadows_existing;
 
+    if !codex_personal_found && let Some(claude_personal_workflows) = claude_personal_workflows {
+        let claude_personal = choose_saved(
+            selected,
+            shadows_existing,
+            claude_personal_workflows,
+            name,
+            SavedWorkflowSource::File,
+        )
+        .await?;
+        selected = claude_personal.selected;
+        shadows_existing = claude_personal.shadows_existing;
+    }
+
+    // Project scope overrides personal scope. Apply root -> cwd so the nearest
+    // directory wins, and at each level prefer .codex over .claude.
     let mut ancestors = cwd.ancestors().collect::<Vec<_>>();
     ancestors.reverse();
     for ancestor in ancestors {
-        (selected, shadows_existing) = choose_saved(
+        let codex = choose_saved(
             selected,
             shadows_existing,
             &ancestor.join(".codex/workflows"),
@@ -291,11 +381,53 @@ pub(crate) async fn resolve_named(
             SavedWorkflowSource::File,
         )
         .await?;
+        let codex_found = codex.found;
+        selected = codex.selected;
+        shadows_existing = codex.shadows_existing;
+        if codex_found {
+            continue;
+        }
+
+        let claude = choose_saved(
+            selected,
+            shadows_existing,
+            &ancestor.join(".claude/workflows"),
+            name,
+            SavedWorkflowSource::File,
+        )
+        .await?;
+        selected = claude.selected;
+        shadows_existing = claude.shadows_existing;
     }
 
     selected
         .map(|(source, origin)| (source, origin, shadows_existing))
         .ok_or_else(|| WorkflowResolveError::NotFound(name.to_string()))
+}
+
+fn claude_personal_workflows_dir(cwd: &AbsolutePathBuf) -> Option<AbsolutePathBuf> {
+    claude_personal_workflows_dir_from(
+        cwd,
+        std::env::var_os("CLAUDE_CONFIG_DIR"),
+        AbsolutePathBufGuard::home_directory(),
+    )
+}
+
+fn claude_personal_workflows_dir_from(
+    cwd: &AbsolutePathBuf,
+    claude_config_dir: Option<std::ffi::OsString>,
+    home_dir: Option<PathBuf>,
+) -> Option<AbsolutePathBuf> {
+    match claude_config_dir.filter(|value| !value.is_empty()) {
+        Some(config_dir) => Some(cwd.join(PathBuf::from(config_dir)).join("workflows")),
+        None => home_dir.map(|home| cwd.join(home).join(".claude/workflows")),
+    }
+}
+
+struct SavedWorkflowChoice {
+    selected: Option<(String, WorkflowOrigin)>,
+    shadows_existing: bool,
+    found: bool,
 }
 
 async fn choose_saved(
@@ -304,11 +436,15 @@ async fn choose_saved(
     root: &Path,
     name: &str,
     source_kind: SavedWorkflowSource<'_>,
-) -> Result<(Option<(String, WorkflowOrigin)>, bool), WorkflowResolveError> {
+) -> Result<SavedWorkflowChoice, WorkflowResolveError> {
     let js_path = root.join(format!("{name}.js"));
     if let Some(source) = read_workflow_file(&js_path).await? {
         let absolute = AbsolutePathBuf::try_from(js_path.clone())
             .map_err(|_| WorkflowResolveError::NotFound(js_path.display().to_string()))?;
+        let shadows_existing = shadows_existing
+            || current
+                .as_ref()
+                .is_some_and(|(_, origin)| origin_path(origin) != Some(js_path.as_path()));
         let origin = match source_kind {
             SavedWorkflowSource::File => WorkflowOrigin::File { path: absolute },
             SavedWorkflowSource::Plugin(namespace) => WorkflowOrigin::Plugin {
@@ -316,10 +452,11 @@ async fn choose_saved(
                 path: absolute,
             },
         };
-        return Ok((
-            Some((source, origin)),
-            shadows_existing || current.is_some(),
-        ));
+        return Ok(SavedWorkflowChoice {
+            selected: Some((source, origin)),
+            shadows_existing,
+            found: true,
+        });
     }
 
     for extension in ["mjs", "cjs", "ts"] {
@@ -330,7 +467,18 @@ async fn choose_saved(
             ));
         }
     }
-    Ok((current, shadows_existing))
+    Ok(SavedWorkflowChoice {
+        selected: current,
+        shadows_existing,
+        found: false,
+    })
+}
+
+fn origin_path(origin: &WorkflowOrigin) -> Option<&Path> {
+    match origin {
+        WorkflowOrigin::File { path } | WorkflowOrigin::Plugin { path, .. } => Some(path.as_path()),
+        WorkflowOrigin::Inline | WorkflowOrigin::Bundled => None,
+    }
 }
 
 async fn read_workflow_file(path: &Path) -> Result<Option<String>, WorkflowResolveError> {

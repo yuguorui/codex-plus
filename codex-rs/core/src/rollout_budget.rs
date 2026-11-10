@@ -112,6 +112,10 @@ impl RolloutBudget {
         );
     }
 
+    pub(crate) fn enforce_limit(&self) -> bool {
+        self.lock().is_none_or(|state| state.config.enforce_limit)
+    }
+
     pub(crate) fn token_snapshot(&self) -> Option<(u64, u64)> {
         let state = self.lock()?;
         let total = u64::try_from(state.config.limit_tokens).ok()?;

@@ -27,6 +27,28 @@ fn workflow_tool_text_keeps_core_contracts_focused() {
             .as_deref()
             .is_some_and(|description| description.contains("pass structured JSON directly"))
     );
+    for field in ["title", "description"] {
+        assert!(
+            properties[field]
+                .description
+                .as_deref()
+                .is_some_and(|description| {
+                    description.contains("Accepted for compatibility and ignored")
+                }),
+            "{field} should document Claude-compatible ignored input"
+        );
+    }
+    assert!(
+        properties["scriptPath"].description.as_deref().is_some_and(
+            |description| description.contains("Takes precedence over script and name")
+        )
+    );
+    assert!(
+        properties["script"]
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("scriptPath takes precedence"))
+    );
     let output_schema = spec
         .output_schema
         .expect("Workflow output schema")

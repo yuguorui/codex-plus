@@ -25,6 +25,7 @@ let __wfNextChildInvocation = 0;
 let __wfRunTokens = 0;
 let __wfPhaseIndex = __wfInitialPhaseIndex ?? undefined;
 let __wfPhaseTitle = __wfInitialPhaseTitle ?? undefined;
+let __wfChildPhaseSet = false;
 const __wfHostNotify = globalThis.notify;
 const __wfHostAgent = globalThis.tools.workflow_agent;
 const __wfHostChild = globalThis.tools.workflow_child;
@@ -126,6 +127,12 @@ function __wfChildInvocation() {
   const scope = __wfHostContinuationScope();
   if (scope === undefined) return `workflow:${__wfNextChildInvocation++}`;
   return `${scope.path}/workflow:${scope.nextChild++}`;
+}
+
+function __wfPhaseModel(phaseIndex) {
+  if (phaseIndex === undefined || phaseIndex === null) return undefined;
+  const model = __wfPhaseModels[phaseIndex];
+  return typeof model === "string" && model.length > 0 ? model : undefined;
 }
 
 function __wfResolvePhase(title, declareIfNew = false) {
@@ -299,6 +306,55 @@ function __wfNamedError(name, message) {
   const error = new Error(message);
   Object.defineProperty(error, "name", { value: name });
   return error;
+}
+
+const __wfRunErrorPrefix = "WorkflowRunError: ";
+const __wfAgentErrorPrefix = "WorkflowAgentError: ";
+let __wfRunLevelFailure = null;
+
+function __wfRunLevelError(message) {
+  const text = String(message);
+  const error = __wfNamedError(
+    "WorkflowRunError",
+    text.startsWith(__wfRunErrorPrefix)
+      ? text.slice(__wfRunErrorPrefix.length)
+      : text,
+  );
+  if (__wfRunLevelFailure === null) __wfRunLevelFailure = error;
+  return error;
+}
+
+function __wfIsRunLevelError(error) {
+  return error !== null && typeof error === "object" && error.name === "WorkflowRunError";
+}
+
+function __wfHostError(error) {
+  if (__wfIsRunLevelError(error)) {
+    if (__wfRunLevelFailure === null) __wfRunLevelFailure = error;
+    return error;
+  }
+  const message = __wfErrorText(error);
+  if (message.startsWith(__wfAgentErrorPrefix)) {
+    return __wfNamedError("WorkflowAgentError", message.slice(__wfAgentErrorPrefix.length));
+  }
+  if (message.startsWith(__wfRunErrorPrefix)) return __wfRunLevelError(message);
+  // Journal, artifact, persistence, and limiter failures are run-level too;
+  // they cannot safely be converted into a missing agent result.
+  return __wfRunLevelError(message);
+}
+
+function __wfBuildBudget() {
+  return Object.freeze({
+    total: __wfBudgetTotal,
+    spent() {
+      return __wfBudgetInitialSpent + __wfRunTokens;
+    },
+    remaining() {
+      const total = __wfBudgetTotal;
+      if (total === null) return Infinity;
+      return Math.max(0, total - (__wfBudgetInitialSpent + __wfRunTokens));
+    },
+  });
 }
 
 function __wfUtf8ByteLength(value) {
@@ -489,7 +545,11 @@ async function __wfPrepareAgentInputs(options) {
       artifacts: state.artifacts,
       negativeZeros: state.negativeZeros,
     };
-    reference = await __wfHostInputArtifact({ descriptor });
+    try {
+      reference = await __wfHostInputArtifact({ descriptor });
+    } catch (error) {
+      throw __wfHostError(error);
+    }
     if (value !== null && typeof value === "object") {
       preparedObjects.set(value, reference);
     }
@@ -535,15 +595,28 @@ function __wfBuildApi() {
       if (value !== undefined) __wfEnsureProgressText(field, value);
     }
     let effectiveOptions = __wfAgentOptions(options);
+    const explicitPhase = effectiveOptions.phase;
     if (__wfChildMode) {
-      effectiveOptions.phase = __wfPhaseTitle;
-    } else if (effectiveOptions.phase === undefined && __wfPhaseTitle !== undefined) {
+      if (explicitPhase === undefined) effectiveOptions.phase = __wfPhaseTitle;
+    } else if (explicitPhase === undefined && __wfPhaseTitle !== undefined) {
       effectiveOptions.phase = __wfPhaseTitle;
     }
-    const phaseTitle = effectiveOptions.phase;
-    const phaseIndex = __wfChildMode
-      ? __wfPhaseIndex
-      : __wfResolvePhase(phaseTitle, true);
+    let phaseTitle;
+    let phaseIndex;
+    if (__wfChildMode && explicitPhase === undefined) {
+      phaseTitle = __wfPhaseTitle;
+      phaseIndex = __wfPhaseIndex;
+    } else {
+      phaseTitle = effectiveOptions.phase;
+      phaseIndex = __wfResolvePhase(phaseTitle, true);
+    }
+    if (
+      (!__wfChildMode || explicitPhase !== undefined || __wfChildPhaseSet) &&
+      (effectiveOptions.model === undefined || effectiveOptions.model === null)
+    ) {
+      const phaseModel = __wfPhaseModel(phaseIndex);
+      if (phaseModel !== undefined) effectiveOptions.model = phaseModel;
+    }
     const invocation = __wfAgentInvocation();
     effectiveOptions = await __wfPrepareAgentInputs(effectiveOptions);
     let response;
@@ -558,8 +631,7 @@ function __wfBuildApi() {
         resultMode,
       });
     } catch (error) {
-      const message = __wfErrorText(error);
-      throw new Error(message);
+      throw __wfHostError(error);
     }
     __wfRunTokens += response.tokens || 0;
     const value = __wfDeepFreeze(response.value);
@@ -602,8 +674,18 @@ function __wfBuildApi() {
       Promise.resolve().then(() => __wfWithInvocationScope(scopes[index], thunk))
     ));
     const failures = settled
-      .map((entry, index) => entry.status === "rejected" ? { index, reason: entry.reason } : null)
+      .map((entry, index) => {
+        if (entry.status === "rejected") return { index, reason: entry.reason };
+        if (options.requireAll && entry.value === null) {
+          return { index, reason: "agent returned null" };
+        }
+        return null;
+      })
       .filter(Boolean);
+    const runLevelFailure = failures.find(({ reason }) => __wfIsRunLevelError(reason));
+    if (runLevelFailure !== undefined) {
+      throw runLevelFailure.reason;
+    }
     if (options.requireAll && failures.length > 0) {
       const details = failures.map(({ index, reason }) =>
         `[${index}] ${__wfTruncateUtf8(__wfErrorText(reason), 128, "...")}`
@@ -613,7 +695,7 @@ function __wfBuildApi() {
         __wfMaxParallelErrorBytes,
         "...",
       );
-      throw __wfNamedError("WorkflowParallelError", message);
+      throw __wfRunLevelError(message);
     }
     return settled.map((entry, index) => {
       if (entry.status === "fulfilled") return entry.value;
@@ -644,6 +726,12 @@ function __wfBuildApi() {
       }
       return previous;
     }));
+    const runLevelFailure = settled.find((entry) =>
+      entry.status === "rejected" && __wfIsRunLevelError(entry.reason)
+    );
+    if (runLevelFailure !== undefined) {
+      throw runLevelFailure.reason;
+    }
     return settled.map((entry, index) => {
       if (entry.status === "fulfilled") return entry.value;
       log(`pipeline[${index}] failed: ${__wfErrorText(entry.reason)}`);
@@ -656,7 +744,12 @@ function __wfBuildApi() {
       throw new TypeError("phase() expects a non-empty string");
     }
     __wfEnsureProgressText("workflow phase title", title);
-    if (__wfChildMode) return;
+    if (__wfChildMode) {
+      __wfPhaseIndex = __wfResolvePhase(title);
+      __wfPhaseTitle = title;
+      __wfChildPhaseSet = true;
+      return;
+    }
     __wfPhaseIndex = __wfResolvePhase(title);
     __wfPhaseTitle = title;
     __wfNotify({ type: "workflow_phase", index: __wfPhaseIndex, title, kind: "active" });
@@ -666,7 +759,9 @@ function __wfBuildApi() {
     __wfNotify({ type: "workflow_log", message: String(message) });
   }
 
-  function workflow(nameOrRef, childArgs = null) {
+  function workflow(nameOrRef, ...rest) {
+    const argsPresent = rest.length > 0;
+    const childArgs = argsPresent ? rest[0] : null;
     const promise = (async () => {
       if (__wfChildMode) {
         throw new Error("call workflow() from the root workflow");
@@ -677,11 +772,12 @@ function __wfBuildApi() {
           invocationId: __wfChildInvocation(),
           nameOrRef: __wfSanitize(nameOrRef, __wfValueSanitizeLimits),
           args: __wfSanitize(childArgs, __wfValueSanitizeLimits),
+          argsPresent,
           phaseIndex: __wfPhaseIndex ?? null,
           phaseTitle: __wfPhaseTitle ?? null,
         });
       } catch (error) {
-        throw new Error(__wfErrorText(error));
+        throw __wfHostError(error);
       }
       __wfRunTokens += response.tokens || 0;
       const value = __wfDeepFreeze(response.value);

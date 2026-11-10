@@ -1,4 +1,5 @@
 use super::*;
+use crate::service::PersistedWorkflowBudget;
 use codex_protocol::workflow::WorkflowTaskStatus;
 use pretty_assertions::assert_eq;
 
@@ -19,6 +20,11 @@ fn snapshot(workflow_name: &str, summary: &str, error: Option<&str>) -> Workflow
             .unwrap()
             .join("workflow.js"),
         args: serde_json::Value::Null,
+        args_present: true,
+        budget: PersistedWorkflowBudget {
+            recorded: true,
+            ..Default::default()
+        },
         result_artifact: None,
         output_file: codex_utils_absolute_path::AbsolutePathBuf::try_from(std::env::temp_dir())
             .unwrap()

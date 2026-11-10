@@ -24,6 +24,7 @@ use codex_protocol::workflow::WorkflowProgressItem;
 use codex_protocol::workflow::WorkflowStartedEvent;
 use codex_protocol::workflow::WorkflowTaskStatus;
 use codex_protocol::workflow::WorkflowUsage;
+use codex_tools::ToolTokenBudget;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use codex_workflow::ValidatedWorkflowScript;
@@ -34,6 +35,7 @@ use codex_workflow::WorkflowExecutionError;
 use codex_workflow::WorkflowGlobalConcurrency;
 use codex_workflow::WorkflowRunOutcome;
 use codex_workflow::WorkflowRuntimeConfig;
+use codex_workflow::WorkflowTokenBudget;
 use codex_workflow::WorkflowTokenUsage;
 use codex_workflow::execute_workflow;
 use codex_workflow::serialize_workflow_result;
@@ -190,6 +192,15 @@ pub struct WorkflowTaskSnapshot {
     pub script_path: AbsolutePathBuf,
     #[serde(default)]
     pub args: JsonValue,
+    /// Whether the launch supplied an `args` field at all. Older snapshots
+    /// predate explicit `undefined` arguments and always restored with the
+    /// field present, so a missing value defaults to `true`.
+    #[serde(default = "default_true")]
+    pub args_present: bool,
+    /// Host budget frozen at launch. `recorded` is false for snapshots created
+    /// before budget metadata was persisted.
+    #[serde(default)]
+    pub budget: PersistedWorkflowBudget,
     pub result_artifact: Option<WorkflowResultArtifact>,
     /// Canonical path to this serialized snapshot.
     pub output_file: AbsolutePathBuf,
@@ -201,6 +212,52 @@ pub struct WorkflowTaskSnapshot {
     pub started_at: i64,
     pub completed_at: Option<i64>,
     pub script_sha256: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedWorkflowBudget {
+    /// True when the launch recorded budget metadata. A missing field in an
+    /// older snapshot restores as `false` so active runs are not silently
+    /// resumed without an enforced budget.
+    #[serde(default)]
+    pub recorded: bool,
+    /// Zero means no token target.
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default)]
+    pub spent: u64,
+    #[serde(default = "default_true")]
+    pub enforce_limit: bool,
+}
+
+impl Default for PersistedWorkflowBudget {
+    fn default() -> Self {
+        Self {
+            recorded: false,
+            total: 0,
+            spent: 0,
+            enforce_limit: true,
+        }
+    }
+}
+
+impl WorkflowTokenBudget for PersistedWorkflowBudget {
+    fn total(&self) -> u64 {
+        self.total
+    }
+
+    fn spent(&self) -> u64 {
+        self.spent
+    }
+
+    fn enforce_limit(&self) -> bool {
+        self.enforce_limit
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -695,6 +752,8 @@ struct WorkflowTaskStart {
     environments: Option<Vec<TurnEnvironmentSelection>>,
     captured_environments: Option<AgentExecutionEnvironmentSnapshot>,
     environment_location: WorkflowEnvironmentLocation,
+    token_budget: Option<Arc<dyn WorkflowTokenBudget>>,
+    args_present: bool,
 }
 
 struct QueuedWorkflowEventSink {
@@ -762,6 +821,39 @@ pub(crate) struct WorkflowLaunchRequest {
     pub(crate) captured_environments: Option<AgentExecutionEnvironmentSnapshot>,
     pub(crate) environment_location: WorkflowEnvironmentLocation,
     pub(crate) declared_inputs: WorkflowDeclaredInputs,
+    pub(crate) token_budget: Option<Arc<dyn ToolTokenBudget>>,
+}
+
+/// Adapts the host's live tool token budget to the workflow runtime's read-only budget view.
+pub(crate) struct ToolTokenBudgetAdapter {
+    budget: Arc<dyn ToolTokenBudget>,
+}
+
+impl ToolTokenBudgetAdapter {
+    pub(crate) fn new(budget: Arc<dyn ToolTokenBudget>) -> Self {
+        Self { budget }
+    }
+}
+
+impl WorkflowTokenBudget for ToolTokenBudgetAdapter {
+    fn total(&self) -> u64 {
+        self.budget.total()
+    }
+
+    fn spent(&self) -> u64 {
+        self.budget.spent()
+    }
+
+    fn enforce_limit(&self) -> bool {
+        self.budget.enforce_limit()
+    }
+}
+
+pub(crate) fn adapt_tool_token_budget(
+    budget: Option<Arc<dyn ToolTokenBudget>>,
+) -> Option<Arc<dyn WorkflowTokenBudget>> {
+    budget
+        .map(|budget| Arc::new(ToolTokenBudgetAdapter::new(budget)) as Arc<dyn WorkflowTokenBudget>)
 }
 
 struct WorkflowResumeState {
@@ -1114,6 +1206,18 @@ impl WorkflowService {
                 }
                 continue;
             };
+            if !snapshot.budget.recorded {
+                pause_unadoptable(
+                    &mut snapshot,
+                    "workflow snapshot predates persisted token-budget metadata; resume via the Workflow tool to establish a new budget"
+                        .to_string(),
+                );
+                if let Err(error) = persist_terminal_task(&task, &snapshot).await {
+                    tracing::warn!(%error, "failed to persist paused workflow restoration");
+                }
+                continue;
+            }
+            let restored_budget = Arc::new(snapshot.budget) as Arc<dyn WorkflowTokenBudget>;
             while !self.emit_started(&snapshot, thread_id).await {
                 tokio::time::sleep(SNAPSHOT_PERSIST_INTERVAL).await;
             }
@@ -1131,6 +1235,10 @@ impl WorkflowService {
                 environments: restored_environments,
                 captured_environments: None,
                 environment_location: WorkflowEnvironmentLocation::Local,
+                // Restored runs use the recorded host spend; workflow tokens
+                // accumulated since the snapshot are added by the runtime.
+                token_budget: Some(restored_budget),
+                args_present: snapshot.args_present,
             });
         }
         self.cache
@@ -1154,7 +1262,9 @@ impl WorkflowService {
             captured_environments,
             environment_location,
             declared_inputs,
+            token_budget,
         } = request;
+        let token_budget = adapt_tool_token_budget(token_budget);
         self.register_thread_codex_home(thread_id, &config.codex_home);
         let resume_run_id = resolved.resume_from_run_id.clone();
         let mut resume_reservation = match resume_run_id.as_deref() {
@@ -1190,6 +1300,7 @@ impl WorkflowService {
                 .execution_context
                 .replay_identity_matches(&execution_context)
                 && resume.snapshot.args == resolved.args
+                && resume.snapshot.args_present == resolved.args_present
         });
 
         let run_id =
@@ -1222,6 +1333,11 @@ impl WorkflowService {
         let output_file = snapshots_dir.join(format!("{run_id}.json"));
         let summary = format!("Running workflow {}", resolved.script.meta.name);
         let started_at = unix_seconds();
+        let resumed_usage = resume_state
+            .as_ref()
+            .filter(|_| replay_identity_matches)
+            .map(|resume| resume.snapshot.usage.clone())
+            .unwrap_or_default();
         let snapshot = WorkflowTaskSnapshot {
             thread_id: thread_id.to_string(),
             turn_id: turn_id.clone(),
@@ -1234,11 +1350,20 @@ impl WorkflowService {
             transcript_dir: transcript_dir.clone(),
             script_path: script_path.clone(),
             args: resolved.args.clone(),
+            args_present: resolved.args_present,
+            budget: PersistedWorkflowBudget {
+                recorded: true,
+                total: token_budget.as_ref().map_or(0, |budget| budget.total()),
+                spent: token_budget.as_ref().map_or(0, |budget| budget.spent()),
+                enforce_limit: token_budget
+                    .as_ref()
+                    .is_none_or(|budget| budget.enforce_limit()),
+            },
             result_artifact: None,
             output_file: output_file.clone(),
             progress: Vec::new(),
             progress_version: 0,
-            usage: WorkflowUsage::default(),
+            usage: resumed_usage,
             failures: Vec::new(),
             error: None,
             started_at,
@@ -1311,6 +1436,8 @@ impl WorkflowService {
             environments,
             captured_environments,
             environment_location,
+            token_budget,
+            args_present: resolved.args_present,
         });
 
         Ok(WorkflowLaunch {
@@ -1339,6 +1466,8 @@ impl WorkflowService {
             environments,
             captured_environments,
             environment_location,
+            token_budget,
+            args_present,
         } = start;
         let service = self.clone();
         tokio::spawn(async move {
@@ -1375,6 +1504,8 @@ impl WorkflowService {
             );
             let mut runtime_config = WorkflowRuntimeConfig {
                 initial_usage,
+                budget: token_budget,
+                args_present,
                 child_resolver,
                 journal: Some(journal),
                 input_artifact_store,
@@ -1649,7 +1780,7 @@ impl WorkflowService {
         &self,
         thread_id: ThreadId,
         run_id: &str,
-    ) -> Result<JsonValue, WorkflowServiceError> {
+    ) -> Result<(JsonValue, bool), WorkflowServiceError> {
         let codex_home = self
             .thread_codex_home(thread_id)
             .ok_or(WorkflowServiceError::NotFound)?;
@@ -1663,7 +1794,7 @@ impl WorkflowService {
         ) {
             return Err(WorkflowServiceError::StillRunning);
         }
-        Ok(loaded.snapshot.args)
+        Ok((loaded.snapshot.args, loaded.snapshot.args_present))
     }
 
     pub(crate) async fn control_is_open(

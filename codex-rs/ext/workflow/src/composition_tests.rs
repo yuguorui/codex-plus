@@ -400,6 +400,7 @@ async fn restored_resolver_uses_frozen_source_after_original_file_changes() {
         .resolve_child(WorkflowChildRequest {
             name_or_ref: json!({ "scriptPath": "child.js" }),
             args: args.clone(),
+            args_present: true,
         })
         .await
         .unwrap();

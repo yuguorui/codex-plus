@@ -62,6 +62,8 @@ const AGENT_OPTION_NAMES: &[&str] = &[
     "isolation",
     "agentType",
     "stallMs",
+    "disallowedTools",
+    "bashCommandClamp",
     "inputs",
 ];
 
@@ -475,6 +477,7 @@ fn invalid_agent_option_value(field: &str, value: &Expression<'_>) -> Option<&'s
         "effort" => static_enum_option(value, WORKFLOW_EFFORTS),
         "isolation" => static_enum_option(value, WORKFLOW_ISOLATIONS),
         "stallMs" => static_stall_ms_option(value),
+        "disallowedTools" | "bashCommandClamp" => static_string_array_option(value),
         "schema" => matches!(value, Expression::ArrayExpression(_))
             .then_some("schema must be a JSON object"),
         _ => None,
@@ -512,6 +515,69 @@ fn static_enum_option(
         }
         _ => static_string_option(value),
     }
+}
+
+fn static_string_array_option(value: &Expression<'_>) -> Option<&'static str> {
+    let Expression::ArrayExpression(array) = value else {
+        return match value {
+            Expression::NullLiteral(_) => None,
+            Expression::StringLiteral(_)
+            | Expression::TemplateLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::BigIntLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::RegExpLiteral(_)
+            | Expression::ObjectExpression(_)
+            | Expression::ArrowFunctionExpression(_)
+            | Expression::ClassExpression(_)
+            | Expression::FunctionExpression(_)
+            | Expression::NewExpression(_)
+            | Expression::JSXElement(_)
+            | Expression::JSXFragment(_) => {
+                Some("this agent option must be an array of non-empty strings")
+            }
+            _ => None,
+        };
+    };
+    for element in &array.elements {
+        let Some(element) = element.as_expression() else {
+            continue;
+        };
+        match element.without_parentheses() {
+            Expression::StringLiteral(literal) if literal.value.trim().is_empty() => {
+                return Some("this agent option must contain non-empty strings");
+            }
+            Expression::TemplateLiteral(template)
+                if template.expressions.is_empty()
+                    && template.quasis.iter().all(|quasi| {
+                        quasi
+                            .value
+                            .cooked
+                            .as_ref()
+                            .is_none_or(|value| value.trim().is_empty())
+                    }) =>
+            {
+                return Some("this agent option must contain non-empty strings");
+            }
+            Expression::BooleanLiteral(_)
+            | Expression::NullLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::BigIntLiteral(_)
+            | Expression::RegExpLiteral(_)
+            | Expression::ArrayExpression(_)
+            | Expression::ObjectExpression(_)
+            | Expression::ArrowFunctionExpression(_)
+            | Expression::ClassExpression(_)
+            | Expression::FunctionExpression(_)
+            | Expression::NewExpression(_)
+            | Expression::JSXElement(_)
+            | Expression::JSXFragment(_) => {
+                return Some("this agent option must be an array of non-empty strings");
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn static_stall_ms_option(value: &Expression<'_>) -> Option<&'static str> {

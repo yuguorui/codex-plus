@@ -2,6 +2,7 @@ use super::*;
 use crate::agent::WorkflowEnvironmentLocation;
 use crate::discovery::ResolvedWorkflow;
 use crate::discovery::WorkflowOrigin;
+use crate::service::PersistedWorkflowBudget;
 use crate::service::WorkflowLaunchRequest;
 use crate::wait_text::COMPACT_WAIT_TEXT_MAX_BYTES;
 use codex_agent_extension::AgentRunner;
@@ -1093,6 +1094,11 @@ fn snapshot(run_id: &str, started_at: i64, status: WorkflowTaskStatus) -> Workfl
         transcript_dir: root.join("transcript"),
         script_path: root.join("workflow.js"),
         args: JsonValue::Null,
+        args_present: true,
+        budget: PersistedWorkflowBudget {
+            recorded: true,
+            ..Default::default()
+        },
         result_artifact: None,
         output_file: root.join("workflow.json"),
         progress: Vec::new(),
@@ -1207,6 +1213,7 @@ impl WaitFixture {
                 resolved: ResolvedWorkflow {
                     script,
                     args: JsonValue::Null,
+                    args_present: true,
                     resume_from_run_id: None,
                     origin: WorkflowOrigin::Inline,
                     shadows_existing: false,
@@ -1217,6 +1224,7 @@ impl WaitFixture {
                 captured_environments: None,
                 environment_location: WorkflowEnvironmentLocation::Local,
                 declared_inputs: Default::default(),
+                token_budget: None,
             })
             .await
             .unwrap();

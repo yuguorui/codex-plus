@@ -2639,6 +2639,7 @@ dependencies = [
  "codex-utils-redacted-string",
  "codex-websocket-auth",
  "codex-windows-sandbox",
+ "codex-workflow",
  "core_test_support",
  "crossterm",
  "flate2",

@@ -125,6 +125,7 @@ impl WorkflowChildResolver for FrozenWorkflowChildResolver {
             Ok(ResolvedWorkflowChild {
                 script: child.script.clone(),
                 args: request.args,
+                args_present: request.args_present,
             })
         })
     }

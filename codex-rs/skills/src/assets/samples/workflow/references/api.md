@@ -9,12 +9,14 @@ Workflow accepts one of these sources:
   `pluginName:workflowName`.
 - `scriptPath`: a persisted script from an earlier invocation.
 
-Provide exactly one source field. When the selected execution environment
-filesystem is foreign to the app-server host, use an inline `script`. Automatic
+When several source fields are present, `scriptPath` takes precedence over `script`, and `script`
+takes precedence over `name`. When the selected execution environment filesystem is foreign to the
+app-server host, use an inline `script`. Automatic
 review handles complete actions directly and routes larger actions according to the configured
 review policy.
 
 Pass `args` as a JSON value. The script receives that value unchanged through the global `args`.
+When `args` is omitted, the global is `undefined`; explicit `null` stays `null`.
 Every resolved script is persisted, and the launch result includes its `scriptPath` and `runId`.
 The launch remains asynchronous. When the owning model's next critical-path step needs one final
 result, call `WaitWorkflow` with that `runId`. Use `WaitWorkflows` with `mode: "any"` or
@@ -35,9 +37,8 @@ terminal result is included by `WaitWorkflow`. `ListWorkflowAgents` exposes each
 stable index, invocation identity, and `agentId`; call `wait_agent` with the `agentId` of a completed
 agent when its intermediate detail is useful. Call `ReadWorkflowResult` only for the terminal
 Workflow result, optionally choosing `maxBytes`; concatenate `chunk` values and continue from
-`nextOffset` while `complete` is false. Use `StopWorkflow` for an active run. A stalled agent marked as awaiting a
-decision can be controlled with `RetryWorkflowAgent` or `SkipWorkflowAgent` and its zero-based
-agent index. An active retry affects only that attempt; retrying a settled agent reruns that
+`nextOffset` while `complete` is false. Use `StopWorkflow` for an active run. A running agent can
+be controlled with `RetryWorkflowAgent` or `SkipWorkflowAgent` and its zero-based agent index. An active retry affects only that attempt; retrying a settled agent reruns that
 invocation and every later recorded invocation in the current execution. Pass
 `{"dryRun": true}` to `RetryWorkflowAgent` to preview those counts without changing the run.
 Owning-model orchestration tools remain with the owning agent.
@@ -67,7 +68,8 @@ traversal, matched symlink files, and unmatched patterns are rejected; glob walk
 directory symlinks. Declared inputs require exactly one selected execution environment. The limits
 are 64 patterns, 512 bytes per pattern, 256 files, 256 KiB per file, and 2 MiB total. Glob expansion
 examines at most 4,096 entries, 1,024 directories, and 64 directory levels, so prefer narrow scan
-roots. Use phase titles consistently between `meta.phases`, `phase()`, and agent options.
+roots. Use phase titles consistently between `meta.phases`, `phase()`, and agent options. A phase
+may declare a `model`; agents in that phase inherit it unless they pass an explicit `model`.
 
 The body is JavaScript in an async context, so top-level `await` is available. Finish with
 `return value`; the value must be JSON-compatible. The runtime supplies a deterministic,
@@ -76,6 +78,16 @@ boundaries. Supply time, randomness, and other external values through `args` so
 deterministic.
 
 ## Runtime Globals
+
+### `budget`
+
+`budget` is a frozen object with `total`, `spent()`, and `remaining()`. `total` is `null` when the
+host has no token target, and `remaining()` is then `Infinity`. A positive total is enforced before
+each real agent dispatch, including queued and retried attempts; cached journal replays do not
+consume the budget. `spent()` includes the host's shared turn spend snapshot, the persisted workflow
+prefix of a resumed run, and workflow tokens observed by this run. Host spend and workflow tokens
+may use different weighting, so treat `spent()` as the host's budget accounting rather than a direct
+raw-token count.
 
 ### `listInputs()` and `readInput(path)`
 
@@ -107,25 +119,47 @@ Options:
 - `label`: short progress label.
 - `phase`: explicit phase title, especially useful in concurrent work.
 - `schema`: JSON Schema for a validated structured result.
-- `model`: model override; omission inherits the resolved parent model.
+- `model`: model override; omission, `inherit`, or `default` inherits the resolved parent model.
 - `effort`: `low`, `medium`, `high`, `xhigh`, or `max`.
 - `isolation`: `worktree` for a temporary git worktree when parallel agents mutate files.
 - `agentType`: registered custom agent type.
 - `stallMs`: optional timeout with no Codex-visible event and no concrete active work (tool,
   tracked process, or model stream). Use it to catch idle agents rather than long-running silent
   commands.
+- `disallowedTools`: optional string array. Claude tool names are mapped to Codex tools; `Bash`
+  denies `exec_command` and `write_stdin`, `Write`/`Edit` deny `apply_patch`, `Edit`, and
+  `fuzz_view_edit`, `Agent` denies `spawn_agent`, and `*` denies every tool. `mcp__server__tool`
+  matches both sanitized and unsanitized tool spellings under `mcp__server` and the non-prefixed
+  `server` namespace; `mcp__server`, `mcp__server__*`, and `mcp__*` deny exact server namespaces or
+  every namespaced tool. For multi-segment MCP namespaces, use `mcp__<namespace>__*`; a fully
+  qualified `mcp__a__b__tool` spelling is ambiguous because `__` also separates the namespace.
+  Unknown names are denied by their literal tool name. Workflow subagents cannot spawn nested agents
+  in Codex++; the `Agent` mapping is defensive for portable scripts.
+- `bashCommandClamp`: optional string array of `Bash(...)` command rules. The child shell tool
+  fails closed when no rule matches; `Bash`/`Bash(*)` allows every command. Non-wildcard clamps
+  admit one simple command and reject shell composition (`;`, `&`, `|`, redirects, command
+  substitution, and newlines), force a non-login invocation of the default shell, and reject
+  model-selected shells and TTY execution. The clamp also denies `write_stdin`. This is a command
+  guardrail, not a sandbox: zsh may still source `.zshenv`, so combine it with `disallowedTools`
+  and the thread permission policy when the agent must not write files or shell startup
+  configuration.
 - `inputs`: named JSON-compatible values copied from the Workflow isolate. The complete input
   object is validated and participates in journal replay identity. The model prompt carries task
   instructions while `inputs` retains the structured runtime values.
 
-With `schema`, the result is the validated object; otherwise it is final text. A call skipped
-through Workflow control yields `null`, while host-reported failures enter script error handling.
-Default `parallel()` converts a rejected thunk to `null`; use `agentSettled()` when branching on a
-failure's kind and message.
+With `schema`, the result is the validated object; otherwise it is final text. Agent-level
+failures (skip, terminal API error, throttle, block, or ordinary failure) resolve to `null`.
+Exhausted stall retries and exhausted structured-output retries throw from a direct `agent()` call,
+while `parallel()`/`pipeline()` turn those slot failures into `null`. Run-level failures
+(cancellation, token budget exhaustion, and the per-run agent cap) throw, and
+`parallel()`/`pipeline()` rethrow them instead of turning them into `null`. Use `agentSettled()`
+when branching on an agent-level failure's kind and message; it reports `stalled` as a rejected
+envelope.
 Workflow agents inherit the parent's ordinary tools and connected MCP tools; orchestration and
 user messaging stay with the owning agent, and each subagent's final response becomes the function
-result. Stalled calls retry up to three times with exponential backoff, then pause for retry or
-skip.
+result. Stalled calls retry automatically with exponential backoff; after the retry budget a
+direct `agent()` throws, `parallel()`/`pipeline()` turn that slot into `null`, and
+`agentSettled()` returns a `stalled` rejection envelope.
 
 An agent with `inputs` receives `AnalyzeWorkflowInputs`. Each call runs a synchronous pure
 JavaScript function body in a fresh V8 isolate with deep-frozen `globalThis.inputs`, `console` for
@@ -138,9 +172,9 @@ the formal result with `return`; use `console.log` only for diagnostics.
 Runs an agent with the same prompt and options as `agent()`, but always returns an explicit result
 for a completed call. Success is `{status: "fulfilled", value}`. Failure is
 `{status: "rejected", reason: {kind, message}}`, where `kind` is `failed`, `terminalApi`,
-`stalled`, `throttled`, `blocked`, or `skipped`. The result focuses on stable status, value, and
-reason fields. Use this API when the script branches on failure; `agent()` retains its existing
-`null` and exception behavior.
+`structuredOutput`, `stalled`, `throttled`, `blocked`, or `skipped`. The result focuses on stable
+status, value, and reason fields. Use this API when the script branches on agent-level failure;
+run-level failures (cancellation, budget exhaustion, or the agent cap) still throw.
 
 ### `pipeline(items, ...stages)`
 
@@ -232,10 +266,13 @@ Critical synthesis should use `parallel(..., { requireAll: true })` or explicitl
 Report intentional best-effort sampling through `log()`.
 
 After a run stops or fails, invoke Workflow with `scriptPath`, `resumeFromRunId`, and any required
-`args`. Successful agent calls and explicit user skips replay from the journal; other failures are
-retried rather than treated as reusable results. Cache identity includes the prompt, named
-`inputs`, result mode, `schema`, `model`, `effort`, `isolation`, and `agentType`, plus the stable
-invocation identity. Editing the workflow script does not by itself discard matching earlier calls:
+`args`. Successful agent calls replay from the journal; skips and other failures are retried rather
+than treated as reusable results. A call that started but never produced a result re-executes
+without setting the divergence flag, so later successful calls may still replay. A cache miss,
+failure, or changed call sets the divergence flag; every later call then re-executes. Cache
+identity includes the prompt, named
+`inputs`, result mode, `schema`, `model`, `effort`, `isolation`, `agentType`, `disallowedTools`, and
+`bashCommandClamp`, plus the stable invocation identity. Editing the workflow script does not by itself discard matching earlier calls:
 only calls whose prompt, options, inputs, or invocation identity changed re-execute. Labels,
 phases, and stall timeouts are excluded from cache identity.
 Workflow resume additionally requires matching args, declared workspace inputs, execution

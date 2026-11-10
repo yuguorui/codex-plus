@@ -14,8 +14,22 @@ pub use codex_protocol::workflow::WorkflowProgressKind;
 pub const MAX_WORKFLOW_PROGRESS_TEXT_BYTES: usize = 256;
 pub const MAX_WORKFLOW_AGENT_STALL_MS: u64 = 30 * 60 * 1_000;
 
+/// Live token budget supplied by the host for one workflow run.
+pub trait WorkflowTokenBudget: Send + Sync {
+    /// Returns the total token limit, or zero when no limit is configured.
+    fn total(&self) -> u64;
+
+    /// Returns the tokens already spent against the host budget.
+    fn spent(&self) -> u64;
+
+    /// Whether reaching the target is a hard limit or observation-only.
+    fn enforce_limit(&self) -> bool {
+        true
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowMeta {
     pub name: String,
     pub description: String,
@@ -56,7 +70,7 @@ pub struct WorkflowDeclaredInputs {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowPhase {
     pub title: String,
     #[serde(default)]
@@ -76,7 +90,7 @@ pub enum WorkflowEffort {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowAgentOptions {
     #[serde(default)]
     pub label: Option<String>,
@@ -94,6 +108,10 @@ pub struct WorkflowAgentOptions {
     pub agent_type: Option<String>,
     #[serde(default)]
     pub stall_ms: Option<u64>,
+    #[serde(default)]
+    pub disallowed_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub bash_command_clamp: Option<Vec<String>>,
     #[serde(default)]
     pub inputs: Option<BTreeMap<String, crate::WorkflowInputArtifactRef>>,
 }
@@ -146,6 +164,7 @@ pub enum WorkflowAgentFailureKind {
     Stalled,
     Throttled,
     Blocked,
+    StructuredOutput,
     Skipped,
 }
 

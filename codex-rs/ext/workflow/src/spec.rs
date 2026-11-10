@@ -11,14 +11,14 @@ pub(crate) fn workflow_tool_spec(name: &str) -> ToolSpec {
         (
             "script".to_string(),
             JsonSchema::string(Some(
-                "Inline JavaScript workflow beginning with `export const meta = {...}`. Select one source field for each invocation."
+                "Inline JavaScript workflow beginning with `export const meta = {...}`. When multiple source fields are present, scriptPath takes precedence, then script, then name."
                     .to_string(),
             )),
         ),
         (
             "name".to_string(),
             JsonSchema::string(Some(
-                "Built-in workflow, active plugin workflow (`pluginName:workflowName`), or saved workflow discovered from user/project .codex/workflows directories."
+                "Built-in workflow, active plugin workflow (`pluginName:workflowName`), or saved workflow discovered from `$CODEX_HOME/workflows`, personal Claude workflows, and project `.codex/workflows`/`.claude/workflows` directories."
                     .to_string(),
             )),
         ),
@@ -26,7 +26,7 @@ pub(crate) fn workflow_tool_spec(name: &str) -> ToolSpec {
             "args".to_string(),
             JsonSchema {
                 description: Some(
-                    "JSON value exposed verbatim as the workflow global `args`; pass structured JSON directly. Omit it for a new workflow to use null, or with resumeFromRunId to reuse that run's persisted arguments; explicit resume arguments replace them and disable journal replay."
+                    "JSON value exposed verbatim as the workflow global `args`; pass structured JSON directly. Omit it for a new workflow to make `args` undefined (pass explicit null for null), or with resumeFromRunId to reuse that run's persisted arguments and their presence; explicit resume arguments replace them and disable journal replay."
                         .into(),
                 ),
                 ..Default::default()
@@ -35,7 +35,21 @@ pub(crate) fn workflow_tool_spec(name: &str) -> ToolSpec {
         (
             "scriptPath".to_string(),
             JsonSchema::string(Some(
-                "Path to an existing .js workflow. In local execution environments, you may first create or edit this file with ordinary file tools, then invoke it here."
+                "Path to an existing .js workflow. Takes precedence over script and name when present. In local execution environments, you may first create or edit this file with ordinary file tools, then invoke it here."
+                    .to_string(),
+            )),
+        ),
+        (
+            "title".to_string(),
+            JsonSchema::string(Some(
+                "Optional Claude-compatible workflow title. Accepted for compatibility and ignored when resolving or running the workflow."
+                    .to_string(),
+            )),
+        ),
+        (
+            "description".to_string(),
+            JsonSchema::string(Some(
+                "Optional Claude-compatible workflow description. Accepted for compatibility and ignored when resolving or running the workflow."
                     .to_string(),
             )),
         ),

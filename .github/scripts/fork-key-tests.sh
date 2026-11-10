@@ -37,7 +37,10 @@ just test \
   -p codex-tui \
   -E '
     (package(codex-cli) & test(update::tests)) |
+    (package(codex-cli) & test(workflow_cmd::tests)) |
     (package(codex-core) & test(config_schema_matches_fixture)) |
+    (package(codex-core) & test(exec_command_enforces_bash_command_clamp_before_execution)) |
+    (package(codex-core) & test(exec_command_clamp_forces_a_non_login_default_shell)) |
     (package(codex-core) & test(fresh_workflow_subagent_persists_ownership_edge_and_close_status)) |
     (package(codex-core) & test(chat_wire_api_posts_to_chat_completions_and_merges_extra_body)) |
     (package(codex-core) & test(anthropic_wire_api_posts_to_messages_and_merges_extra_body)) |

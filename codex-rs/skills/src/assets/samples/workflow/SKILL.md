@@ -16,16 +16,20 @@ for task instructions. Pass variable data through named `inputs`, especially com
 upstream agent results. Use one synthesis agent with the complete input set, and return the final
 JSON-compatible value from the script.
 Use `agentSettled()` when script logic needs an explicit status and failure kind for branching;
-use `agent()` for its `null` and exception behavior.
+use `agent()` for Claude-compatible behavior: agent-level failures resolve to `null`, while run-level
+failures (cancellation, token budget, or the 1000-agent cap) throw. Use `budget` when a script should
+adapt its fan-out to the host's token target.
 
 Use default fail-soft `parallel()` for independent exploration where missing slots are acceptable.
 Use `parallel(thunks, { requireAll: true })` for critical synthesis fan-in, or explicitly verify the
 result count before continuing, so final synthesis receives every required upstream result.
 
 For a new script, pass it inline to Workflow. For an iteration, edit the persisted `scriptPath` and
-resume the stopped or failed run with `resumeFromRunId`; matching successful earlier calls replay,
-while changed calls and non-skip failures re-execute. Provide exactly one of `script`, `name`, or
-`scriptPath` in each invocation; remote calls use inline `script`.
+resume the stopped or failed run with `resumeFromRunId`; successful calls before the divergence
+point replay, while changed calls, skips, and failures re-execute. After a cache miss, failure, or
+change, every later call re-executes. A call that started without a result re-executes without
+moving the divergence point. If multiple sources are present, `scriptPath` wins over `script`, and
+`script` wins over `name`; remote calls use inline `script`.
 When orchestration logic itself needs workspace text, declare it with bounded `meta.inputs` globs
 and read the frozen contents through `await listInputs()` and `await readInput(path)`. Workflows
 without declared workspace inputs do not scan the workspace. Keep process execution, live

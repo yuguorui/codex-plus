@@ -1,4 +1,5 @@
 use super::*;
+use crate::service::PersistedWorkflowBudget;
 use crate::wait_text::COMPACT_WAIT_TEXT_MAX_BYTES;
 use crate::wait_text::WAIT_ERROR_TEXT_MAX_BYTES;
 use codex_config::LoaderOverrides;
@@ -136,6 +137,11 @@ async fn output_bounds_text_and_returns_the_terminal_result() {
                 transcript_dir: root.join("transcript"),
                 script_path: root.join("workflow.js"),
                 args: JsonValue::Null,
+                args_present: true,
+                budget: PersistedWorkflowBudget {
+                    recorded: true,
+                    ..Default::default()
+                },
                 result_artifact: Some(crate::result_artifact::WorkflowResultArtifact {
                     sha256: "0".repeat(64),
                     bytes: 4,
@@ -252,6 +258,11 @@ fn low_compression_wait_output_stays_below_the_context_item_cap() {
         transcript_dir: root.join("transcript"),
         script_path: root.join("workflow.js"),
         args: JsonValue::Null,
+        args_present: true,
+        budget: PersistedWorkflowBudget {
+            recorded: true,
+            ..Default::default()
+        },
         result_artifact: Some(crate::result_artifact::WorkflowResultArtifact {
             sha256: "0".repeat(64),
             bytes: 4,
@@ -327,6 +338,11 @@ fn failed_run_error_survives_wait_compaction() {
                 transcript_dir: root.join("transcript"),
                 script_path: root.join("workflow.js"),
                 args: JsonValue::Null,
+                args_present: true,
+                budget: PersistedWorkflowBudget {
+                    recorded: true,
+                    ..Default::default()
+                },
                 result_artifact: Some(crate::result_artifact::WorkflowResultArtifact {
                     sha256: "0".repeat(64),
                     bytes: 64_000,
@@ -398,6 +414,11 @@ fn failed_run_with_restore_conflicts_stays_within_the_wait_context_cap() {
             transcript_dir: root.join("transcript"),
             script_path: root.join("workflow.js"),
             args: JsonValue::Null,
+            args_present: true,
+            budget: PersistedWorkflowBudget {
+                recorded: true,
+                ..Default::default()
+            },
             result_artifact: Some(crate::result_artifact::WorkflowResultArtifact {
                 sha256: "0".repeat(64),
                 bytes: 64_000,
@@ -503,6 +524,11 @@ fn written_wait_result_compacts_without_truncating_a_usable_path() {
                 transcript_dir: root.join("transcript"),
                 script_path: root.join("workflow.js"),
                 args: JsonValue::Null,
+                args_present: true,
+                budget: PersistedWorkflowBudget {
+                    recorded: true,
+                    ..Default::default()
+                },
                 result_artifact: Some(crate::result_artifact::WorkflowResultArtifact {
                     sha256: "0".repeat(64),
                     bytes: 4,
@@ -557,6 +583,11 @@ fn interrupted_wait_is_not_reported_as_a_timeout() {
                 transcript_dir: root.join("transcript"),
                 script_path: root.join("workflow.js"),
                 args: JsonValue::Null,
+                args_present: true,
+                budget: PersistedWorkflowBudget {
+                    recorded: true,
+                    ..Default::default()
+                },
                 result_artifact: None,
                 output_file: root.join("workflow.json"),
                 progress: Vec::new(),
@@ -595,6 +626,11 @@ fn paused_wait_is_terminal_without_exposing_a_result() {
         transcript_dir: root.join("transcript"),
         script_path: root.join("workflow.js"),
         args: JsonValue::Null,
+        args_present: true,
+        budget: PersistedWorkflowBudget {
+            recorded: true,
+            ..Default::default()
+        },
         result_artifact: None,
         output_file: root.join("workflow.json"),
         progress: Vec::new(),
@@ -763,6 +799,11 @@ fn small_inline_result_survives_without_a_compaction_round_trip() {
                 transcript_dir: root.join("transcript"),
                 script_path: root.join("workflow.js"),
                 args: JsonValue::Null,
+                args_present: true,
+                budget: PersistedWorkflowBudget {
+                    recorded: true,
+                    ..Default::default()
+                },
                 result_artifact: Some(crate::result_artifact::WorkflowResultArtifact {
                     sha256: "0".repeat(64),
                     bytes: u64::try_from(body.len()).unwrap(),
@@ -833,6 +874,11 @@ fn result_read_failure_is_stubbed_before_the_run_error_is() {
         transcript_dir: root.join("transcript"),
         script_path: root.join("workflow.js"),
         args: JsonValue::Null,
+        args_present: true,
+        budget: PersistedWorkflowBudget {
+            recorded: true,
+            ..Default::default()
+        },
         result_artifact: Some(crate::result_artifact::WorkflowResultArtifact {
             sha256: "0".repeat(64),
             bytes: 4,
@@ -924,6 +970,11 @@ fn identity_text_stays_compacted_when_result_compaction_is_reverted() {
                 transcript_dir: root.join("transcript"),
                 script_path: root.join("workflow.js"),
                 args: JsonValue::Null,
+                args_present: true,
+                budget: PersistedWorkflowBudget {
+                    recorded: true,
+                    ..Default::default()
+                },
                 result_artifact: None,
                 output_file: root.join("workflow.json"),
                 progress: Vec::new(),
